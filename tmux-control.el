@@ -333,6 +333,25 @@ window in the session ends the session and disconnects this client."
    (format "kill-window -t %s:%s" tmux-control--session index))
   (tmux-control--refresh-active-pane))
 
+(defun tmux-control-rename-window (&optional index name)
+  "Rename window INDEX in the current tmux-control session to NAME.
+
+Interactively, prompt with completion for the window and read the new
+name.  Renaming does not change which window is active, so the live view
+is left untouched."
+  (interactive
+   (let* ((index (tmux-control--read-window-index "Rename window: "))
+          (name (read-string (format "New name for window %s: " index))))
+     (list index name)))
+  (tmux-control--ensure-live)
+  (when (or (null name) (string-empty-p name))
+    (user-error "Window name must not be empty"))
+  (setq index (tmux-control--normalize-window-index index))
+  (tmux-control--send-command
+   (format "rename-window -t %s:%s %s"
+           tmux-control--session index
+           (tmux-control--quote-tmux-arg name))))
+
 
 (defun tmux-control-scrollback ()
   "Show tmux pane history in a separate scrollback buffer as normal Emacs text.

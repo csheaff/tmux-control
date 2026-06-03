@@ -190,5 +190,45 @@
                      ("1" . "1: vim")
                      ("2" . "2: editor pane"))))))
 
+;;; Window-management command construction.
+
+(defun tmux-control-test--capture-commands (thunk)
+  "Call THUNK with command sending stubbed; return the list of sent commands."
+  (let ((sent '()))
+    (cl-letf (((symbol-function 'tmux-control--ensure-live) #'ignore)
+              ((symbol-function 'tmux-control--refresh-active-pane) #'ignore)
+              ((symbol-function 'tmux-control--send-command)
+               (lambda (command &optional _kind) (push command sent))))
+      (let ((tmux-control--session "0"))
+        (funcall thunk)))
+    (nreverse sent)))
+
+(ert-deftest tmux-control-test-select-window-command ()
+  (should (equal (tmux-control-test--capture-commands
+                  (lambda () (tmux-control-select-window "2")))
+                 '("select-window -t 0:2"))))
+
+(ert-deftest tmux-control-test-new-window-command ()
+  (should (equal (tmux-control-test--capture-commands
+                  (lambda () (tmux-control-new-window "my win")))
+                 '("new-window -t 0: -n \"my win\"")))
+  (should (equal (tmux-control-test--capture-commands
+                  (lambda () (tmux-control-new-window nil)))
+                 '("new-window -t 0:"))))
+
+(ert-deftest tmux-control-test-kill-window-command ()
+  (should (equal (tmux-control-test--capture-commands
+                  (lambda () (tmux-control-kill-window "1")))
+                 '("kill-window -t 0:1"))))
+
+(ert-deftest tmux-control-test-rename-window-command ()
+  (should (equal (tmux-control-test--capture-commands
+                  (lambda () (tmux-control-rename-window "1" "new name")))
+                 '("rename-window -t 0:1 \"new name\"")))
+  ;; An empty name is rejected.
+  (should-error (tmux-control-test--capture-commands
+                 (lambda () (tmux-control-rename-window "1" "")))
+                :type 'user-error))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

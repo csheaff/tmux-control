@@ -33,6 +33,8 @@ These commands act on the connected session (no key bindings by default):
   in the session, with completion over the session's windows.
 - `M-x tmux-control-new-window` creates a window (optionally named) and
   switches to it.
+- `M-x tmux-control-rename-window` renames a window, with completion over
+  the session's windows.
 - `M-x tmux-control-kill-window` removes a window after confirmation, with
   completion over the session's windows.
 
