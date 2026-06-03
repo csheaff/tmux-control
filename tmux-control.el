@@ -76,6 +76,7 @@ pane history can contain many repeated copies of the visible screen."
 (defvar-local tmux-control--collecting-command nil)
 (defvar-local tmux-control--command-output nil)
 (defvar-local tmux-control--keys-active nil)
+(defvar-local tmux-control--repaint-after-seed nil)
 
 (defvar tmux-control--override-map
   (let ((map (make-sparse-keymap)))
@@ -121,7 +122,7 @@ pane history can contain many repeated copies of the visible screen."
   (tmux-control--disable-line-numbers))
 
 ;;;###autoload
-(defun tmux-control-connect (&optional host socket-name session)
+(defun tmux-control-connect (&optional host socket-name session repaint-after-seed)
   "Connect to a tmux SESSION through control mode.
 
 When HOST is nil or empty, connect locally.  Otherwise connect over SSH.
@@ -152,6 +153,7 @@ defaults to `tmux-control-default-session'."
       (setq tmux-control--host host)
       (setq tmux-control--socket-name socket-name)
       (setq tmux-control--session session)
+      (setq tmux-control--repaint-after-seed repaint-after-seed)
       (setq tmux-control--fallback-target (concat session ":"))
       (setq tmux-control--process
             (make-process
@@ -175,7 +177,8 @@ defaults to `tmux-control-default-session'."
     (pop-to-buffer buffer)
     (with-current-buffer buffer
       (tmux-control--resize-to-window)
-      (tmux-control--send-command "display-message -p '#{pane_id}'" :pane-id))
+      (tmux-control--send-command "display-message -p '#{pane_id}'" :pane-id)
+      (tmux-control--disable-line-numbers))
     buffer))
 
 (defun tmux-control-disconnect ()
@@ -210,6 +213,7 @@ Use `tmux-control-live' to return to the live interactive pane."
       (unless (bolp)
         (insert "\n"))
       (tmux-control-scrollback-mode)
+      (tmux-control--disable-line-numbers)
       (setq-local tmux-control--host host)
       (setq-local tmux-control--socket-name socket-name)
       (setq-local tmux-control--session session)
@@ -250,13 +254,17 @@ Use `tmux-control-live' to return to the live interactive pane."
   (interactive)
   (tmux-control-connect tmux-control--host
                         tmux-control--socket-name
-                        tmux-control--session))
+                        tmux-control--session
+                        t))
 
 (defun tmux-control--disable-line-numbers ()
   "Disable line numbers in tmux-control buffers."
   (setq-local display-line-numbers nil)
-  (when (bound-and-true-p display-line-numbers-mode)
-    (display-line-numbers-mode -1)))
+  (when (fboundp 'display-line-numbers-mode)
+    (display-line-numbers-mode -1))
+  (when (fboundp 'linum-mode)
+    (linum-mode -1))
+  (setq-local display-line-numbers nil))
 
 (defun tmux-control--eat-semi-char-mode-advice (orig-fn &rest args)
   "Make `eat-semi-char-mode' return tmux-control scrollback buffers live."
@@ -302,7 +310,8 @@ Use `tmux-control-live' to return to the live interactive pane."
     (setf (eat-term-parameter tmux-control--terminal 'manipulate-selection-function)
           (if (fboundp 'eat--manipulate-kill-ring)
               #'eat--manipulate-kill-ring
-            #'ignore))))
+            #'ignore))
+    (tmux-control--disable-line-numbers)))
 
 (defun tmux-control--stop-live-process ()
   "Stop the live tmux control process without killing the tmux session."
@@ -540,10 +549,13 @@ Use `tmux-control-live' to return to the live interactive pane."
     (:capture
      (when (= (point-min) (point-max))
        (tmux-control--write-terminal
-        (concat (mapconcat #'identity
-                           (nreverse tmux-control--command-output)
-                           "\n")
-                "\n")))))
+        (tmux-control--screen-seed-sequence
+         (mapconcat #'identity
+                    (nreverse tmux-control--command-output)
+                    "\n"))))
+     (when tmux-control--repaint-after-seed
+       (setq tmux-control--repaint-after-seed nil)
+       (tmux-control--send-input nil "\f"))))
   (setq tmux-control--collecting-command nil)
   (setq tmux-control--current-command-kind :ignore)
   (setq tmux-control--command-output nil))
@@ -552,9 +564,37 @@ Use `tmux-control-live' to return to the live interactive pane."
   "Seed the Eat buffer with the current tmux pane contents."
   (when tmux-control--active-pane
     (tmux-control--send-command
-     (format "capture-pane -pe -t %s"
+     (format "capture-pane -p -t %s"
              tmux-control--active-pane)
      :capture)))
+
+(defun tmux-control--screen-seed-sequence (text)
+  "Return terminal escapes to paint captured visible-screen TEXT."
+  (let* ((size (and tmux-control--terminal
+                    (eat-term-live-p tmux-control--terminal)
+                    (eat-term-size tmux-control--terminal)))
+         (width (or (car-safe size) 80))
+         (height (or (cdr-safe size) 24))
+         (lines (split-string text "\n"))
+         (lines (if (and lines (string-empty-p (car (last lines))))
+                    (butlast lines)
+                  lines))
+         (lines (last lines (min height (length lines))))
+         (row 1)
+         (cursor-row height)
+         (cursor-column 1)
+         (out '("\e[H\e[2J")))
+    (dolist (line lines)
+      (setq line (truncate-string-to-width (string-trim-right line)
+                                           width nil nil ""))
+      (when (string-match "❯[[:blank:]]*" line)
+        (setq cursor-row row)
+        (setq cursor-column
+              (1+ (string-width (substring line 0 (match-end 0))))))
+      (push (format "\e[%d;1H%s\e[K" row line) out)
+      (setq row (1+ row)))
+    (push (format "\e[%d;%dH" cursor-row (max 1 cursor-column)) out)
+    (apply #'concat (nreverse out))))
 
 (defun tmux-control--decode-output (payload)
   "Decode tmux control mode output PAYLOAD."
