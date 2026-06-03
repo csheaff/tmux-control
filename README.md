@@ -27,7 +27,10 @@ Useful bindings:
 - `C-c C-l` sends form-feed to the pane, which asks many TUIs to repaint.
 - `C-c C-e` switches the current buffer into a normal Emacs scrollback view
   captured from tmux.  In that view, use normal Emacs movement/search/copy,
-  `g` to refresh, and `q`, `l`, or `RET` to return to the live pane.
+  `g` to refresh, and `q`, `l`, `RET`, `C-c C-e`, or
+  `M-x eat-semi-char-mode` to return to the live pane.
+
+Line numbers are disabled locally in live and scrollback buffers.
 
 Scrollback defaults to joining soft-wrapped tmux lines and compacting repeated
 TUI redraw chunks.  These are heuristics for panes that were run with tmux

@@ -43,10 +43,6 @@ When nil or empty, connect to local tmux."
   "Shell snippet used before running tmux on a remote host."
   :type 'string)
 
-(defcustom tmux-control-initial-history-lines 2000
-  "Number of pane-history lines to seed when attaching."
-  :type 'integer)
-
 (defcustom tmux-control-scrollback-lines 50000
   "Number of pane-history lines to show in scrollback view."
   :type 'integer)
@@ -103,22 +99,26 @@ pane history can contain many repeated copies of the visible screen."
   "Keymap for `tmux-control-mode'.")
 
 (define-derived-mode tmux-control-mode eat-mode "tmux-control"
-  "Major mode for tmux-control buffers.")
+  "Major mode for tmux-control buffers."
+  (tmux-control--disable-line-numbers))
 
 (defvar tmux-control-scrollback-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
     (define-key map (kbd "g") #'tmux-control-scrollback-refresh)
+    (define-key map (kbd "C-c C-e") #'tmux-control-live)
     (define-key map (kbd "l") #'tmux-control-live)
     (define-key map (kbd "RET") #'tmux-control-live)
     (define-key map (kbd "q") #'tmux-control-live)
+    (define-key map [remap eat-semi-char-mode] #'tmux-control-live)
     map)
   "Keymap for `tmux-control-scrollback-mode'.")
 
 (define-derived-mode tmux-control-scrollback-mode special-mode
   "tmux-control-scrollback"
   "Major mode for tmux-control scrollback buffers."
-  (setq-local truncate-lines nil))
+  (setq-local truncate-lines nil)
+  (tmux-control--disable-line-numbers))
 
 ;;;###autoload
 (defun tmux-control-connect (&optional host socket-name session)
@@ -251,6 +251,23 @@ Use `tmux-control-live' to return to the live interactive pane."
   (tmux-control-connect tmux-control--host
                         tmux-control--socket-name
                         tmux-control--session))
+
+(defun tmux-control--disable-line-numbers ()
+  "Disable line numbers in tmux-control buffers."
+  (setq-local display-line-numbers nil)
+  (when (bound-and-true-p display-line-numbers-mode)
+    (display-line-numbers-mode -1)))
+
+(defun tmux-control--eat-semi-char-mode-advice (orig-fn &rest args)
+  "Make `eat-semi-char-mode' return tmux-control scrollback buffers live."
+  (if (derived-mode-p 'tmux-control-scrollback-mode)
+      (tmux-control-live)
+    (apply orig-fn args)))
+
+(advice-remove #'eat-semi-char-mode
+               #'tmux-control--eat-semi-char-mode-advice)
+(advice-add #'eat-semi-char-mode
+            :around #'tmux-control--eat-semi-char-mode-advice)
 
 (defun tmux-control--reset-buffer ()
   "Reset the current buffer for a fresh tmux-control session."
@@ -535,9 +552,8 @@ Use `tmux-control-live' to return to the live interactive pane."
   "Seed the Eat buffer with the current tmux pane contents."
   (when tmux-control--active-pane
     (tmux-control--send-command
-     (format "capture-pane -pe -t %s -S -%d"
-             tmux-control--active-pane
-             tmux-control-initial-history-lines)
+     (format "capture-pane -pe -t %s"
+             tmux-control--active-pane)
      :capture)))
 
 (defun tmux-control--decode-output (payload)
