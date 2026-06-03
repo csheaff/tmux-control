@@ -36,6 +36,7 @@
 
 ;;; Code:
 
+(require 'ansi-color)
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
@@ -410,7 +411,10 @@ Use `tmux-control-live' to return to the live interactive pane."
                             session
                             target))
         (goto-char (point-max))))
-    (switch-to-buffer scrollback-buffer)))
+    (switch-to-buffer scrollback-buffer)
+    (goto-char (point-max))
+    (when (get-buffer-window scrollback-buffer)
+      (recenter -1))))
 
 (defun tmux-control-scrollback-refresh ()
   "Refresh the current tmux-control scrollback view."
@@ -430,7 +434,10 @@ Use `tmux-control-live' to return to the live interactive pane."
     (unless (bolp)
       (insert "\n"))
     (if at-end
-        (goto-char (point-max))
+        (progn
+          (goto-char (point-max))
+          (when (get-buffer-window (current-buffer))
+            (recenter -1)))
       (goto-char (point-min))
       (forward-line (1- line))
       (move-to-column column))))
@@ -537,7 +544,7 @@ Use `tmux-control-live' to return to the live interactive pane."
   "Return plain text from tmux pane on HOST using SOCKET-NAME and TARGET."
   (let ((args (append (when socket-name
                         (list "-L" socket-name))
-                      (list "capture-pane" "-p")
+                      (list "capture-pane" "-p" "-e")
                       (when tmux-control-scrollback-join-wrapped-lines
                         (list "-J"))
                       (list "-S" (format "-%d" lines))
@@ -576,12 +583,26 @@ Use `tmux-control-live' to return to the live interactive pane."
   "Trim trailing blank lines from TEXT."
   (replace-regexp-in-string "[[:blank:]\n\r]+\\'" "\n" text))
 
+(defun tmux-control--colorize-scrollback (text)
+  "Convert ANSI escapes in TEXT to face text properties.
+Apply colors across the whole multi-line string so SGR state
+carries correctly across line boundaries, then remove any
+remaining non-printing control sequences (for example OSC
+hyperlinks) that are not colors.  The result carries colors as
+text properties and contains no escape characters, so the
+scrollback compaction heuristics -- which compare characters and
+ignore text properties -- keep working unchanged."
+  (tmux-control--strip-ansi
+   (let ((ansi-color-context nil))
+     (ansi-color-apply text))))
+
 (defun tmux-control--prepare-scrollback-text (text)
   "Prepare captured pane TEXT for the scrollback buffer."
-  (tmux-control--trim-trailing-blank-lines
-   (if tmux-control-compact-scrollback
-       (tmux-control--compact-repeated-redraw-lines text)
-     text)))
+  (let ((text (tmux-control--colorize-scrollback text)))
+    (tmux-control--trim-trailing-blank-lines
+     (if tmux-control-compact-scrollback
+         (tmux-control--compact-repeated-redraw-lines text)
+       text))))
 
 (defun tmux-control--compact-repeated-redraw-lines (text)
   "Compact repeated full-screen redraw chunks in TEXT."
