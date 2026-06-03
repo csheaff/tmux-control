@@ -227,7 +227,7 @@ Use `tmux-control-live' to return to the live interactive pane."
                             session
                             target))
         (goto-char (point-max))))
-    (pop-to-buffer scrollback-buffer)))
+    (switch-to-buffer scrollback-buffer)))
 
 (defun tmux-control-scrollback-refresh ()
   "Refresh the current tmux-control scrollback view."
@@ -260,7 +260,7 @@ Use `tmux-control-live' to return to the live interactive pane."
   (let ((live-buf tmux-control--live-buffer))
     (if (buffer-live-p live-buf)
         (let ((scrollback-buf (current-buffer)))
-          (pop-to-buffer live-buf)
+          (switch-to-buffer live-buf)
           (kill-buffer scrollback-buf))
       (tmux-control-connect tmux-control--host
                             tmux-control--socket-name
@@ -278,7 +278,10 @@ Use `tmux-control-live' to return to the live interactive pane."
 (defun tmux-control--eat-semi-char-mode-advice (orig-fn &rest args)
   "Make `eat-semi-char-mode' return tmux-control scrollback buffers live."
   (if (derived-mode-p 'tmux-control-scrollback-mode)
-      (tmux-control-live)
+      (progn
+        (tmux-control-live)
+        (unless (bound-and-true-p eat--semi-char-mode)
+          (eat-semi-char-mode)))
     (apply orig-fn args)))
 
 (advice-remove #'eat-semi-char-mode
