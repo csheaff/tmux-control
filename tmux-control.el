@@ -812,6 +812,35 @@ Use `tmux-control-live' to return to the live interactive pane."
   "Return non-nil when CHAR is an octal digit."
   (and (<= ?0 char) (<= char ?7)))
 
+(defun tmux-control--keep-cursor-visible (windows)
+  "Ensure the terminal cursor line is fully visible in WINDOWS.
+Eat positions the view by counting screen lines, but tall glyphs
+\(e.g. a prompt ornament rendered with a fallback font) make some
+rows exceed the default line height, so the line-counted view can
+overflow the window body in pixels and clip the active bottom row.
+Pull the window start forward by pixels until the cursor line fits,
+keeping the live terminal bottom in view.  The start never advances
+onto the cursor's own line, so the view can never go blank.  WINDOWS
+are the live-following windows Eat just synchronized; scrollback
+windows are excluded so they are not yanked to the bottom."
+  (dolist (window windows)
+    (when (windowp window)
+      (let* ((body (window-body-height window t))
+             (cursor (window-point window))
+             (line-end (save-excursion (goto-char cursor)
+                                       (line-end-position)))
+             (start (window-start window))
+             (guard 0))
+        (while (and (< guard 256)
+                    (< start line-end)
+                    (> (cdr (window-text-pixel-size window start line-end))
+                       body))
+          (setq start (save-excursion (goto-char start)
+                                      (forward-line 1)
+                                      (point)))
+          (setq guard (1+ guard)))
+        (set-window-start window start t)))))
+
 (defun tmux-control--write-terminal (output)
   "Write decoded terminal OUTPUT to Eat."
   (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
@@ -822,7 +851,8 @@ Use `tmux-control-live' to return to the live interactive pane."
       (eat-term-redisplay tmux-control--terminal)
       (when (and sync-windows
                  (boundp 'eat--synchronize-scroll-function))
-        (funcall eat--synchronize-scroll-function sync-windows))
+        (funcall eat--synchronize-scroll-function sync-windows)
+        (tmux-control--keep-cursor-visible sync-windows))
       (run-hooks 'eat-update-hook))))
 
 (defun tmux-control--send-input (_terminal string)
@@ -880,7 +910,10 @@ KIND identifies the command reply handler."
   (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
     (let ((inhibit-read-only t))
       (eat-term-resize tmux-control--terminal width height)
-      (eat-term-redisplay tmux-control--terminal)))
+      (eat-term-redisplay tmux-control--terminal)
+      (when (fboundp 'eat--synchronize-scroll-windows)
+        (tmux-control--keep-cursor-visible
+         (eat--synchronize-scroll-windows)))))
   (tmux-control--send-command (format "refresh-client -C %dx%d" width height)))
 
 (defun tmux-control--sentinel (process message)
