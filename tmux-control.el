@@ -218,35 +218,85 @@ Queries tmux on HOST using SOCKET-NAME."
                                (if active " (active)" ""))))))
            (split-string (string-trim text) "\n" t)))))
 
+(defun tmux-control--ensure-live ()
+  "Signal a `user-error' unless this buffer has a live tmux-control session."
+  (unless tmux-control--session
+    (user-error "No tmux-control session in this buffer"))
+  (unless (process-live-p tmux-control--process)
+    (user-error "tmux-control process is not live")))
+
+(defun tmux-control--refresh-active-pane ()
+  "Re-query the session's active pane id, repaint the live view, and resize."
+  (tmux-control--send-command "display-message -p '#{pane_id}'" :pane-id)
+  (tmux-control--resize-to-window))
+
+(defun tmux-control--read-window-index (prompt)
+  "Read a window index for the current session using PROMPT with completion."
+  (unless tmux-control--session
+    (user-error "No tmux-control session in this buffer"))
+  (let* ((windows (tmux-control--list-windows tmux-control--host
+                                              tmux-control--socket-name
+                                              tmux-control--session))
+         (choices (mapcar (lambda (w) (cons (cdr w) (car w))) windows))
+         (choice (completing-read prompt choices nil t)))
+    (or (cdr (assoc choice choices))
+        (car (split-string choice ":")))))
+
+(defun tmux-control--normalize-window-index (index)
+  "Return INDEX as a validated window-index string or signal a `user-error'."
+  (when (integerp index)
+    (setq index (number-to-string index)))
+  (unless (and (stringp index) (string-match-p "\\`[0-9]+\\'" index))
+    (user-error "Invalid tmux window index: %S" index))
+  index)
+
+(defun tmux-control--quote-tmux-arg (string)
+  "Return STRING quoted for the tmux command parser."
+  (concat "\"" (replace-regexp-in-string "[\"\\]" "\\\\\\&" string) "\""))
+
 (defun tmux-control-select-window (&optional index)
   "Switch the live tmux-control view to window INDEX in the same session.
 
 Interactively, prompt with completion over the session's windows.
 Switching changes the session's active window, so any other client
 attached to the same session follows along."
-  (interactive
-   (progn
-     (unless tmux-control--session
-       (user-error "No tmux-control session in this buffer"))
-     (let* ((windows (tmux-control--list-windows tmux-control--host
-                                                 tmux-control--socket-name
-                                                 tmux-control--session))
-            (choices (mapcar (lambda (w) (cons (cdr w) (car w))) windows))
-            (choice (completing-read "Window: " choices nil t)))
-       (list (or (cdr (assoc choice choices))
-                 (car (split-string choice ":")))))))
-  (unless tmux-control--session
-    (user-error "No tmux-control session in this buffer"))
-  (unless (process-live-p tmux-control--process)
-    (user-error "tmux-control process is not live"))
-  (when (integerp index)
-    (setq index (number-to-string index)))
-  (unless (and (stringp index) (string-match-p "\\`[0-9]+\\'" index))
-    (user-error "Invalid tmux window index: %S" index))
+  (interactive (list (tmux-control--read-window-index "Window: ")))
+  (tmux-control--ensure-live)
+  (setq index (tmux-control--normalize-window-index index))
   (tmux-control--send-command
    (format "select-window -t %s:%s" tmux-control--session index))
-  (tmux-control--send-command "display-message -p '#{pane_id}'" :pane-id)
-  (tmux-control--resize-to-window))
+  (tmux-control--refresh-active-pane))
+
+(defun tmux-control-new-window (&optional name)
+  "Create a new window in the current tmux-control session and switch to it.
+
+With a NAME, give the new window that name."
+  (interactive
+   (list (let ((n (read-string "New window name (empty for default): ")))
+           (unless (string-empty-p n) n))))
+  (tmux-control--ensure-live)
+  (tmux-control--send-command
+   (concat (format "new-window -t %s:" tmux-control--session)
+           (when (and name (not (string-empty-p name)))
+             (concat " -n " (tmux-control--quote-tmux-arg name)))))
+  (tmux-control--refresh-active-pane))
+
+(defun tmux-control-kill-window (&optional index)
+  "Kill window INDEX in the current tmux-control session.
+
+Interactively, prompt with completion and confirm.  Killing the last
+window in the session ends the session and disconnects this client."
+  (interactive
+   (let ((index (tmux-control--read-window-index "Kill window: ")))
+     (unless (yes-or-no-p (format "Kill tmux window %s? " index))
+       (user-error "Aborted"))
+     (list index)))
+  (tmux-control--ensure-live)
+  (setq index (tmux-control--normalize-window-index index))
+  (tmux-control--send-command
+   (format "kill-window -t %s:%s" tmux-control--session index))
+  (tmux-control--refresh-active-pane))
+
 
 (defun tmux-control-scrollback ()
   "Show tmux pane history in a separate scrollback buffer as normal Emacs text.
