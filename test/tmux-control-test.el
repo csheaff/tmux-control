@@ -230,5 +230,30 @@
                  (lambda () (tmux-control-rename-window "1" "")))
                 :type 'user-error))
 
+;;; ANSI escape stripping / display width (seed-screen color handling).
+
+(ert-deftest tmux-control-test-strip-ansi-plain ()
+  (should (equal (tmux-control--strip-ansi "hello") "hello")))
+
+(ert-deftest tmux-control-test-strip-ansi-sgr ()
+  (should (equal (tmux-control--strip-ansi "\e[31mRED\e[0m") "RED"))
+  (should (equal (tmux-control--strip-ansi "\e[1m\e[32m dir \e[0m\e[39m\e[49m")
+                 " dir ")))
+
+(ert-deftest tmux-control-test-strip-ansi-truecolor-colon ()
+  ;; Colon-delimited truecolor SGR (ESC[38:2::r:g:b m).
+  (should (equal (tmux-control--strip-ansi "\e[38:2::255:0:0mX\e[0m") "X")))
+
+(ert-deftest tmux-control-test-strip-ansi-osc-hyperlink ()
+  ;; OSC 8 hyperlink, terminated by ST (ESC backslash).
+  (should (equal (tmux-control--strip-ansi
+                  "\e]8;;https://example.com\e\\link\e]8;;\e\\")
+                 "link")))
+
+(ert-deftest tmux-control-test-display-width-ignores-escapes ()
+  (should (= (tmux-control--display-width "\e[31mRED\e[0m") 3))
+  (should (= (tmux-control--display-width "\e[38:2::255:0:0mX\e[0m") 1))
+  (should (= (tmux-control--display-width "plain") 5)))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

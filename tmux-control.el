@@ -734,9 +734,22 @@ Use `tmux-control-live' to return to the live interactive pane."
   "Seed the Eat buffer with the current tmux pane contents."
   (when tmux-control--active-pane
     (tmux-control--send-command
-     (format "capture-pane -p -t %s"
+     (format "capture-pane -p -e -t %s"
              tmux-control--active-pane)
      :capture)))
+
+(defconst tmux-control--ansi-control-regexp
+  (concat "\e][^\a\e]*\\(?:\a\\|\e\\\\\\)"      ; OSC: ESC ] ... (BEL or ST)
+          "\\|\e\\[[0-9:;<=>?]*[ -/]*[@-~]")    ; CSI: ESC [ ... final (incl. SGR)
+  "Regexp matching non-printing ANSI OSC/CSI control sequences.")
+
+(defun tmux-control--strip-ansi (string)
+  "Return STRING with non-printing ANSI control sequences removed."
+  (replace-regexp-in-string tmux-control--ansi-control-regexp "" string))
+
+(defun tmux-control--display-width (string)
+  "Return the display width of STRING, ignoring ANSI control sequences."
+  (string-width (tmux-control--strip-ansi string)))
 
 (defun tmux-control--screen-seed-sequence (text)
   "Return terminal escapes to paint captured visible-screen TEXT."
@@ -755,13 +768,21 @@ Use `tmux-control-live' to return to the live interactive pane."
          (cursor-column 1)
          (out '("\e[H\e[2J")))
     (dolist (line lines)
-      (setq line (truncate-string-to-width (string-trim-right line)
-                                           width nil nil ""))
-      (when (string-match "❯[[:blank:]]*" line)
-        (setq cursor-row row)
-        (setq cursor-column
-              (1+ (string-width (substring line 0 (match-end 0))))))
-      (push (format "\e[%d;1H%s\e[K" row line) out)
+      (setq line (string-trim-right line))
+      ;; Clip to terminal width by visible columns, ignoring the
+      ;; non-printing color escapes; only over-wide lines (rare and
+      ;; transient) fall back to a stripped truncation.
+      (when (> (tmux-control--display-width line) width)
+        (setq line (truncate-string-to-width
+                    (tmux-control--strip-ansi line) width nil nil "")))
+      (let ((plain (tmux-control--strip-ansi line)))
+        (when (string-match "❯[[:blank:]]*" plain)
+          (setq cursor-row row)
+          (setq cursor-column
+                (1+ (string-width (substring plain 0 (match-end 0)))))))
+      ;; Reset attributes before erasing so a line's background color does
+      ;; not bleed into the cleared remainder of the row.
+      (push (format "\e[%d;1H%s\e[m\e[K" row line) out)
       (setq row (1+ row)))
     (push (format "\e[%d;%dH" cursor-row (max 1 cursor-column)) out)
     (apply #'concat (nreverse out))))
