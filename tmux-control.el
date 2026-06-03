@@ -414,6 +414,8 @@ Use `tmux-control-live' to return to the live interactive pane."
                             target))
         (goto-char (point-max))))
     (switch-to-buffer scrollback-buffer)
+    (when-let* ((window (get-buffer-window scrollback-buffer)))
+      (set-window-margins window 0 0))
     (goto-char (point-max))
     (when (get-buffer-window scrollback-buffer)
       (recenter -1))))
@@ -431,6 +433,8 @@ Use `tmux-control-live' to return to the live interactive pane."
                                            tmux-control--scrollback-target
                                            tmux-control-scrollback-lines))
          (inhibit-read-only t))
+    (when-let* ((window (get-buffer-window (current-buffer))))
+      (set-window-margins window 0 0))
     (erase-buffer)
     (insert (tmux-control--prepare-scrollback-text text))
     (unless (bolp)
