@@ -1,8 +1,18 @@
 # tmux-control
 
-`tmux-control` is an experimental Emacs client for a tmux pane.  It uses tmux
-control mode for the persistent process/session and Eat for terminal rendering,
-input, scrollback, search, and copy behavior inside Emacs.
+`tmux-control` turns Emacs into a **control-mode client for a tmux pane** —
+the [iTerm2 tmux-integration](https://iterm2.com/documentation-tmux-integration.html)
+idea, but in Emacs.
+
+Unlike running tmux inside a terminal buffer (`vterm`, `eat`, `ansi-term`),
+where the session dies with the Emacs frame, `tmux-control` speaks tmux
+control mode (`tmux -C`) to a **persistent, possibly remote** tmux server
+over SSH and renders the live pane through [Eat](https://codeberg.org/akib/emacs-eat).
+The tmux session outlives Emacs: detach, restart, or reconnect from another
+machine and the pane is still there. Eat handles rendering, input,
+scrollback, search, and copy.
+
+It is experimental — a first MVP (see [Status](#status)).
 
 ## Usage
 
@@ -90,4 +100,8 @@ elsewhere:
 ```sh
 make test EAT_DIR=/path/to/eat
 ```
+
+## License
+
+GPL-3.0-or-later. See [LICENSE](LICENSE).
 

@@ -1,17 +1,38 @@
 ;;; tmux-control.el --- Drive a tmux pane through control mode -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026
+;; Copyright (C) 2026  Chris Sheaff
 
 ;; Author: Chris Sheaff
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1") (eat "0.9.4"))
 ;; Keywords: terminals, tmux
 ;; URL: https://github.com/csheaff/tmux-control
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;; This program is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
+;;
+;; This program is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+;;
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ;;; Commentary:
 
-;; tmux-control is an Emacs client for a tmux pane.  It uses tmux control
-;; mode for persistence and Eat's terminal renderer for display and input.
+;; tmux-control turns Emacs into a control-mode client for a tmux pane --
+;; the iTerm2 tmux-integration idea, but in Emacs.  Rather than running
+;; tmux inside a terminal buffer (where it dies with the frame), it speaks
+;; tmux control mode ("tmux -C") to a persistent, possibly remote tmux
+;; server over SSH and renders the live pane through Eat's terminal
+;; emulator.  The tmux session outlives Emacs: detach, restart Emacs, or
+;; reconnect from another machine and the pane is still there.
+;;
+;; See `tmux-control-connect' to attach.
 
 ;;; Code:
 
