@@ -76,6 +76,7 @@ pane history can contain many repeated copies of the visible screen."
 (defvar-local tmux-control--collecting-command nil)
 (defvar-local tmux-control--command-output nil)
 (defvar-local tmux-control--keys-active nil)
+(defvar-local tmux-control--live-buffer nil)
 
 (defvar tmux-control--override-map
   (let ((map (make-sparse-keymap)))
@@ -191,7 +192,7 @@ defaults to `tmux-control-default-session'."
   (tmux-control--seed-screen))
 
 (defun tmux-control-scrollback ()
-  "Show tmux pane history in this buffer as normal Emacs text.
+  "Show tmux pane history in a separate scrollback buffer as normal Emacs text.
 
 Use `tmux-control-live' to return to the live interactive pane."
   (interactive)
@@ -202,27 +203,31 @@ Use `tmux-control-live' to return to the live interactive pane."
          (session tmux-control--session)
          (target (or tmux-control--active-pane tmux-control--fallback-target))
          (text (tmux-control--capture-pane host socket-name target
-                                           tmux-control-scrollback-lines)))
-    (tmux-control--stop-live-process)
-    (let ((inhibit-read-only t))
-      (setq tmux-control--keys-active nil)
-      (erase-buffer)
-      (insert (tmux-control--prepare-scrollback-text text))
-      (unless (bolp)
-        (insert "\n"))
-      (tmux-control-scrollback-mode)
-      (tmux-control--disable-line-numbers)
-      (setq-local tmux-control--host host)
-      (setq-local tmux-control--socket-name socket-name)
-      (setq-local tmux-control--session session)
-      (setq-local tmux-control--scrollback-target target)
-      (setq-local header-line-format
-                  (format " %s socket:%s session:%s target:%s    g:refresh  q/l/RET:live"
-                          (or host "local")
-                          socket-name
-                          session
-                          target))
-      (goto-char (point-max)))))
+                                           tmux-control-scrollback-lines))
+         (live-buffer (current-buffer))
+         (scrollback-buffer-name (format "*%s-scrollback*" (buffer-name)))
+         (scrollback-buffer (get-buffer-create scrollback-buffer-name)))
+    (with-current-buffer scrollback-buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (tmux-control--prepare-scrollback-text text))
+        (unless (bolp)
+          (insert "\n"))
+        (tmux-control-scrollback-mode)
+        (tmux-control--disable-line-numbers)
+        (setq-local tmux-control--host host)
+        (setq-local tmux-control--socket-name socket-name)
+        (setq-local tmux-control--session session)
+        (setq-local tmux-control--scrollback-target target)
+        (setq-local tmux-control--live-buffer live-buffer)
+        (setq-local header-line-format
+                    (format " %s socket:%s session:%s target:%s    g:refresh  q/l/RET:live"
+                            (or host "local")
+                            socket-name
+                            session
+                            target))
+        (goto-char (point-max))))
+    (pop-to-buffer scrollback-buffer)))
 
 (defun tmux-control-scrollback-refresh ()
   "Refresh the current tmux-control scrollback view."
@@ -250,9 +255,16 @@ Use `tmux-control-live' to return to the live interactive pane."
 (defun tmux-control-live ()
   "Return from scrollback view to the live interactive tmux pane."
   (interactive)
-  (tmux-control-connect tmux-control--host
-                        tmux-control--socket-name
-                        tmux-control--session))
+  (unless (derived-mode-p 'tmux-control-scrollback-mode)
+    (user-error "Not in tmux-control scrollback mode"))
+  (let ((live-buf tmux-control--live-buffer))
+    (if (buffer-live-p live-buf)
+        (let ((scrollback-buf (current-buffer)))
+          (pop-to-buffer live-buf)
+          (kill-buffer scrollback-buf))
+      (tmux-control-connect tmux-control--host
+                            tmux-control--socket-name
+                            tmux-control--session))))
 
 (defun tmux-control--disable-line-numbers ()
   "Disable line numbers in tmux-control buffers."
