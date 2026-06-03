@@ -575,12 +575,18 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
       (tmux-control--call "tmux" args))))
 
 (defun tmux-control--call (program args)
-  "Call PROGRAM with ARGS and return stdout."
-  (let ((stderr-file (make-temp-file "tmux-control-stderr-")))
+  "Call PROGRAM with ARGS and return stdout.
+
+Always run PROGRAM on the local machine.  `default-directory' is pinned
+to a local directory and `call-process' (not `process-file') is used so
+the call never routes through TRAMP, even when invoked from a buffer
+whose `default-directory' is remote."
+  (let ((stderr-file (make-temp-file "tmux-control-stderr-"))
+        (default-directory temporary-file-directory))
     (unwind-protect
         (with-temp-buffer
           (let ((exit-code
-                 (apply #'process-file program nil (list t stderr-file) nil args)))
+                 (apply #'call-process program nil (list t stderr-file) nil args)))
             (if (equal exit-code 0)
                 (buffer-string)
               (let ((stderr (with-temp-buffer
