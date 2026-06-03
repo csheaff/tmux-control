@@ -42,13 +42,19 @@ When nil or empty, connect to local tmux."
   "Shell snippet used before running tmux on a remote host."
   :type 'string)
 
+(defcustom tmux-control-initial-history-lines 2000
+  "Number of pane-history lines to seed when attaching."
+  :type 'integer)
+
 (defvar-local tmux-control--process nil)
 (defvar-local tmux-control--terminal nil)
 (defvar-local tmux-control--accumulator "")
 (defvar-local tmux-control--active-pane nil)
 (defvar-local tmux-control--fallback-target nil)
+(defvar-local tmux-control--command-queue nil)
+(defvar-local tmux-control--current-command-kind :ignore)
+(defvar-local tmux-control--collecting-command nil)
 (defvar-local tmux-control--command-output nil)
-(defvar-local tmux-control--expecting-pane-id nil)
 
 (defvar tmux-control-mode-map
   (let ((map (make-sparse-keymap)))
@@ -113,8 +119,7 @@ defaults to `tmux-control-default-session'."
     (pop-to-buffer buffer)
     (with-current-buffer buffer
       (tmux-control--resize-to-window)
-      (tmux-control--send-command "display-message -p '#{pane_id}'")
-      (setq tmux-control--expecting-pane-id t))
+      (tmux-control--send-command "display-message -p '#{pane_id}'" :pane-id))
     buffer))
 
 (defun tmux-control-disconnect ()
@@ -138,8 +143,10 @@ defaults to `tmux-control-default-session'."
     (tmux-control-mode)
     (setq tmux-control--accumulator "")
     (setq tmux-control--active-pane nil)
+    (setq tmux-control--command-queue nil)
+    (setq tmux-control--current-command-kind :ignore)
+    (setq tmux-control--collecting-command nil)
     (setq tmux-control--command-output nil)
-    (setq tmux-control--expecting-pane-id nil)
     (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
     (setq eat-terminal tmux-control--terminal)
     (eat-semi-char-mode)
@@ -188,37 +195,57 @@ defaults to `tmux-control-default-session'."
 (defun tmux-control--handle-line (line)
   "Handle one tmux control protocol LINE."
   (cond
+   ((string-prefix-p "%begin " line)
+    (setq tmux-control--current-command-kind
+          (or (pop tmux-control--command-queue) :ignore))
+    (setq tmux-control--collecting-command t)
+    (setq tmux-control--command-output nil))
+   ((string-prefix-p "%end " line)
+    (tmux-control--finish-command-output))
+   ((string-prefix-p "%error " line)
+    (setq tmux-control--collecting-command nil)
+    (setq tmux-control--command-output nil)
+    (setq tmux-control--current-command-kind :ignore)
+    (tmux-control--message "tmux command failed"))
+   (tmux-control--collecting-command
+    (push line tmux-control--command-output))
    ((string-match "\\`%output \\(%[0-9]+\\)\\(?: \\(.*\\)\\)?\\'" line)
     (let ((pane (match-string 1 line))
           (payload (or (match-string 2 line) "")))
       (setq tmux-control--active-pane pane)
       (tmux-control--write-terminal (tmux-control--decode-output payload))))
-   ((string-prefix-p "%begin " line)
-    (setq tmux-control--command-output nil))
-   ((string-prefix-p "%end " line)
-    (tmux-control--finish-command-output))
-   ((string-prefix-p "%error " line)
-    (tmux-control--message "tmux command failed"))
    ((string-match "\\`%window-pane-changed [^ ]+ \\(%[0-9]+\\)\\'" line)
-    (setq tmux-control--active-pane (match-string 1 line)))
-   ((and tmux-control--expecting-pane-id
-         (string-match "\\`%[0-9]+\\'" line))
-    (setq tmux-control--active-pane line)
-    (setq tmux-control--expecting-pane-id nil))
-   ((and tmux-control--command-output
-         (not (string-prefix-p "%" line)))
-    (push line tmux-control--command-output))))
+    (setq tmux-control--active-pane (match-string 1 line)))))
 
 (defun tmux-control--finish-command-output ()
   "Handle the end of a tmux command reply."
-  (when tmux-control--expecting-pane-id
-    (let ((pane (cl-find-if (lambda (line)
-                              (string-match-p "\\`%[0-9]+\\'" line))
-                            tmux-control--command-output)))
-      (when pane
-        (setq tmux-control--active-pane pane)
-        (setq tmux-control--expecting-pane-id nil))))
+  (pcase tmux-control--current-command-kind
+    (:pane-id
+     (let ((pane (cl-find-if (lambda (line)
+                               (string-match-p "\\`%[0-9]+\\'" line))
+                             tmux-control--command-output)))
+       (when pane
+         (setq tmux-control--active-pane pane)
+         (tmux-control--seed-screen))))
+    (:capture
+     (when (= (point-min) (point-max))
+       (tmux-control--write-terminal
+        (concat (mapconcat #'identity
+                           (nreverse tmux-control--command-output)
+                           "\n")
+                "\n")))))
+  (setq tmux-control--collecting-command nil)
+  (setq tmux-control--current-command-kind :ignore)
   (setq tmux-control--command-output nil))
+
+(defun tmux-control--seed-screen ()
+  "Seed the Eat buffer with the current tmux pane contents."
+  (when tmux-control--active-pane
+    (tmux-control--send-command
+     (format "capture-pane -pe -t %s -S -%d"
+             tmux-control--active-pane
+             tmux-control-initial-history-lines)
+     :capture)))
 
 (defun tmux-control--decode-output (payload)
   "Decode tmux control mode output PAYLOAD."
@@ -278,9 +305,14 @@ defaults to `tmux-control-default-session'."
       (push (format "%02x" (aref bytes i)) hex))
     (string-join (nreverse hex) " ")))
 
-(defun tmux-control--send-command (command)
-  "Send tmux control mode COMMAND."
+(defun tmux-control--send-command (command &optional kind)
+  "Send tmux control mode COMMAND.
+
+KIND identifies the command reply handler."
   (when (process-live-p tmux-control--process)
+    (setq tmux-control--command-queue
+          (append tmux-control--command-queue
+                  (list (or kind :ignore))))
     (process-send-string tmux-control--process (concat command "\n"))))
 
 (defun tmux-control--adjust-window-size (process windows)

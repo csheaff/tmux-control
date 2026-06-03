@@ -28,7 +28,7 @@ Useful bindings:
 
 ## Status
 
-This is a first MVP.  It can attach to tmux, render `%output` through Eat, send
-keyboard input back with `send-keys -H`, and resize the tmux client.  Mouse
-handling, robust command correlation, paste chunking, and initial scrollback
-seeding still need work.
+This is a first MVP.  It can attach to tmux, seed the buffer from
+`capture-pane`, render live `%output` through Eat, send keyboard input back with
+`send-keys -H`, and resize the tmux client.  Mouse handling, robust paste
+chunking, and broader edge-case hardening still need work.
