@@ -191,6 +191,63 @@ defaults to `tmux-control-default-session'."
   (interactive)
   (tmux-control--seed-screen))
 
+(defun tmux-control--list-windows (host socket-name session)
+  "Return an alist of (INDEX-STRING . LABEL) for SESSION windows.
+
+Queries tmux on HOST using SOCKET-NAME."
+  (let* ((fmt "#{window_index}\t#{window_name}\t#{window_active}")
+         (args (append (when socket-name (list "-L" socket-name))
+                       (list "list-windows" "-t" session "-F" fmt)))
+         (text (if (and host (not (string-empty-p host)))
+                   (tmux-control--call
+                    "ssh"
+                    (list host
+                          (concat tmux-control-remote-tmux-socket-setup
+                                  " && "
+                                  (tmux-control--tmux-command-string args))))
+                 (tmux-control--call "tmux" args))))
+    (delq nil
+          (mapcar
+           (lambda (line)
+             (when (string-match "\\`\\([0-9]+\\)\t\\(.*\\)\t\\([01]\\)\\'" line)
+               (let ((index (match-string 1 line))
+                     (name (match-string 2 line))
+                     (active (string= (match-string 3 line) "1")))
+                 (cons index
+                       (format "%s: %s%s" index name
+                               (if active " (active)" ""))))))
+           (split-string (string-trim text) "\n" t)))))
+
+(defun tmux-control-select-window (&optional index)
+  "Switch the live tmux-control view to window INDEX in the same session.
+
+Interactively, prompt with completion over the session's windows.
+Switching changes the session's active window, so any other client
+attached to the same session follows along."
+  (interactive
+   (progn
+     (unless tmux-control--session
+       (user-error "No tmux-control session in this buffer"))
+     (let* ((windows (tmux-control--list-windows tmux-control--host
+                                                 tmux-control--socket-name
+                                                 tmux-control--session))
+            (choices (mapcar (lambda (w) (cons (cdr w) (car w))) windows))
+            (choice (completing-read "Window: " choices nil t)))
+       (list (or (cdr (assoc choice choices))
+                 (car (split-string choice ":")))))))
+  (unless tmux-control--session
+    (user-error "No tmux-control session in this buffer"))
+  (unless (process-live-p tmux-control--process)
+    (user-error "tmux-control process is not live"))
+  (when (integerp index)
+    (setq index (number-to-string index)))
+  (unless (and (stringp index) (string-match-p "\\`[0-9]+\\'" index))
+    (user-error "Invalid tmux window index: %S" index))
+  (tmux-control--send-command
+   (format "select-window -t %s:%s" tmux-control--session index))
+  (tmux-control--send-command "display-message -p '#{pane_id}'" :pane-id)
+  (tmux-control--resize-to-window))
+
 (defun tmux-control-scrollback ()
   "Show tmux pane history in a separate scrollback buffer as normal Emacs text.
 
