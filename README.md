@@ -24,7 +24,8 @@ M-x tmux-control-connect
 Useful bindings:
 
 - `C-c C-k` disconnects the Emacs control client.
-- `C-c C-l` sends form-feed to the pane, which asks many TUIs to repaint.
+- `C-c C-l` refreshes the live view from tmux's current visible screen without
+  sending input to the pane.
 - `C-c C-e` switches the current buffer into a normal Emacs scrollback view
   captured from tmux.  In that view, use normal Emacs movement/search/copy,
   `g` to refresh, and `q`, `l`, `RET`, `C-c C-e`, or

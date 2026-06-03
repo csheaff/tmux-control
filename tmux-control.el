@@ -76,7 +76,6 @@ pane history can contain many repeated copies of the visible screen."
 (defvar-local tmux-control--collecting-command nil)
 (defvar-local tmux-control--command-output nil)
 (defvar-local tmux-control--keys-active nil)
-(defvar-local tmux-control--repaint-after-seed nil)
 
 (defvar tmux-control--override-map
   (let ((map (make-sparse-keymap)))
@@ -122,7 +121,7 @@ pane history can contain many repeated copies of the visible screen."
   (tmux-control--disable-line-numbers))
 
 ;;;###autoload
-(defun tmux-control-connect (&optional host socket-name session repaint-after-seed)
+(defun tmux-control-connect (&optional host socket-name session)
   "Connect to a tmux SESSION through control mode.
 
 When HOST is nil or empty, connect locally.  Otherwise connect over SSH.
@@ -153,7 +152,6 @@ defaults to `tmux-control-default-session'."
       (setq tmux-control--host host)
       (setq tmux-control--socket-name socket-name)
       (setq tmux-control--session session)
-      (setq tmux-control--repaint-after-seed repaint-after-seed)
       (setq tmux-control--fallback-target (concat session ":"))
       (setq tmux-control--process
             (make-process
@@ -188,9 +186,9 @@ defaults to `tmux-control-default-session'."
     (delete-process tmux-control--process)))
 
 (defun tmux-control-clear-and-repaint ()
-  "Ask the active pane to repaint itself."
+  "Refresh the live view from the current tmux pane screen."
   (interactive)
-  (tmux-control--send-input nil "\f"))
+  (tmux-control--seed-screen))
 
 (defun tmux-control-scrollback ()
   "Show tmux pane history in this buffer as normal Emacs text.
@@ -254,8 +252,7 @@ Use `tmux-control-live' to return to the live interactive pane."
   (interactive)
   (tmux-control-connect tmux-control--host
                         tmux-control--socket-name
-                        tmux-control--session
-                        t))
+                        tmux-control--session))
 
 (defun tmux-control--disable-line-numbers ()
   "Disable line numbers in tmux-control buffers."
@@ -547,15 +544,11 @@ Use `tmux-control-live' to return to the live interactive pane."
          (setq tmux-control--active-pane pane)
          (tmux-control--seed-screen))))
     (:capture
-     (when (= (point-min) (point-max))
-       (tmux-control--write-terminal
-        (tmux-control--screen-seed-sequence
-         (mapconcat #'identity
-                    (nreverse tmux-control--command-output)
-                    "\n"))))
-     (when tmux-control--repaint-after-seed
-       (setq tmux-control--repaint-after-seed nil)
-       (tmux-control--send-input nil "\f"))))
+     (tmux-control--write-terminal
+      (tmux-control--screen-seed-sequence
+       (mapconcat #'identity
+                  (nreverse tmux-control--command-output)
+                  "\n")))))
   (setq tmux-control--collecting-command nil)
   (setq tmux-control--current-command-kind :ignore)
   (setq tmux-control--command-output nil))
