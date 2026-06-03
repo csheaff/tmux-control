@@ -63,6 +63,19 @@ When nil or empty, connect to local tmux."
 (defvar-local tmux-control--current-command-kind :ignore)
 (defvar-local tmux-control--collecting-command nil)
 (defvar-local tmux-control--command-output nil)
+(defvar-local tmux-control--keys-active nil)
+
+(defvar tmux-control--override-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-e") #'tmux-control-scrollback)
+    (define-key map (kbd "C-c C-k") #'tmux-control-disconnect)
+    (define-key map (kbd "C-c C-l") #'tmux-control-clear-and-repaint)
+    map)
+  "High-precedence keymap for tmux-control buffers.")
+
+(defvar tmux-control--emulation-mode-map-alist
+  `((tmux-control--keys-active . ,tmux-control--override-map))
+  "Emulation map alist used to override Eat minor-mode bindings.")
 
 (defvar tmux-control-mode-map
   (let ((map (make-sparse-keymap)))
@@ -175,6 +188,7 @@ Use `tmux-control-live' to return to the live interactive pane."
                                            tmux-control-scrollback-lines)))
     (tmux-control--stop-live-process)
     (let ((inhibit-read-only t))
+      (setq tmux-control--keys-active nil)
       (erase-buffer)
       (insert (tmux-control--trim-trailing-blank-lines text))
       (unless (bolp)
@@ -230,6 +244,11 @@ Use `tmux-control-live' to return to the live interactive pane."
     (remove-hook 'kill-buffer-hook #'tmux-control--kill-process t)
     (erase-buffer)
     (tmux-control-mode)
+    (setq-local emulation-mode-map-alists
+                (cons tmux-control--emulation-mode-map-alist
+                      (delq tmux-control--emulation-mode-map-alist
+                            emulation-mode-map-alists)))
+    (setq tmux-control--keys-active t)
     (setq tmux-control--accumulator "")
     (setq tmux-control--active-pane nil)
     (setq tmux-control--command-queue nil)
@@ -259,6 +278,7 @@ Use `tmux-control-live' to return to the live interactive pane."
   (setq tmux-control--process nil)
   (setq tmux-control--terminal nil)
   (setq eat-terminal nil)
+  (setq tmux-control--keys-active nil)
   (remove-hook 'kill-buffer-hook #'tmux-control--kill-process t))
 
 (defun tmux-control--command (host socket-name session)
