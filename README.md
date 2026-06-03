@@ -29,10 +29,18 @@ Useful bindings:
   captured from tmux.  In that view, use normal Emacs movement/search/copy,
   `g` to refresh, and `q`, `l`, or `RET` to return to the live pane.
 
-Scrollback defaults to compacting repeated TUI redraws.  Disable this with:
+Scrollback defaults to joining soft-wrapped tmux lines and compacting repeated
+TUI redraw chunks.  These are heuristics for panes that were run with tmux
+`alternate-screen` disabled.  Disable compaction with:
 
 ```elisp
 (setq tmux-control-compact-scrollback nil)
+```
+
+Disable wrapped-line joining with:
+
+```elisp
+(setq tmux-control-scrollback-join-wrapped-lines nil)
 ```
 
 ## Status

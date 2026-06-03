@@ -16,6 +16,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'seq)
 (require 'subr-x)
 (require 'eat)
 
@@ -50,6 +51,10 @@ When nil or empty, connect to local tmux."
   "Number of pane-history lines to show in scrollback view."
   :type 'integer)
 
+(defcustom tmux-control-scrollback-join-wrapped-lines t
+  "Non-nil means join soft-wrapped pane lines in scrollback captures."
+  :type 'boolean)
+
 (defcustom tmux-control-compact-scrollback t
   "Non-nil means compact repeated full-screen redraws in scrollback view.
 
@@ -58,7 +63,7 @@ pane history can contain many repeated copies of the visible screen."
   :type 'boolean)
 
 (defcustom tmux-control-compact-scrollback-window 300
-  "Line window used to detect repeated redraw lines in scrollback view."
+  "Maximum line window used to merge repeated redraw chunks in scrollback view."
   :type 'integer)
 
 (defvar-local tmux-control--process nil)
@@ -311,7 +316,10 @@ Use `tmux-control-live' to return to the live interactive pane."
   "Return plain text from tmux pane on HOST using SOCKET-NAME and TARGET."
   (let ((args (append (when socket-name
                         (list "-L" socket-name))
-                      (list "capture-pane" "-p" "-S" (format "-%d" lines))
+                      (list "capture-pane" "-p")
+                      (when tmux-control-scrollback-join-wrapped-lines
+                        (list "-J"))
+                      (list "-S" (format "-%d" lines))
                       (when target
                         (list "-t" target)))))
     (if (and host (not (string-empty-p host)))
@@ -355,24 +363,105 @@ Use `tmux-control-live' to return to the live interactive pane."
      text)))
 
 (defun tmux-control--compact-repeated-redraw-lines (text)
-  "Remove repeated nonblank lines caused by full-screen redraws in TEXT."
-  (let ((seen (make-hash-table :test #'equal))
-        (index 0)
-        out)
-    (dolist (line (split-string text "\n"))
-      (let* ((key (string-trim line))
-             (last (and (not (string-empty-p key))
-                        (gethash key seen)))
-             (repeated (and last
-                            (<= (- index last)
-                                tmux-control-compact-scrollback-window))))
-        (unless (string-empty-p key)
-          (puthash key index seen))
-        (unless repeated
-          (push line out)))
-      (setq index (1+ index)))
+  "Compact repeated full-screen redraw chunks in TEXT."
+  (let (out)
+    (dolist (chunk (tmux-control--scrollback-chunks text))
+      (setq chunk (tmux-control--strip-scrollback-chrome chunk))
+      (when (tmux-control--line-list-has-content-p chunk)
+        (setq out (tmux-control--merge-scrollback-chunk out chunk))))
     (tmux-control--squeeze-blank-lines
-     (string-join (nreverse out) "\n"))))
+     (string-join out "\n"))))
+
+(defun tmux-control--scrollback-chunks (text)
+  "Split captured pane TEXT into likely TUI redraw chunks."
+  (let (chunks current)
+    (dolist (line (mapcar #'string-trim-right
+                          (split-string text "\n")))
+      (when (and current
+                 (tmux-control--scrollback-frame-start-line-p line))
+        (push (nreverse current) chunks)
+        (setq current nil))
+      (push line current))
+    (when current
+      (push (nreverse current) chunks))
+    (nreverse chunks)))
+
+(defun tmux-control--scrollback-frame-start-line-p (line)
+  "Return non-nil when LINE looks like the start of a TUI redraw frame."
+  (string-match-p "\\`\\s-*\\[Session\\]" line))
+
+(defun tmux-control--strip-scrollback-chrome (lines)
+  "Remove obvious TUI chrome from captured LINES."
+  (tmux-control--trim-blank-line-list
+   (seq-remove #'tmux-control--scrollback-chrome-line-p lines)))
+
+(defun tmux-control--scrollback-chrome-line-p (line)
+  "Return non-nil when LINE looks like repeated TUI chrome."
+  (let ((trimmed (string-trim line)))
+    (or (string-match-p "\\`\\[Session\\]" trimmed)
+        (string-match-p "AI Credits:" line)
+        (string-prefix-p "/ commands" trimmed)
+        (string-match-p "\\`[─━]\\{10,\\}\\'" trimmed)
+        (string-match-p "\\`❯\\'" trimmed))))
+
+(defun tmux-control--merge-scrollback-chunk (out chunk)
+  "Merge CHUNK into OUT without duplicating repeated redraw content."
+  (setq chunk (tmux-control--trim-blank-line-list chunk))
+  (cond
+   ((null chunk) out)
+   ((null out) chunk)
+   ((tmux-control--line-list-contains-p out chunk) out)
+   (t
+    (let ((overlap (tmux-control--line-list-overlap out chunk)))
+      (append out
+              (unless (or (> overlap 0)
+                          (string-empty-p (string-trim (car (last out))))
+                          (string-empty-p (string-trim (car chunk))))
+                '(""))
+              (nthcdr overlap chunk))))))
+
+(defun tmux-control--line-list-contains-p (haystack needle)
+  "Return non-nil when HAYSTACK contains NEEDLE as contiguous lines."
+  (and (<= (length needle) (length haystack))
+       (cl-search needle haystack :test #'string=)))
+
+(defun tmux-control--line-list-overlap (left right)
+  "Return largest safe suffix/prefix overlap between LEFT and RIGHT."
+  (let* ((max (min (length left)
+                   (length right)
+                   tmux-control-compact-scrollback-window))
+         (overlap 0))
+    (while (and (> max 0) (= overlap 0))
+      (let ((candidate (cl-subseq right 0 max)))
+        (when (and (equal (last left max) candidate)
+                   (tmux-control--line-list-safe-overlap-p candidate))
+          (setq overlap max)))
+      (setq max (1- max)))
+    overlap))
+
+(defun tmux-control--line-list-safe-overlap-p (lines)
+  "Return non-nil when LINES are distinctive enough to use as overlap."
+  (>= (cl-count-if (lambda (line)
+                     (not (string-empty-p (string-trim line))))
+                   lines)
+      2))
+
+(defun tmux-control--line-list-has-content-p (lines)
+  "Return non-nil when LINES contain at least one nonblank line."
+  (cl-some (lambda (line)
+             (not (string-empty-p (string-trim line))))
+           lines))
+
+(defun tmux-control--trim-blank-line-list (lines)
+  "Trim leading and trailing blank lines from LINES."
+  (while (and lines
+              (string-empty-p (string-trim (car lines))))
+    (setq lines (cdr lines)))
+  (setq lines (nreverse lines))
+  (while (and lines
+              (string-empty-p (string-trim (car lines))))
+    (setq lines (cdr lines)))
+  (nreverse lines))
 
 (defun tmux-control--squeeze-blank-lines (text)
   "Collapse runs of more than two blank lines in TEXT."
