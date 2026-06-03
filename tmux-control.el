@@ -121,22 +121,58 @@ pane history can contain many repeated copies of the visible screen."
   (setq-local truncate-lines nil)
   (tmux-control--disable-line-numbers))
 
+(defun tmux-control--list-sessions (host socket-name)
+  "Return existing tmux session names on HOST using SOCKET-NAME.
+
+Return nil when no server is running or the query otherwise fails, so the
+caller can offer completion when sessions exist and fall back to free
+text (creating a new session) when they do not."
+  (let ((args (append (when socket-name (list "-L" socket-name))
+                      (list "list-sessions" "-F" "#{session_name}"))))
+    (condition-case err
+        (let ((text (if (and host (not (string-empty-p host)))
+                        (tmux-control--call
+                         "ssh"
+                         (list host
+                               (concat tmux-control-remote-tmux-socket-setup
+                                       " && "
+                                       (tmux-control--tmux-command-string args))))
+                      (tmux-control--call "tmux" args))))
+          (split-string (string-trim text) "\n" t))
+      (error
+       (message "tmux-control: could not list sessions (%s)"
+                (error-message-string err))
+       nil))))
+
+(defun tmux-control--read-session (host socket-name)
+  "Read a session name on HOST using SOCKET-NAME.
+
+Offer completion over existing sessions.  Selecting one attaches to it;
+typing a new name creates that session on connect."
+  (let ((sessions (tmux-control--list-sessions host socket-name)))
+    (completing-read "Session: " sessions nil nil nil nil
+                     tmux-control-default-session)))
+
 ;;;###autoload
 (defun tmux-control-connect (&optional host socket-name session)
   "Connect to a tmux SESSION through control mode.
 
 When HOST is nil or empty, connect locally.  Otherwise connect over SSH.
 SOCKET-NAME defaults to `tmux-control-default-socket-name', and SESSION
-defaults to `tmux-control-default-session'."
+defaults to `tmux-control-default-session'.
+
+Interactively, the session prompt completes over existing sessions on the
+chosen host and socket; entering a name that does not exist creates that
+session (tmux attaches if it exists, otherwise creates it)."
   (interactive
    (let* ((host (read-string "Host (empty for local): "
                              nil nil tmux-control-default-host))
           (socket-name (read-string "Socket name: "
                                     nil nil
                                     tmux-control-default-socket-name))
-          (session (read-string "Session: "
-                                nil nil
-                                tmux-control-default-session)))
+          (session (tmux-control--read-session
+                    (unless (string-empty-p host) host)
+                    socket-name)))
      (list (unless (string-empty-p host) host)
            socket-name
            session)))
