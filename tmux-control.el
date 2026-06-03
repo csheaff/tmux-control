@@ -123,7 +123,8 @@ pane history can contain many repeated copies of the visible screen."
 
 (define-derived-mode tmux-control-mode eat-mode "tmux-control"
   "Major mode for tmux-control buffers."
-  (tmux-control--disable-line-numbers))
+  (tmux-control--disable-line-numbers)
+  (tmux-control--disable-margins))
 
 (defvar tmux-control-scrollback-mode-map
   (let ((map (make-sparse-keymap)))
@@ -141,7 +142,8 @@ pane history can contain many repeated copies of the visible screen."
   "tmux-control-scrollback"
   "Major mode for tmux-control scrollback buffers."
   (setq-local truncate-lines nil)
-  (tmux-control--disable-line-numbers))
+  (tmux-control--disable-line-numbers)
+  (tmux-control--disable-margins))
 
 (defun tmux-control--list-sessions (host socket-name)
   "Return existing tmux session names on HOST using SOCKET-NAME.
@@ -464,6 +466,15 @@ Use `tmux-control-live' to return to the live interactive pane."
   (when (fboundp 'linum-mode)
     (linum-mode -1))
   (setq-local display-line-numbers nil))
+
+(defun tmux-control--disable-margins ()
+  "Remove display margins so the terminal owns its first and last columns.
+A nonzero `left-margin-width' inherited from the user's defaults would
+clip the leftmost terminal column (e.g. a prompt glyph)."
+  (setq-local left-margin-width 0)
+  (setq-local right-margin-width 0)
+  (dolist (window (get-buffer-window-list (current-buffer) nil t))
+    (set-window-margins window 0 0)))
 
 (defun tmux-control--eat-semi-char-mode-advice (orig-fn &rest args)
   "Make `eat-semi-char-mode' return tmux-control scrollback buffers live."
@@ -942,6 +953,7 @@ KIND identifies the command reply handler."
 (defun tmux-control--resize-to-window ()
   "Resize tmux and Eat to the selected window."
   (when-let* ((window (get-buffer-window (current-buffer) t)))
+    (set-window-margins window 0 0)
     (tmux-control--resize
      (max 1 (window-max-chars-per-line window))
      (max 1 (with-selected-window window
