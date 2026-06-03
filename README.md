@@ -29,10 +29,16 @@ Useful bindings:
   captured from tmux.  In that view, use normal Emacs movement/search/copy,
   `g` to refresh, and `q`, `l`, or `RET` to return to the live pane.
 
+Scrollback defaults to compacting repeated TUI redraws.  Disable this with:
+
+```elisp
+(setq tmux-control-compact-scrollback nil)
+```
+
 ## Status
 
 This is a first MVP.  It can attach to tmux, seed the live terminal from
-`capture-pane`, open a same-buffer Emacs scrollback view, render live `%output`
-through Eat, send keyboard input back with `send-keys -H`, and resize the tmux
-client.  Mouse handling, robust paste chunking, and broader edge-case hardening
-still need work.
+`capture-pane`, open a compacted same-buffer Emacs scrollback view, render live
+`%output` through Eat, send keyboard input back with `send-keys -H`, and resize
+the tmux client.  Mouse handling, robust paste chunking, and broader edge-case
+hardening still need work.

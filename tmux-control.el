@@ -50,6 +50,17 @@ When nil or empty, connect to local tmux."
   "Number of pane-history lines to show in scrollback view."
   :type 'integer)
 
+(defcustom tmux-control-compact-scrollback t
+  "Non-nil means compact repeated full-screen redraws in scrollback view.
+
+This is useful for TUIs running with tmux `alternate-screen' disabled, where
+pane history can contain many repeated copies of the visible screen."
+  :type 'boolean)
+
+(defcustom tmux-control-compact-scrollback-window 300
+  "Line window used to detect repeated redraw lines in scrollback view."
+  :type 'integer)
+
 (defvar-local tmux-control--process nil)
 (defvar-local tmux-control--terminal nil)
 (defvar-local tmux-control--accumulator "")
@@ -190,7 +201,7 @@ Use `tmux-control-live' to return to the live interactive pane."
     (let ((inhibit-read-only t))
       (setq tmux-control--keys-active nil)
       (erase-buffer)
-      (insert (tmux-control--trim-trailing-blank-lines text))
+      (insert (tmux-control--prepare-scrollback-text text))
       (unless (bolp)
         (insert "\n"))
       (tmux-control-scrollback-mode)
@@ -220,7 +231,7 @@ Use `tmux-control-live' to return to the live interactive pane."
                                            tmux-control-scrollback-lines))
          (inhibit-read-only t))
     (erase-buffer)
-    (insert (tmux-control--trim-trailing-blank-lines text))
+    (insert (tmux-control--prepare-scrollback-text text))
     (unless (bolp)
       (insert "\n"))
     (if at-end
@@ -335,6 +346,37 @@ Use `tmux-control-live' to return to the live interactive pane."
 (defun tmux-control--trim-trailing-blank-lines (text)
   "Trim trailing blank lines from TEXT."
   (replace-regexp-in-string "[[:blank:]\n\r]+\\'" "\n" text))
+
+(defun tmux-control--prepare-scrollback-text (text)
+  "Prepare captured pane TEXT for the scrollback buffer."
+  (tmux-control--trim-trailing-blank-lines
+   (if tmux-control-compact-scrollback
+       (tmux-control--compact-repeated-redraw-lines text)
+     text)))
+
+(defun tmux-control--compact-repeated-redraw-lines (text)
+  "Remove repeated nonblank lines caused by full-screen redraws in TEXT."
+  (let ((seen (make-hash-table :test #'equal))
+        (index 0)
+        out)
+    (dolist (line (split-string text "\n"))
+      (let* ((key (string-trim line))
+             (last (and (not (string-empty-p key))
+                        (gethash key seen)))
+             (repeated (and last
+                            (<= (- index last)
+                                tmux-control-compact-scrollback-window))))
+        (unless (string-empty-p key)
+          (puthash key index seen))
+        (unless repeated
+          (push line out)))
+      (setq index (1+ index)))
+    (tmux-control--squeeze-blank-lines
+     (string-join (nreverse out) "\n"))))
+
+(defun tmux-control--squeeze-blank-lines (text)
+  "Collapse runs of more than two blank lines in TEXT."
+  (replace-regexp-in-string "\\(?:[[:blank:]]*\n\\)\\{3,\\}" "\n\n" text))
 
 (defun tmux-control--filter (process chunk)
   "Handle tmux control mode output CHUNK from PROCESS."
