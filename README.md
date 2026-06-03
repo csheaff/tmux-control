@@ -63,6 +63,15 @@ Useful bindings:
 
 Line numbers are disabled locally in live and scrollback buffers.
 
+### Files are local
+
+A tmux-control buffer is a local Emacs buffer that *renders* a remote pane;
+it is not a remote filesystem context.  Its `default-directory` stays local
+and the package does no directory tracking, so `find-file`, `dired`,
+`M-x compile`, and similar commands operate on the machine running Emacs —
+not on the remote host.  To edit a file you see in a remote pane, open it
+explicitly over TRAMP, e.g. `C-x C-f /ssh:dev:~/path/to/file`.
+
 Scrollback defaults to joining soft-wrapped tmux lines and compacting repeated
 TUI redraw chunks.  These are heuristics for panes that were run with tmux
 `alternate-screen` disabled.  Disable compaction with:
