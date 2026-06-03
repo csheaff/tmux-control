@@ -1,8 +1,8 @@
 ;;; tmux-control.el --- Drive a tmux pane through control mode -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026  Chris Sheaff
+;; Copyright (C) 2026  Clay Sheaff
 
-;; Author: Chris Sheaff
+;; Author: Clay Sheaff
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1") (eat "0.9.4"))
 ;; Keywords: terminals, tmux
