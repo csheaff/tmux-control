@@ -46,11 +46,19 @@ When nil or empty, connect to local tmux."
   "Number of pane-history lines to seed when attaching."
   :type 'integer)
 
+(defcustom tmux-control-scrollback-lines 50000
+  "Number of pane-history lines to show in scrollback view."
+  :type 'integer)
+
 (defvar-local tmux-control--process nil)
 (defvar-local tmux-control--terminal nil)
 (defvar-local tmux-control--accumulator "")
 (defvar-local tmux-control--active-pane nil)
 (defvar-local tmux-control--fallback-target nil)
+(defvar-local tmux-control--host nil)
+(defvar-local tmux-control--socket-name nil)
+(defvar-local tmux-control--session nil)
+(defvar-local tmux-control--scrollback-target nil)
 (defvar-local tmux-control--command-queue nil)
 (defvar-local tmux-control--current-command-kind :ignore)
 (defvar-local tmux-control--collecting-command nil)
@@ -59,6 +67,7 @@ When nil or empty, connect to local tmux."
 (defvar tmux-control-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map eat-mode-map)
+    (define-key map (kbd "C-c C-e") #'tmux-control-scrollback)
     (define-key map (kbd "C-c C-k") #'tmux-control-disconnect)
     (define-key map (kbd "C-c C-l") #'tmux-control-clear-and-repaint)
     map)
@@ -66,6 +75,21 @@ When nil or empty, connect to local tmux."
 
 (define-derived-mode tmux-control-mode eat-mode "tmux-control"
   "Major mode for tmux-control buffers.")
+
+(defvar tmux-control-scrollback-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "g") #'tmux-control-scrollback-refresh)
+    (define-key map (kbd "l") #'tmux-control-live)
+    (define-key map (kbd "RET") #'tmux-control-live)
+    (define-key map (kbd "q") #'tmux-control-live)
+    map)
+  "Keymap for `tmux-control-scrollback-mode'.")
+
+(define-derived-mode tmux-control-scrollback-mode special-mode
+  "tmux-control-scrollback"
+  "Major mode for tmux-control scrollback buffers."
+  (setq-local truncate-lines nil))
 
 ;;;###autoload
 (defun tmux-control-connect (&optional host socket-name session)
@@ -96,6 +120,9 @@ defaults to `tmux-control-default-session'."
          (command (tmux-control--command host socket-name session)))
     (with-current-buffer buffer
       (tmux-control--reset-buffer)
+      (setq tmux-control--host host)
+      (setq tmux-control--socket-name socket-name)
+      (setq tmux-control--session session)
       (setq tmux-control--fallback-target (concat session ":"))
       (setq tmux-control--process
             (make-process
@@ -133,6 +160,68 @@ defaults to `tmux-control-default-session'."
   (interactive)
   (tmux-control--send-input nil "\f"))
 
+(defun tmux-control-scrollback ()
+  "Show tmux pane history in this buffer as normal Emacs text.
+
+Use `tmux-control-live' to return to the live interactive pane."
+  (interactive)
+  (unless tmux-control--session
+    (user-error "No tmux-control session in this buffer"))
+  (let* ((host tmux-control--host)
+         (socket-name tmux-control--socket-name)
+         (session tmux-control--session)
+         (target (or tmux-control--active-pane tmux-control--fallback-target))
+         (text (tmux-control--capture-pane host socket-name target
+                                           tmux-control-scrollback-lines)))
+    (tmux-control--stop-live-process)
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert (tmux-control--trim-trailing-blank-lines text))
+      (unless (bolp)
+        (insert "\n"))
+      (tmux-control-scrollback-mode)
+      (setq-local tmux-control--host host)
+      (setq-local tmux-control--socket-name socket-name)
+      (setq-local tmux-control--session session)
+      (setq-local tmux-control--scrollback-target target)
+      (setq-local header-line-format
+                  (format " %s socket:%s session:%s target:%s    g:refresh  q/l/RET:live"
+                          (or host "local")
+                          socket-name
+                          session
+                          target))
+      (goto-char (point-max)))))
+
+(defun tmux-control-scrollback-refresh ()
+  "Refresh the current tmux-control scrollback view."
+  (interactive)
+  (unless (derived-mode-p 'tmux-control-scrollback-mode)
+    (user-error "Not in tmux-control scrollback mode"))
+  (let* ((line (line-number-at-pos))
+         (column (current-column))
+         (at-end (eobp))
+         (text (tmux-control--capture-pane tmux-control--host
+                                           tmux-control--socket-name
+                                           tmux-control--scrollback-target
+                                           tmux-control-scrollback-lines))
+         (inhibit-read-only t))
+    (erase-buffer)
+    (insert (tmux-control--trim-trailing-blank-lines text))
+    (unless (bolp)
+      (insert "\n"))
+    (if at-end
+        (goto-char (point-max))
+      (goto-char (point-min))
+      (forward-line (1- line))
+      (move-to-column column))))
+
+(defun tmux-control-live ()
+  "Return from scrollback view to the live interactive tmux pane."
+  (interactive)
+  (tmux-control-connect tmux-control--host
+                        tmux-control--socket-name
+                        tmux-control--session))
+
 (defun tmux-control--reset-buffer ()
   "Reset the current buffer for a fresh tmux-control session."
   (let ((inhibit-read-only t))
@@ -163,6 +252,15 @@ defaults to `tmux-control-default-session'."
               #'eat--manipulate-kill-ring
             #'ignore))))
 
+(defun tmux-control--stop-live-process ()
+  "Stop the live tmux control process without killing the tmux session."
+  (when (process-live-p tmux-control--process)
+    (delete-process tmux-control--process))
+  (setq tmux-control--process nil)
+  (setq tmux-control--terminal nil)
+  (setq eat-terminal nil)
+  (remove-hook 'kill-buffer-hook #'tmux-control--kill-process t))
+
 (defun tmux-control--command (host socket-name session)
   "Return process command for HOST, SOCKET-NAME, and SESSION."
   (let ((tmux-args `("tmux" "-L" ,socket-name "-C"
@@ -173,6 +271,50 @@ defaults to `tmux-control-default-session'."
             (concat tmux-control-remote-tmux-socket-setup
                     "; exec "
                     (mapconcat #'shell-quote-argument tmux-args " "))))))
+
+(defun tmux-control--tmux-command-string (args)
+  "Return a shell command string for tmux ARGS."
+  (mapconcat #'shell-quote-argument (cons "tmux" args) " "))
+
+(defun tmux-control--capture-pane (host socket-name target lines)
+  "Return plain text from tmux pane on HOST using SOCKET-NAME and TARGET."
+  (let ((args (append (when socket-name
+                        (list "-L" socket-name))
+                      (list "capture-pane" "-p" "-S" (format "-%d" lines))
+                      (when target
+                        (list "-t" target)))))
+    (if (and host (not (string-empty-p host)))
+        (tmux-control--call
+         "ssh"
+         (list host
+               (concat tmux-control-remote-tmux-socket-setup
+                       " && "
+                       (tmux-control--tmux-command-string args))))
+      (tmux-control--call "tmux" args))))
+
+(defun tmux-control--call (program args)
+  "Call PROGRAM with ARGS and return stdout."
+  (let ((stderr-file (make-temp-file "tmux-control-stderr-")))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((exit-code
+                 (apply #'process-file program nil (list t stderr-file) nil args)))
+            (if (equal exit-code 0)
+                (buffer-string)
+              (let ((stderr (with-temp-buffer
+                              (insert-file-contents stderr-file)
+                              (string-trim (buffer-string)))))
+                (error "%s failed: %s"
+                       program
+                       (if (string-empty-p stderr)
+                           (format "exit %s" exit-code)
+                         stderr))))))
+      (when (file-exists-p stderr-file)
+        (delete-file stderr-file)))))
+
+(defun tmux-control--trim-trailing-blank-lines (text)
+  "Trim trailing blank lines from TEXT."
+  (replace-regexp-in-string "[[:blank:]\n\r]+\\'" "\n" text))
 
 (defun tmux-control--filter (process chunk)
   "Handle tmux control mode output CHUNK from PROCESS."
