@@ -109,27 +109,49 @@ and the package does no directory tracking, so `find-file`, `dired`,
 not on the remote host.  To edit a file you see in a remote pane, open it
 explicitly over TRAMP, e.g. `C-x C-f /ssh:dev:~/path/to/file`.
 
-Scrollback defaults to joining soft-wrapped tmux lines and compacting repeated
-TUI redraw chunks.  These are heuristics for panes that were run with tmux
-`alternate-screen` disabled.  Disable compaction with:
-
-```elisp
-(setq tmux-control-compact-scrollback nil)
-```
-
-Disable wrapped-line joining with:
+Scrollback joins soft-wrapped tmux lines by default; disable that with:
 
 ```elisp
 (setq tmux-control-scrollback-join-wrapped-lines nil)
 ```
 
+#### Compacting repeated TUI redraws (opt-in)
+
+Some TUIs repaint by reprinting their whole screen instead of using the
+alternate screen — common when tmux runs with `alternate-screen off`, which
+keeps full-screen apps on the normal screen so their history is preserved.
+Each repaint is then appended to the pane history, so scrolling back shows
+the same screen many times over.
+
+`tmux-control` can collapse those repeats, but the line that marks the top of
+one repaint is necessarily application-specific, so compaction is **off by
+default** (scrollback is shown verbatim).  To enable it, point
+`tmux-control-scrollback-frame-start-regexp` at your TUI's repaint marker and
+list its per-frame "chrome" (status bars, rules, an evolving prompt) in
+`tmux-control-scrollback-chrome-regexps` so changing lines don't defeat
+de-duplication.  For the [Claude Code](https://www.anthropic.com/claude-code)
+TUI, for example:
+
+```elisp
+(setq tmux-control-compact-scrollback t
+      tmux-control-scrollback-frame-start-regexp "\\`\\s-*\\[Session\\]"
+      tmux-control-scrollback-chrome-regexps
+      '("\\`\\[Session\\]" "AI Credits:" "\\`/ commands"
+        "\\`[─━]\\{10,\\}\\'" "\\`❯\\'"))
+```
+
+With no frame regexp set, `tmux-control-compact-scrollback` has nothing to act
+on and scrollback is left untouched.
+
 ## Status
 
 This is a first MVP.  It can attach to tmux, seed the live terminal from
-`capture-pane`, open a compacted same-buffer Emacs scrollback view, render live
-`%output` through Eat, send keyboard input back with `send-keys -H`, and resize
-the tmux client.  Mouse handling, robust paste chunking, and broader edge-case
-hardening still need work.
+`capture-pane` (cursor included), open a same-buffer Emacs scrollback view that
+can optionally compact repeated TUI redraws, render live `%output` through Eat
+in batches, send keyboard input back with `send-keys -H`, and resize the tmux
+client.  Mouse handling, robust paste chunking, control-mode flow control
+(pause mode) for very high-volume output, and broader edge-case hardening still
+need work.
 
 ## Development
 

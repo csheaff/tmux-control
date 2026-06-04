@@ -84,6 +84,41 @@ pane history can contain many repeated copies of the visible screen."
   "Maximum line window used to merge repeated redraw chunks in scrollback view."
   :type 'integer)
 
+(defcustom tmux-control-scrollback-frame-start-regexp nil
+  "Regexp matching the top line of a repeated full-screen redraw, or nil.
+
+Scrollback compaction (`tmux-control-compact-scrollback') splits captured
+pane history into redraw \"frames\" at lines matching this regexp and then
+collapses frames that repeat.  This only helps for TUIs that repaint by
+reprinting their whole screen under a tmux running with `alternate-screen'
+off, so each repaint is appended to history; the marker that delimits one
+repaint is necessarily application-specific.  When nil (the default) no
+frame splitting is done, so compaction makes no change and scrollback is
+shown verbatim.
+
+For example, the Claude Code TUI repaints a block whose top line begins
+with \"[Session]\":
+
+    (setq tmux-control-scrollback-frame-start-regexp \"\\\\`\\\\s-*\\\\[Session\\\\]\")"
+  :type '(choice (const :tag "Disabled (verbatim scrollback)" nil) regexp))
+
+(defcustom tmux-control-scrollback-chrome-regexps nil
+  "Regexps matching volatile \"chrome\" lines to drop during compaction.
+
+When compacting scrollback (see `tmux-control-scrollback-frame-start-regexp')
+a line matching any of these is removed from each redraw frame before
+frames are compared, so a status bar, credits line or rule that changes on
+every repaint does not defeat de-duplication.  Each regexp is matched
+against the line both as-is and trimmed of surrounding whitespace.  The
+default is nil, so no lines are dropped.
+
+For the Claude Code TUI, for example:
+
+    (setq tmux-control-scrollback-chrome-regexps
+          \\='(\"\\\\`\\\\[Session\\\\]\" \"AI Credits:\" \"\\\\`/ commands\"
+            \"\\\\`[─━]\\\\{10,\\\\}\\\\\\='\" \"\\\\`❯\\\\\\='\"))"
+  :type '(repeat regexp))
+
 (defcustom tmux-control-wheel-enters-scrollback t
   "Non-nil means scrolling up with the mouse wheel enters scrollback view.
 
@@ -1142,8 +1177,12 @@ completion so the user is never stranded in a half-built chooser."
     (nreverse chunks)))
 
 (defun tmux-control--scrollback-frame-start-line-p (line)
-  "Return non-nil when LINE looks like the start of a TUI redraw frame."
-  (string-match-p "\\`\\s-*\\[Session\\]" line))
+  "Return non-nil when LINE looks like the start of a TUI redraw frame.
+Matches against `tmux-control-scrollback-frame-start-regexp'; always nil
+when that option is unset, so compaction does nothing without a configured
+frame marker."
+  (and tmux-control-scrollback-frame-start-regexp
+       (string-match-p tmux-control-scrollback-frame-start-regexp line)))
 
 (defun tmux-control--strip-scrollback-chrome (lines)
   "Remove obvious TUI chrome from captured LINES."
@@ -1151,13 +1190,15 @@ completion so the user is never stranded in a half-built chooser."
    (seq-remove #'tmux-control--scrollback-chrome-line-p lines)))
 
 (defun tmux-control--scrollback-chrome-line-p (line)
-  "Return non-nil when LINE looks like repeated TUI chrome."
+  "Return non-nil when LINE matches any `tmux-control-scrollback-chrome-regexps'.
+Each pattern is tried against LINE as-is and trimmed of surrounding
+whitespace, so an anchored pattern matches regardless of indentation.
+Returns nil when no chrome patterns are configured."
   (let ((trimmed (string-trim line)))
-    (or (string-match-p "\\`\\[Session\\]" trimmed)
-        (string-match-p "AI Credits:" line)
-        (string-prefix-p "/ commands" trimmed)
-        (string-match-p "\\`[─━]\\{10,\\}\\'" trimmed)
-        (string-match-p "\\`❯\\'" trimmed))))
+    (seq-some (lambda (re)
+                (or (string-match-p re line)
+                    (string-match-p re trimmed)))
+              tmux-control-scrollback-chrome-regexps)))
 
 (defun tmux-control--merge-scrollback-chunk (out chunk)
   "Merge CHUNK into OUT without duplicating repeated redraw content."

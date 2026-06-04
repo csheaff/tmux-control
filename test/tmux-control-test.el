@@ -20,6 +20,22 @@
 (require 'cl-lib)
 (require 'tmux-control)
 
+;; Scrollback compaction is driven by user-configured patterns
+;; (`tmux-control-scrollback-frame-start-regexp' and
+;; `tmux-control-scrollback-chrome-regexps'), which default to nil so
+;; scrollback is verbatim out of the box.  These are the Claude Code TUI
+;; patterns the compaction tests exercise the mechanism with.
+(defconst tmux-control-test--frame-re "\\`\\s-*\\[Session\\]")
+(defconst tmux-control-test--chrome-res
+  '("\\`\\[Session\\]" "AI Credits:" "\\`/ commands"
+    "\\`[─━]\\{10,\\}\\'" "\\`❯\\'"))
+
+(defmacro tmux-control-test--with-compaction (&rest body)
+  "Evaluate BODY with the Claude Code compaction patterns bound."
+  `(let ((tmux-control-scrollback-frame-start-regexp tmux-control-test--frame-re)
+         (tmux-control-scrollback-chrome-regexps tmux-control-test--chrome-res))
+     ,@body))
+
 ;;; Window-index validation.
 
 (ert-deftest tmux-control-test-normalize-window-index ()
@@ -126,33 +142,45 @@
 ;;; Scrollback chunking and chrome detection.
 
 (ert-deftest tmux-control-test-scrollback-frame-start-line-p ()
-  (should (tmux-control--scrollback-frame-start-line-p "[Session] foo"))
-  (should (tmux-control--scrollback-frame-start-line-p "   [Session]"))
-  (should-not (tmux-control--scrollback-frame-start-line-p "x [Session]"))
-  (should-not (tmux-control--scrollback-frame-start-line-p "hello")))
+  ;; With no frame pattern configured (the default) nothing is a frame start.
+  (let ((tmux-control-scrollback-frame-start-regexp nil))
+    (should-not (tmux-control--scrollback-frame-start-line-p "[Session] foo")))
+  (tmux-control-test--with-compaction
+   (should (tmux-control--scrollback-frame-start-line-p "[Session] foo"))
+   (should (tmux-control--scrollback-frame-start-line-p "   [Session]"))
+   (should-not (tmux-control--scrollback-frame-start-line-p "x [Session]"))
+   (should-not (tmux-control--scrollback-frame-start-line-p "hello"))))
 
 (ert-deftest tmux-control-test-scrollback-chrome-line-p ()
-  (should (tmux-control--scrollback-chrome-line-p "[Session] x"))
-  (should (tmux-control--scrollback-chrome-line-p "  AI Credits: 99"))
-  (should (tmux-control--scrollback-chrome-line-p "/ commands here"))
-  (should (tmux-control--scrollback-chrome-line-p "──────────"))
-  (should (tmux-control--scrollback-chrome-line-p "❯"))
-  (should-not (tmux-control--scrollback-chrome-line-p "regular line"))
-  ;; A short rule is not chrome.
-  (should-not (tmux-control--scrollback-chrome-line-p "─────")))
+  ;; With no chrome patterns configured (the default) nothing is chrome.
+  (let ((tmux-control-scrollback-chrome-regexps nil))
+    (should-not (tmux-control--scrollback-chrome-line-p "[Session] x"))
+    (should-not (tmux-control--scrollback-chrome-line-p "❯")))
+  (tmux-control-test--with-compaction
+   (should (tmux-control--scrollback-chrome-line-p "[Session] x"))
+   (should (tmux-control--scrollback-chrome-line-p "  AI Credits: 99"))
+   (should (tmux-control--scrollback-chrome-line-p "/ commands here"))
+   (should (tmux-control--scrollback-chrome-line-p "──────────"))
+   (should (tmux-control--scrollback-chrome-line-p "❯"))
+   (should-not (tmux-control--scrollback-chrome-line-p "regular line"))
+   ;; A short rule is not chrome.
+   (should-not (tmux-control--scrollback-chrome-line-p "─────"))))
 
 (ert-deftest tmux-control-test-scrollback-chunks ()
-  (should (equal (tmux-control--scrollback-chunks
-                  "[Session] a\nb\n[Session] c\nd")
-                 '(("[Session] a" "b") ("[Session] c" "d"))))
-  ;; Trailing whitespace on each line is trimmed.
-  (should (equal (tmux-control--scrollback-chunks "a  \nb\t")
-                 '(("a" "b")))))
+  (tmux-control-test--with-compaction
+   (should (equal (tmux-control--scrollback-chunks
+                   "[Session] a\nb\n[Session] c\nd")
+                  '(("[Session] a" "b") ("[Session] c" "d"))))
+   ;; Trailing whitespace on each line is trimmed.
+   (should (equal (tmux-control--scrollback-chunks "a  \nb\t")
+                  '(("a" "b"))))))
 
 ;;; The full compaction pipeline.
 
 (ert-deftest tmux-control-test-compact-repeated-redraw-lines-dedups ()
-  (let ((tmux-control-compact-scrollback-window 300))
+  (let ((tmux-control-compact-scrollback-window 300)
+        (tmux-control-scrollback-frame-start-regexp tmux-control-test--frame-re)
+        (tmux-control-scrollback-chrome-regexps tmux-control-test--chrome-res))
     ;; A frame repeated verbatim collapses to a single copy, and the
     ;; "[Session]" chrome lines are stripped.
     (should (equal (tmux-control--compact-repeated-redraw-lines
@@ -160,14 +188,18 @@
                    "hello\nworld"))))
 
 (ert-deftest tmux-control-test-compact-repeated-redraw-lines-keeps-distinct ()
-  (let ((tmux-control-compact-scrollback-window 300))
+  (let ((tmux-control-compact-scrollback-window 300)
+        (tmux-control-scrollback-frame-start-regexp tmux-control-test--frame-re)
+        (tmux-control-scrollback-chrome-regexps tmux-control-test--chrome-res))
     ;; Distinct frames are preserved, separated by a single blank line.
     (should (equal (tmux-control--compact-repeated-redraw-lines
                     "[Session] x\nalpha\nbeta\n[Session] x\ngamma\ndelta")
                    "alpha\nbeta\n\ngamma\ndelta"))))
 
 (ert-deftest tmux-control-test-compact-strips-redrawn-body-behind-new-lines ()
-  (let ((tmux-control-compact-scrollback-window 300))
+  (let ((tmux-control-compact-scrollback-window 300)
+        (tmux-control-scrollback-frame-start-regexp tmux-control-test--frame-re)
+        (tmux-control-scrollback-chrome-regexps tmux-control-test--chrome-res))
     ;; A repeated full-screen panel (6+ distinctive lines) wrapped in new
     ;; volatile lines (an evolving prompt) collapses: the panel survives
     ;; once and only the genuinely new prompt line is appended.
@@ -177,7 +209,9 @@
                    "A\nB\nC\nD\nE\nF\n\nXP"))))
 
 (ert-deftest tmux-control-test-compact-keeps-short-repeats ()
-  (let ((tmux-control-compact-scrollback-window 300))
+  (let ((tmux-control-compact-scrollback-window 300)
+        (tmux-control-scrollback-frame-start-regexp tmux-control-test--frame-re)
+        (tmux-control-scrollback-chrome-regexps tmux-control-test--chrome-res))
     ;; Short repeated blocks (below the redraw-run threshold) are NOT
     ;; stripped, so ordinary repeated command output is never lost.
     (should (equal (tmux-control--compact-repeated-redraw-lines
@@ -188,7 +222,9 @@
   ;; A repeated body older than the recent window is not stripped: the
   ;; interior-run search only looks back `tmux-control-compact-scrollback-window'
   ;; lines.
-  (let ((tmux-control-compact-scrollback-window 2))
+  (let ((tmux-control-compact-scrollback-window 2)
+        (tmux-control-scrollback-frame-start-regexp tmux-control-test--frame-re)
+        (tmux-control-scrollback-chrome-regexps tmux-control-test--chrome-res))
     (should (equal (tmux-control--compact-repeated-redraw-lines
                     (concat "[Session]\nA\nB\nC\nD\nE\nF\n"
                             "[Session]\nXP\nA\nB\nC\nD\nE\nF"))
@@ -258,6 +294,8 @@ each wrapped in an evolving prompt line and a status bar.")
   ;; The panel body (8 distinctive lines) must appear at most once: no run
   ;; of 6 consecutive lines may repeat in the compacted output.
   (let* ((tmux-control-compact-scrollback-window 300)
+         (tmux-control-scrollback-frame-start-regexp tmux-control-test--frame-re)
+         (tmux-control-scrollback-chrome-regexps tmux-control-test--chrome-res)
          (out (tmux-control--compact-repeated-redraw-lines
                tmux-control-test--copilot-redraw)))
     (should-not (tmux-control-test--window-repeats-p out 6))
@@ -268,6 +306,8 @@ each wrapped in an evolving prompt line and a status bar.")
 (ert-deftest tmux-control-test-compact-is-idempotent ()
   ;; Compacting already-compacted text changes nothing: a stable fixpoint.
   (let* ((tmux-control-compact-scrollback-window 300)
+         (tmux-control-scrollback-frame-start-regexp tmux-control-test--frame-re)
+         (tmux-control-scrollback-chrome-regexps tmux-control-test--chrome-res)
          (once (tmux-control--compact-repeated-redraw-lines
                 tmux-control-test--copilot-redraw))
          (twice (tmux-control--compact-repeated-redraw-lines once)))
@@ -278,6 +318,8 @@ each wrapped in an evolving prompt line and a status bar.")
   ;; must have appeared verbatim in the input, and the output is no longer
   ;; than the input.  This catches accidental duplication or fabrication.
   (let* ((tmux-control-compact-scrollback-window 300)
+         (tmux-control-scrollback-frame-start-regexp tmux-control-test--frame-re)
+         (tmux-control-scrollback-chrome-regexps tmux-control-test--chrome-res)
          (input tmux-control-test--copilot-redraw)
          (in-lines (split-string input "\n"))
          (out (tmux-control--compact-repeated-redraw-lines input))
