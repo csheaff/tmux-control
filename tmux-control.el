@@ -258,6 +258,13 @@ session (tmux attaches if it exists, otherwise creates it)."
              :noquery t
              :filter #'tmux-control--filter
              :sentinel #'tmux-control--sentinel))
+      ;; tmux runs the `new-session' command from our argv as its first
+      ;; control-mode command and emits one %begin..%end reply for it before
+      ;; any command we send.  Account for that startup reply so the
+      ;; positional reply queue stays aligned and later replies -- notably the
+      ;; `#{pane_id}' query that drives the initial screen seed -- are matched
+      ;; to the correct handler instead of being shifted onto the wrong one.
+      (setq tmux-control--command-queue (list :ignore))
       (process-put tmux-control--process 'adjust-window-size-function
                    #'tmux-control--adjust-window-size)
       (setf (eat-term-parameter tmux-control--terminal 'eat--process)
