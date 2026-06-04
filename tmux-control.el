@@ -1498,6 +1498,10 @@ the cursor exactly where tmux has it instead of guessing from the prompt.
 tmux replies in command order, so the `:cursor-pos' reply lands before
 the `:capture' reply that paints the screen and consumes it."
   (when tmux-control--active-pane
+    ;; Start each seed without a cursor: the :cursor-pos reply fills it in
+    ;; before :capture, and if that query fails the seed falls back to the
+    ;; bottom-left rather than reusing a stale position from an old seed.
+    (setq tmux-control--seed-cursor nil)
     (tmux-control--send-command
      (format "display-message -p -t %s \"#{cursor_x},#{cursor_y}\""
              tmux-control--active-pane)
