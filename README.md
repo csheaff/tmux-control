@@ -77,10 +77,9 @@ A tmux window can hold several panes at once.  A common case is a
 mode (`teammateMode: tmux`), which runs each teammate in its own pane so you
 can watch them work.
 
-`tmux-control` mirrors **one pane at a time** — the window's active pane,
-rendered cleanly (it does not tile every pane into Emacs windows; output
-from the other panes is not interleaved into the view).  Move between panes
-(teammates) with:
+By default `tmux-control` mirrors **one pane at a time** — the window's
+active pane, rendered cleanly (output from the other panes is not
+interleaved into the view).  Move between panes (teammates) with:
 
 - `C-c C-o` (`tmux-control-other-pane`) — cycle to the next pane.
 - `M-x tmux-control-select-pane` — jump to a pane by name, completing over
@@ -88,6 +87,34 @@ from the other panes is not interleaved into the view).  Move between panes
 
 Switching the pane sets the window's active pane, so other clients follow
 along and the live view repaints on the chosen pane.
+
+#### Tiling every pane at once (experimental)
+
+`C-c C-t` (`tmux-control-toggle-tiling`) flips between the single-pane view
+and a **tiled** view that renders *every* pane of the current window at
+once, each in its own buffer, with the Emacs windows split to match tmux's
+own layout — the iTerm "show every pane" view.  This is the natural way to
+watch a whole agent team work side by side.  In the tiled view:
+
+- Every pane updates live and independently; output is routed per pane, so
+  nothing is interleaved.
+- Type into a pane to send to that teammate; selecting a pane's Emacs
+  window makes it tmux's active pane too (other clients follow).
+- Splitting, resizing, or closing a pane in tmux re-tiles automatically,
+  and the mode line labels each pane by its id, command, and title.
+- Each pane is a normal `tmux-control` buffer, so `C-c C-e` scrollback and
+  the usual movement/search/copy work in any of them.
+
+For a session with **several windows — say two, each running its own agent
+team** — tile one window, then switch windows (`M-x
+tmux-control-select-window`) to bring the other team into the tiled view;
+each window tiles its own panes, like iTerm's per-window tabs.  `C-c C-t`
+again (or `M-x tmux-control-untile`) returns to the single-pane view on the
+currently active pane.
+
+Tiling is experimental and devotes the whole frame to the session
+(`delete-other-windows`); panes are sized to tmux's grid and the windows
+split to match, so the fit is close but not pixel-exact.
 
 Useful bindings:
 
@@ -192,6 +219,13 @@ in batches, send keyboard input back with `send-keys -H` (chunking large
 pastes), resize the tmux client, and optionally use tmux flow control (pause
 mode) for very high-volume output.  Mouse handling and broader edge-case
 hardening still need work.
+
+There is also an **experimental multi-pane tiling** view (`C-c C-t`, see
+[Tiling every pane at once](#tiling-every-pane-at-once-experimental)) that
+renders all of a window's panes at once, split to match tmux's layout.  It
+is rougher than the single-pane view — whole-frame only, approximate
+sizing — but already handles live per-pane output, per-pane input,
+focus-follow, and automatic re-tiling on split/resize/close.
 
 ## Development
 
