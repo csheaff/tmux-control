@@ -563,8 +563,10 @@ Use `tmux-control-live' to return to the live interactive pane."
          (socket-name tmux-control--socket-name)
          (session tmux-control--session)
          (target (or tmux-control--active-pane tmux-control--fallback-target))
+         (trailing tmux-control--capture-trailing-p)
          (text (tmux-control--capture-pane host socket-name target
-                                           tmux-control-scrollback-lines))
+                                           tmux-control-scrollback-lines
+                                           trailing))
          (live-buffer (current-buffer))
          (scrollback-buffer-name (format "*%s-scrollback*" (buffer-name)))
          (scrollback-buffer (get-buffer-create scrollback-buffer-name)))
@@ -580,6 +582,7 @@ Use `tmux-control-live' to return to the live interactive pane."
         (setq-local tmux-control--socket-name socket-name)
         (setq-local tmux-control--session session)
         (setq-local tmux-control--scrollback-target target)
+        (setq-local tmux-control--capture-trailing-p trailing)
         (setq-local tmux-control--live-buffer live-buffer)
         (setq-local header-line-format
                     (format " %s socket:%s session:%s target:%s    g:refresh  q/l/RET:live"
@@ -606,7 +609,8 @@ Use `tmux-control-live' to return to the live interactive pane."
          (text (tmux-control--capture-pane tmux-control--host
                                            tmux-control--socket-name
                                            tmux-control--scrollback-target
-                                           tmux-control-scrollback-lines))
+                                           tmux-control-scrollback-lines
+                                           tmux-control--capture-trailing-p))
          (inhibit-read-only t))
     (when-let* ((window (get-buffer-window (current-buffer))))
       (set-window-margins window 0 0))
@@ -844,13 +848,19 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
   "Return a shell command string for tmux ARGS."
   (mapconcat #'shell-quote-argument (cons "tmux" args) " "))
 
-(defun tmux-control--capture-pane (host socket-name target lines)
-  "Return plain text from tmux pane on HOST using SOCKET-NAME and TARGET."
+(defun tmux-control--capture-pane (host socket-name target lines
+                                        &optional preserve-trailing)
+  "Return plain text from tmux pane on HOST using SOCKET-NAME and TARGET.
+With PRESERVE-TRAILING non-nil add `capture-pane -N' so trailing background
+cells (full-width fills such as a TUI tool panel or status bar) are kept;
+the caller must only set it when the server supports -N (tmux 3.1+)."
   (let ((args (append (when socket-name
                         (list "-L" socket-name))
                       (list "capture-pane" "-p" "-e")
                       (when tmux-control-scrollback-join-wrapped-lines
                         (list "-J"))
+                      (when preserve-trailing
+                        (list "-N"))
                       (list "-S" (format "-%d" lines))
                       (when target
                         (list "-t" target)))))
@@ -907,10 +917,17 @@ ignore text properties -- keep working unchanged."
      (ansi-color-apply text))))
 
 (defun tmux-control--prepare-scrollback-text (text)
-  "Prepare captured pane TEXT for the scrollback buffer."
+  "Prepare captured pane TEXT for the scrollback buffer.
+Compaction runs only when it is both enabled and given a frame marker to
+work with: without `tmux-control-scrollback-frame-start-regexp' it can
+de-duplicate nothing, and its line trimming would needlessly strip the
+trailing background cells `capture-pane -N' preserves for full-width
+fills.  So a default (unconfigured) scrollback is shown verbatim, colors
+and trailing backgrounds intact."
   (let ((text (tmux-control--colorize-scrollback text)))
     (tmux-control--trim-trailing-blank-lines
-     (if tmux-control-compact-scrollback
+     (if (and tmux-control-compact-scrollback
+              tmux-control-scrollback-frame-start-regexp)
          (tmux-control--compact-repeated-redraw-lines text)
        text))))
 
@@ -925,6 +942,7 @@ ignore text properties -- keep working unchanged."
 (defvar-local tmux-control--chooser-saved-config nil)
 (defvar-local tmux-control--chooser-cache nil)
 (defvar-local tmux-control--chooser-last-index nil)
+(defvar-local tmux-control--chooser-trailing nil)
 (defvar-local tmux-control--window-chooser-keys-active nil)
 (defvar tmux-control--window-preview-timer nil
   "Idle timer that refreshes the window preview, or nil.")
@@ -1008,12 +1026,17 @@ first entry when no active window is marked."
       (goto-char found)
       (beginning-of-line))))
 
-(defun tmux-control--capture-window-screen (host socket-name session index)
+(defun tmux-control--capture-window-screen (host socket-name session index
+                                                 &optional preserve-trailing)
   "Capture the visible screen of SESSION:INDEX active pane as colored text.
-Run tmux on HOST using SOCKET-NAME, or locally when HOST is nil/empty."
+Run tmux on HOST using SOCKET-NAME, or locally when HOST is nil/empty.
+With PRESERVE-TRAILING add `capture-pane -N' (tmux 3.1+) so full-width
+background fills survive in the preview."
   (let* ((target (format "%s:%s" session index))
          (args (append (when socket-name (list "-L" socket-name))
-                       (list "capture-pane" "-p" "-e" "-t" target))))
+                       (list "capture-pane" "-p" "-e")
+                       (when preserve-trailing (list "-N"))
+                       (list "-t" target))))
     (if (and host (not (string-empty-p host)))
         (tmux-control--call
          "ssh"
@@ -1023,11 +1046,13 @@ Run tmux on HOST using SOCKET-NAME, or locally when HOST is nil/empty."
                        (tmux-control--tmux-command-string args))))
       (tmux-control--call "tmux" args))))
 
-(defun tmux-control--render-window-preview (host socket-name session index)
+(defun tmux-control--render-window-preview (host socket-name session index
+                                                 &optional preserve-trailing)
   "Return colored preview text for SESSION:INDEX, or an error placeholder."
   (condition-case err
       (tmux-control--colorize-scrollback
-       (tmux-control--capture-window-screen host socket-name session index))
+       (tmux-control--capture-window-screen host socket-name session index
+                                            preserve-trailing))
     (error (format "[preview unavailable: %s]" (error-message-string err)))))
 
 (defun tmux-control--chooser-update-preview ()
@@ -1036,12 +1061,13 @@ Run tmux on HOST using SOCKET-NAME, or locally when HOST is nil/empty."
         (preview tmux-control--chooser-preview-buffer)
         (host tmux-control--chooser-host)
         (socket tmux-control--chooser-socket)
-        (session tmux-control--chooser-session))
+        (session tmux-control--chooser-session)
+        (trailing tmux-control--chooser-trailing))
     (when (and index (buffer-live-p preview))
       (let ((rendered
              (or (cdr (assoc index tmux-control--chooser-cache))
                  (let ((text (tmux-control--render-window-preview
-                              host socket session index)))
+                              host socket session index trailing)))
                    (push (cons index text) tmux-control--chooser-cache)
                    text))))
         (with-current-buffer preview
@@ -1133,6 +1159,7 @@ completion so the user is never stranded in a half-built chooser."
   (let* ((host tmux-control--host)
          (socket tmux-control--socket-name)
          (session tmux-control--session)
+         (trailing tmux-control--capture-trailing-p)
          (live-buffer (current-buffer))
          (windows (tmux-control--list-windows host socket session)))
     (unless windows
@@ -1163,6 +1190,7 @@ completion so the user is never stranded in a half-built chooser."
               (setq tmux-control--chooser-host host
                     tmux-control--chooser-socket socket
                     tmux-control--chooser-session session
+                    tmux-control--chooser-trailing trailing
                     tmux-control--chooser-live-buffer live-buffer
                     tmux-control--chooser-preview-buffer preview
                     tmux-control--chooser-saved-config saved
