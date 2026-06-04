@@ -587,6 +587,20 @@ each wrapped in an evolving prompt line and a status bar.")
                      ("1" . "1: vim")
                      ("2" . "2: editor pane"))))))
 
+(ert-deftest tmux-control-test-list-panes-parses ()
+  (cl-letf (((symbol-function 'tmux-control--call)
+             (lambda (&rest _)
+               (concat "%0\t0\t1\tbash\tclays-mbp\n"
+                       "%3\t1\t0\tnode\tcoder\n"
+                       "%2\t2\t0\tnode\tnode\n"
+                       "garbage-line"))))
+    (should (equal (tmux-control--list-panes nil "main" "emacs")
+                   ;; index: command (title-when-distinct) [active]
+                   '(("%0" . "0: bash (clays-mbp) [active]")
+                     ("%3" . "1: node (coder)")
+                     ;; title == command -> no redundant "(node)"
+                     ("%2" . "2: node"))))))
+
 ;;; Window-management command construction.
 
 (defun tmux-control-test--capture-commands (thunk)

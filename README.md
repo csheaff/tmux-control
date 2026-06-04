@@ -70,6 +70,25 @@ These commands act on the connected session (no key bindings by default):
 Switching, creating, or removing a window changes the session's active
 window, so any other client attached to the same session follows along.
 
+### Panes (and agent teams)
+
+A tmux window can hold several panes at once.  A common case is a
+[Claude Code](https://www.anthropic.com/claude-code) **agent team** in tmux
+mode (`teammateMode: tmux`), which runs each teammate in its own pane so you
+can watch them work.
+
+`tmux-control` mirrors **one pane at a time** — the window's active pane,
+rendered cleanly (it does not tile every pane into Emacs windows; output
+from the other panes is not interleaved into the view).  Move between panes
+(teammates) with:
+
+- `C-c C-o` (`tmux-control-other-pane`) — cycle to the next pane.
+- `M-x tmux-control-select-pane` — jump to a pane by name, completing over
+  the window's panes (each labelled by its index, command, and title).
+
+Switching the pane sets the window's active pane, so other clients follow
+along and the live view repaints on the chosen pane.
+
 Useful bindings:
 
 - `C-c C-k` disconnects the Emacs control client.

@@ -411,6 +411,42 @@ Queries tmux on HOST using SOCKET-NAME."
                          label)))))
            (split-string (string-trim text) "\n" t)))))
 
+(defun tmux-control--list-panes (host socket-name target)
+  "Return an alist of (PANE-ID . LABEL) for the active window of TARGET.
+Queries tmux on HOST using SOCKET-NAME.  LABEL shows the pane index, its
+running command, its title when that differs, and whether it is active."
+  (let* ((fmt "#{pane_id}\t#{pane_index}\t#{pane_active}\t#{pane_current_command}\t#{pane_title}")
+         (args (append (when socket-name (list "-L" socket-name))
+                       (list "list-panes" "-t" target "-F" fmt)))
+         (text (if (and host (not (string-empty-p host)))
+                   (tmux-control--call
+                    "ssh"
+                    (list host
+                          (concat tmux-control-remote-tmux-socket-setup
+                                  " && "
+                                  (tmux-control--tmux-command-string args))))
+                 (tmux-control--call "tmux" args))))
+    (delq nil
+          (mapcar
+           (lambda (line)
+             (when (string-match
+                    "\\`\\(%[0-9]+\\)\t\\([0-9]+\\)\t\\([01]\\)\t\\([^\t]*\\)\t\\(.*\\)\\'"
+                    line)
+               (let* ((pane (match-string 1 line))
+                      (index (match-string 2 line))
+                      (active (string= (match-string 3 line) "1"))
+                      (cmd (match-string 4 line))
+                      (title (match-string 5 line))
+                      (label (format "%s: %s%s%s"
+                                     index cmd
+                                     (if (and (not (string-empty-p title))
+                                              (not (equal title cmd)))
+                                         (format " (%s)" title)
+                                       "")
+                                     (if active " [active]" ""))))
+                 (cons pane label))))
+           (split-string (string-trim text) "\n" t)))))
+
 (defun tmux-control--ensure-live ()
   "Signal a `user-error' unless this buffer has a live tmux-control session."
   (unless tmux-control--session
@@ -558,10 +594,34 @@ is left untouched."
 Only the active pane is mirrored in the live terminal, so in a split-pane
 window -- for example a Claude Code agent team -- this steps to the next
 pane (the next teammate).  tmux reports the change with %window-pane-changed
-and the view repaints on the newly active pane.  Bound to \\`C-c C-o'."
+and the view repaints on the newly active pane.  Bound to \\`C-c C-o'.
+See `tmux-control-select-pane' to jump to a pane by name."
   (interactive)
   (tmux-control--ensure-live)
   (tmux-control--send-command "select-pane -t :.+"))
+
+(defun tmux-control--read-pane ()
+  "Read a pane id of the current window using completion over its panes."
+  (let* ((panes (tmux-control--list-panes tmux-control--host
+                                          tmux-control--socket-name
+                                          tmux-control--session))
+         (choices (mapcar (lambda (p) (cons (cdr p) (car p))) panes)))
+    (unless choices
+      (user-error "No panes to choose from"))
+    (or (cdr (assoc (completing-read "Pane: " choices nil t) choices))
+        (user-error "No such pane"))))
+
+(defun tmux-control-select-pane (&optional pane)
+  "Switch the live view to another pane in the current window.
+Interactively, complete over the window's panes -- a Claude Code agent
+team shows each teammate as a pane, labelled by its command and title --
+and focus the chosen one.  With PANE (a pane id) given non-interactively,
+switch to it directly.  Switching sets the window's active pane, which
+tmux reports so the view repaints on it."
+  (interactive (list nil))
+  (tmux-control--ensure-live)
+  (let ((pane (or pane (tmux-control--read-pane))))
+    (tmux-control--send-command (format "select-pane -t %s" pane))))
 
 
 (defun tmux-control-scrollback ()
