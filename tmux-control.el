@@ -69,6 +69,23 @@ When nil or empty, connect to local tmux."
   "Number of pane-history lines to show in scrollback view."
   :type 'integer)
 
+(defcustom tmux-control-pause-after nil
+  "Enable tmux control-mode flow control after this many seconds, or nil.
+
+When a positive number, the client asks tmux (via `refresh-client -f
+pause-after=N') to pause a pane once the output buffered for this client
+falls more than N seconds behind, instead of streaming an unbounded
+backlog.  On a pause the live view reseeds from the pane's current screen
+and resumes, so a burst of output -- `cat' on a huge file, a noisy build --
+jumps to the latest state rather than replaying every intermediate line,
+and Emacs stays responsive.
+
+nil (the default) leaves flow control off and streams all output.  Requires
+tmux 3.2 or newer; older servers reject the request (logging one command
+error) and never pause."
+  :type '(choice (const :tag "Off (stream everything)" nil)
+                 (integer :tag "Seconds behind before pausing")))
+
 (defcustom tmux-control-scrollback-join-wrapped-lines t
   "Non-nil means join soft-wrapped pane lines in scrollback captures."
   :type 'boolean)
@@ -327,6 +344,12 @@ session (tmux attaches if it exists, otherwise creates it)."
     (with-current-buffer buffer
       (tmux-control--resize-to-window)
       (tmux-control--send-command "display-message -p '#{pane_id}'" :pane-id)
+      (when (and (integerp tmux-control-pause-after)
+                 (> tmux-control-pause-after 0))
+        ;; Opt-in control-mode flow control: tmux pauses a lagging pane and
+        ;; notifies with %pause instead of streaming an unbounded backlog.
+        (tmux-control--send-command
+         (format "refresh-client -f pause-after=%d" tmux-control-pause-after)))
       (tmux-control--disable-line-numbers))
     buffer))
 
@@ -1372,6 +1395,15 @@ per message."
     (setq tmux-control--active-pane (match-string 1 line))
     (push (tmux-control--decode-output (or (match-string 2 line) ""))
           tmux-control--output-batch))
+   ((and (not tmux-control--collecting-command)
+         (string-match "\\`%extended-output \\(%[0-9]+\\) [^:]*: ?\\(.*\\)\\'" line))
+    ;; With flow control on (`tmux-control-pause-after'), tmux delivers
+    ;; output as "%extended-output PANE AGE ... : VALUE" instead of %output.
+    ;; The value is escaped exactly like %output; the age and reserved
+    ;; fields before the colon are ignored.
+    (setq tmux-control--active-pane (match-string 1 line))
+    (push (tmux-control--decode-output (match-string 2 line))
+          tmux-control--output-batch))
    (t
     ;; Any control line: flush pending output first so it lands before the
     ;; state change (a resize, a seed, a pane switch) that follows it.
@@ -1399,6 +1431,11 @@ per message."
          (if (string-empty-p reason)
              "tmux session ended"
            (format "tmux session ended: %s" reason)))))
+     ((string-match "\\`%pause \\(%[0-9]+\\)\\'" line)
+      (tmux-control--handle-pause (match-string 1 line)))
+     ((string-prefix-p "%continue " line)
+      ;; tmux resumed streaming the pane; nothing further to do.
+      nil)
      (tmux-control--collecting-command
       (push line tmux-control--command-output))
      ((string-match "\\`%window-pane-changed [^ ]+ \\(%[0-9]+\\)\\'" line)
@@ -1469,6 +1506,19 @@ the `:capture' reply that paints the screen and consumes it."
      (format "capture-pane -p -e -t %s"
              tmux-control--active-pane)
      :capture)))
+
+(defun tmux-control--handle-pause (pane)
+  "Resync after tmux paused PANE for lagging, then resume streaming it.
+With `tmux-control-pause-after' set, tmux stops sending a pane's buffered
+output once this client falls too far behind and sends %pause.  Reseed
+from the pane's current screen to skip the backlog tmux dropped, then ask
+tmux to continue so live output resumes from the present."
+  (when (equal pane tmux-control--active-pane)
+    (tmux-control--seed-screen))
+  ;; tmux's command parser rejects a bare "%0:continue" argument, so quote it.
+  (tmux-control--send-command
+   (format "refresh-client -A %s"
+           (tmux-control--quote-tmux-arg (concat pane ":continue")))))
 
 (defconst tmux-control--ansi-control-regexp
   (concat "\e][^\a\e]*\\(?:\a\\|\e\\\\\\)"      ; OSC: ESC ] ... (BEL or ST)

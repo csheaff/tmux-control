@@ -143,6 +143,27 @@ TUI, for example:
 With no frame regexp set, `tmux-control-compact-scrollback` has nothing to act
 on and scrollback is left untouched.
 
+### High-volume output (flow control)
+
+Live `%output` is rendered in batches (one repaint per process-filter chunk),
+so a flood — `cat` on a large file, a noisy build, `yes` — streams without
+freezing Emacs.  The view still replays every line, so a very large burst
+takes a while to drain.
+
+For an upper bound on that, enable tmux's control-mode flow control:
+
+```elisp
+(setq tmux-control-pause-after 1)  ;; seconds behind before tmux pauses
+```
+
+When the output buffered for this client falls more than that many seconds
+behind, tmux pauses the pane and notifies the client, which reseeds from the
+pane's current screen and resumes — so the view jumps to the latest state
+instead of replaying the whole backlog.  It engages only when the client is
+genuinely behind, which is most likely over a higher-latency (e.g. remote SSH)
+connection; a fast local client often keeps up and never triggers it.  Off by
+default; requires tmux 3.2 or newer.
+
 ## Status
 
 This is a first MVP.  It can attach to tmux, seed the live terminal from

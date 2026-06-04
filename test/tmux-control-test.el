@@ -77,6 +77,29 @@
   (should (equal (tmux-control--decode-output "x\\07") "x\\07"))
   (should (equal (tmux-control--decode-output "no\\backslash") "no\\backslash")))
 
+(ert-deftest tmux-control-test-extended-output-parse ()
+  ;; With flow control on, output arrives as %extended-output with an age
+  ;; (and reserved) field before a colon; the value is decoded like %output.
+  (let ((tmux-control--collecting-command nil)
+        (tmux-control--output-batch nil)
+        (tmux-control--active-pane nil))
+    (tmux-control--handle-line "%extended-output %3 0 : hello\\012")
+    (should (equal tmux-control--active-pane "%3"))
+    (should (equal tmux-control--output-batch '("hello\n")))))
+
+(ert-deftest tmux-control-test-handle-pause-resumes ()
+  ;; A %pause reseeds the active pane and asks tmux to continue streaming.
+  (let ((sent '())
+        (seeded nil))
+    (cl-letf (((symbol-function 'tmux-control--seed-screen)
+               (lambda () (setq seeded t)))
+              ((symbol-function 'tmux-control--send-command)
+               (lambda (cmd &optional _kind) (push cmd sent))))
+      (let ((tmux-control--active-pane "%0"))
+        (tmux-control--handle-pause "%0")))
+    (should seeded)
+    (should (member "refresh-client -A \"%0:continue\"" sent))))
+
 ;;; Input hex encoding.
 
 (ert-deftest tmux-control-test-string-to-hex-args ()
