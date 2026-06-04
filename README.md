@@ -169,10 +169,10 @@ default; requires tmux 3.2 or newer.
 This is a first MVP.  It can attach to tmux, seed the live terminal from
 `capture-pane` (cursor included), open a same-buffer Emacs scrollback view that
 can optionally compact repeated TUI redraws, render live `%output` through Eat
-in batches, send keyboard input back with `send-keys -H`, and resize the tmux
-client, and chunk large pastes so they are not dropped.  Mouse handling,
-control-mode flow control (pause mode) for very high-volume output, and broader
-edge-case hardening still need work.
+in batches, send keyboard input back with `send-keys -H` (chunking large
+pastes), resize the tmux client, and optionally use tmux flow control (pause
+mode) for very high-volume output.  Mouse handling and broader edge-case
+hardening still need work.
 
 ## Development
 
