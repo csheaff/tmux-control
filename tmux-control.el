@@ -113,6 +113,15 @@ tmux query over SSH."
 (defvar-local tmux-control--process nil)
 (defvar-local tmux-control--terminal nil)
 (defvar-local tmux-control--accumulator "")
+(defvar-local tmux-control--display-dirty nil
+  "Non-nil when Eat output has been fed but not yet redisplayed.
+Set by `tmux-control--feed-terminal' and cleared by
+`tmux-control--flush-display', which coalesces a chunk of streamed
+%output into a single repaint.")
+(defvar-local tmux-control--output-batch nil
+  "Reverse-order list of decoded %output payloads awaiting a single feed.
+Accumulated by `tmux-control--handle-line' and drained by
+`tmux-control--flush-output-batch'.")
 (defvar-local tmux-control--active-pane nil)
 (defvar-local tmux-control--fallback-target nil)
 (defvar-local tmux-control--host nil)
@@ -709,6 +718,8 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
                             emulation-mode-map-alists)))
     (setq tmux-control--keys-active t)
     (setq tmux-control--accumulator "")
+    (setq tmux-control--display-dirty nil)
+    (setq tmux-control--output-batch nil)
     (setq tmux-control--active-pane nil)
     (setq tmux-control--alt-screen-honored t)
     (setq tmux-control--command-queue nil)
@@ -1280,7 +1291,10 @@ ordinary short repeats) are kept.  OUT is searched only within the recent
       (setq tmux-control--accumulator
             (concat tmux-control--accumulator chunk))
       (let ((start 0)
-            line-end)
+            line-end
+            ;; Capture follow-windows before any output is fed this pass, so
+            ;; windows tracking the live cursor are identified before it moves.
+            (sync-windows (tmux-control--current-sync-windows)))
         (while (setq line-end (string-match "\n" tmux-control--accumulator start))
           (let ((line (substring tmux-control--accumulator start line-end)))
             (when (and (> (length line) 0)
@@ -1289,36 +1303,59 @@ ordinary short repeats) are kept.  OUT is searched only within the recent
             (tmux-control--handle-line line))
           (setq start (1+ line-end)))
         (setq tmux-control--accumulator
-              (substring tmux-control--accumulator start))))))
+              (substring tmux-control--accumulator start))
+        ;; Feed any output still batched at the end of the chunk, then do a
+        ;; single redisplay -- not one per %output message.
+        (tmux-control--flush-output-batch)
+        (tmux-control--flush-display sync-windows)))))
+
+(defun tmux-control--flush-output-batch ()
+  "Feed any batched %output payloads to Eat as a single write.
+Consecutive %output notifications are accumulated by
+`tmux-control--handle-line' and decoded into one string here, so a flood
+costs one `eat-term-process-output' call per run of output rather than one
+per message."
+  (when tmux-control--output-batch
+    (let ((out (apply #'concat (nreverse tmux-control--output-batch))))
+      (setq tmux-control--output-batch nil)
+      (tmux-control--feed-terminal out))))
 
 (defun tmux-control--handle-line (line)
   "Handle one tmux control protocol LINE."
   (cond
-   ((string-prefix-p "%begin " line)
-    (setq tmux-control--current-command-kind
-          (or (pop tmux-control--command-queue) :ignore))
-    (setq tmux-control--collecting-command t)
-    (setq tmux-control--command-output nil))
-   ((string-prefix-p "%end " line)
-    (tmux-control--finish-command-output))
-   ((string-prefix-p "%error " line)
-    (setq tmux-control--collecting-command nil)
-    (setq tmux-control--command-output nil)
-    (setq tmux-control--current-command-kind :ignore)
-    (tmux-control--message "tmux command failed"))
-   (tmux-control--collecting-command
-    (push line tmux-control--command-output))
-   ((string-match "\\`%output \\(%[0-9]+\\)\\(?: \\(.*\\)\\)?\\'" line)
-    (let ((pane (match-string 1 line))
-          (payload (or (match-string 2 line) "")))
-      (setq tmux-control--active-pane pane)
-      (tmux-control--write-terminal (tmux-control--decode-output payload))))
-   ((string-match "\\`%window-pane-changed [^ ]+ \\(%[0-9]+\\)\\'" line)
+   ;; Fast path: outside a command reply, batch consecutive %output
+   ;; payloads.  They are flushed before the next control line (to preserve
+   ;; ordering) and at the end of each filter chunk.
+   ((and (not tmux-control--collecting-command)
+         (string-match "\\`%output \\(%[0-9]+\\)\\(?: \\(.*\\)\\)?\\'" line))
     (setq tmux-control--active-pane (match-string 1 line))
-    (tmux-control--refresh-alt-screen-option)
-    (tmux-control--refresh-pane-size))
-   ((string-prefix-p "%layout-change " line)
-    (tmux-control--refresh-pane-size))))
+    (push (tmux-control--decode-output (or (match-string 2 line) ""))
+          tmux-control--output-batch))
+   (t
+    ;; Any control line: flush pending output first so it lands before the
+    ;; state change (a resize, a seed, a pane switch) that follows it.
+    (tmux-control--flush-output-batch)
+    (cond
+     ((string-prefix-p "%begin " line)
+      (setq tmux-control--current-command-kind
+            (or (pop tmux-control--command-queue) :ignore))
+      (setq tmux-control--collecting-command t)
+      (setq tmux-control--command-output nil))
+     ((string-prefix-p "%end " line)
+      (tmux-control--finish-command-output))
+     ((string-prefix-p "%error " line)
+      (setq tmux-control--collecting-command nil)
+      (setq tmux-control--command-output nil)
+      (setq tmux-control--current-command-kind :ignore)
+      (tmux-control--message "tmux command failed"))
+     (tmux-control--collecting-command
+      (push line tmux-control--command-output))
+     ((string-match "\\`%window-pane-changed [^ ]+ \\(%[0-9]+\\)\\'" line)
+      (setq tmux-control--active-pane (match-string 1 line))
+      (tmux-control--refresh-alt-screen-option)
+      (tmux-control--refresh-pane-size))
+     ((string-prefix-p "%layout-change " line)
+      (tmux-control--refresh-pane-size))))))
 
 (defun tmux-control--finish-command-output ()
   "Handle the end of a tmux command reply."
@@ -1493,8 +1530,25 @@ so the reactive query responses (device-attributes, cursor-position, and
 color reports) Eat generates while rendering tmux output are not injected
 into the pane as input.")
 
-(defun tmux-control--write-terminal (output)
-  "Write decoded terminal OUTPUT to Eat.
+(defun tmux-control--current-sync-windows ()
+  "Return the windows that should scroll-follow the live terminal cursor.
+Must be called BEFORE feeding new output: Eat identifies a following
+window by its point sitting on the current cursor, so once output moves
+the cursor the association is lost.  Captured at the start of a render
+pass and replayed by `tmux-control--flush-display'."
+  (and (fboundp 'eat--synchronize-scroll-windows)
+       tmux-control--terminal
+       (eat-term-live-p tmux-control--terminal)
+       (eat--synchronize-scroll-windows)))
+
+(defun tmux-control--feed-terminal (output)
+  "Process decoded terminal OUTPUT into Eat without redisplaying.
+
+Marks the display dirty so a later `tmux-control--flush-display' repaints
+once.  Batching the repaint -- one flush per process-filter chunk rather
+than one per %output notification -- keeps high-volume output (a flood
+such as `yes' or `seq 1 100000') from paying the full redisplay and
+cursor-visibility cost on every message while draining.
 
 While Eat parses OUTPUT it may generate replies to terminal queries the
 pane's program emitted (device attributes, cursor-position and color
@@ -1508,16 +1562,36 @@ the shell's command line.  Bind `tmux-control--suppress-responses' so
 `tmux-control--send-input' drops those sends while rendering."
   (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
     (let ((inhibit-read-only t)
-          (tmux-control--suppress-responses t)
-          (sync-windows (and (fboundp 'eat--synchronize-scroll-windows)
-                             (eat--synchronize-scroll-windows))))
+          (tmux-control--suppress-responses t))
       (eat-term-process-output tmux-control--terminal output)
+      (setq tmux-control--display-dirty t))))
+
+(defun tmux-control--flush-display (sync-windows)
+  "Redisplay Eat once when output has been fed since the last flush.
+SYNC-WINDOWS is the result of `tmux-control--current-sync-windows' taken
+before the output was fed; those windows are scrolled to follow the new
+cursor position and their cursor line is kept visible."
+  (when (and tmux-control--display-dirty
+             tmux-control--terminal
+             (eat-term-live-p tmux-control--terminal))
+    (setq tmux-control--display-dirty nil)
+    (let ((inhibit-read-only t))
       (eat-term-redisplay tmux-control--terminal)
       (when (and sync-windows
                  (boundp 'eat--synchronize-scroll-function))
         (funcall eat--synchronize-scroll-function sync-windows)
         (tmux-control--keep-cursor-visible sync-windows))
       (run-hooks 'eat-update-hook))))
+
+(defun tmux-control--write-terminal (output)
+  "Process decoded terminal OUTPUT into Eat and redisplay immediately.
+For one-shot writes (screen seed, resize repaint) that are not part of a
+streamed flood; live %output is fed via `tmux-control--feed-terminal' and
+flushed once per filter chunk."
+  (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+    (let ((sync-windows (tmux-control--current-sync-windows)))
+      (tmux-control--feed-terminal output)
+      (tmux-control--flush-display sync-windows))))
 
 (defun tmux-control--send-input (_terminal string)
   "Send STRING as input to the active tmux pane.
