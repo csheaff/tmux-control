@@ -327,6 +327,22 @@ Queries tmux on HOST using SOCKET-NAME."
   (tmux-control--send-command "display-message -p '#{pane_id}'" :pane-id)
   (tmux-control--resize-to-window))
 
+(defun tmux-control--interpret-alt-screen-reply (output global-p)
+  "Interpret a `show-options' OUTPUT for the alternate-screen option.
+OUTPUT is the list of reply lines.  When GLOBAL-P is nil this is the
+window-level query: a value of \"on\"/\"off\" resolves the option and any
+other (empty) reply means the window inherits it.  When GLOBAL-P is non-nil
+this is the global default, which is on unless explicitly \"off\".
+Returns (:honored . BOOL) when resolved, or the symbol `:inherit' when a
+window-level reply is empty and the caller must query the global default.
+Pure: no side effects, for unit testing the two-stage option protocol."
+  (let ((val (car (cl-remove-if #'string-empty-p
+                                (mapcar #'string-trim output)))))
+    (cond
+     (global-p (cons :honored (not (equal val "off"))))
+     ((member val '("on" "off")) (cons :honored (string= val "on")))
+     (t :inherit))))
+
 (defun tmux-control--refresh-alt-screen-option ()
   "Re-query whether the active window honors the alternate-screen option.
 Sends a control-mode `show-options' query for the active pane; the reply
@@ -541,6 +557,15 @@ keystroke, rather than dropping it."
                (eat-term-live-p tmux-control--terminal))
       (eat-self-input 1 event))))
 
+(defun tmux-control--alt-screen-effective-p (honored eat-alt-display-p)
+  "Combine HONORED with EAT-ALT-DISPLAY-P into the effective alt-screen state.
+HONORED is whether the active tmux window honors the `alternate-screen'
+option; EAT-ALT-DISPLAY-P is whether Eat currently reports the alternate
+display.  Returns a normalized boolean: the pane is truly on the alternate
+screen only when both hold.  Pure: no side effects, for unit testing the
+phantom-alternate-screen gating."
+  (and honored eat-alt-display-p t))
+
 (defun tmux-control--alt-screen-p ()
   "Return non-nil when the live pane truly shows the alternate display.
 This is the full-screen display used by TUI applications such as vim or
@@ -553,12 +578,13 @@ Eat's state alone is unreliable.  Read locally, with no tmux query."
   (and tmux-control--alt-screen-honored
        tmux-control--terminal
        (eat-term-live-p tmux-control--terminal)
-       (cond
-        ((fboundp 'eat-term-in-alternative-display-p)
-         (eat-term-in-alternative-display-p tmux-control--terminal))
-        ((fboundp 'eat--t-term-main-display)
-         (eat--t-term-main-display tmux-control--terminal)))
-       t))
+       (tmux-control--alt-screen-effective-p
+        tmux-control--alt-screen-honored
+        (cond
+         ((fboundp 'eat-term-in-alternative-display-p)
+          (eat-term-in-alternative-display-p tmux-control--terminal))
+         ((fboundp 'eat--t-term-main-display)
+          (eat--t-term-main-display tmux-control--terminal))))))
 
 (defun tmux-control--pane-grabs-mouse-p ()
   "Return non-nil when the pane's application has requested mouse tracking.
@@ -572,6 +598,22 @@ Such applications (full-screen TUIs, but also normal-screen programs like
   "Return non-nil when Eat exposes the screen state used for wheel gating."
   (or (fboundp 'eat-term-in-alternative-display-p)
       (fboundp 'eat--t-term-main-display)))
+
+(defun tmux-control--wheel-should-enter-scrollback-p
+    (direction enabled detectable alt-screen grabs-mouse)
+  "Return non-nil when a wheel event should open the Emacs scrollback view.
+DIRECTION is the wheel `event-basic-type'.  ENABLED is
+`tmux-control-wheel-enters-scrollback'.  DETECTABLE is whether Eat's screen
+state can be read.  ALT-SCREEN is whether the pane truly shows the alternate
+display.  GRABS-MOUSE is whether the application requested mouse tracking.
+Scrollback is entered only on wheel-up over a readable normal-screen pane
+that has not grabbed the mouse.  Pure: the decision behind
+`tmux-control-wheel-scroll', extracted for unit testing."
+  (and enabled
+       (eq direction 'wheel-up)
+       detectable
+       (not alt-screen)
+       (not grabs-mouse)))
 
 (defun tmux-control-wheel-scroll (event)
   "Handle a mouse wheel EVENT in a live tmux-control buffer.
@@ -595,12 +637,13 @@ be read, so the live behavior is otherwise unchanged."
     (if (window-live-p window)
         (with-current-buffer (window-buffer window)
           (cond
-           ((and tmux-control-wheel-enters-scrollback
-                 (eq direction 'wheel-up)
-                 (derived-mode-p 'tmux-control-mode)
-                 (tmux-control--wheel-detectable-p)
-                 (not (tmux-control--alt-screen-p))
-                 (not (tmux-control--pane-grabs-mouse-p)))
+           ((and (derived-mode-p 'tmux-control-mode)
+                 (tmux-control--wheel-should-enter-scrollback-p
+                  direction
+                  tmux-control-wheel-enters-scrollback
+                  (tmux-control--wheel-detectable-p)
+                  (tmux-control--alt-screen-p)
+                  (tmux-control--pane-grabs-mouse-p)))
             (select-window window)
             (tmux-control-scrollback))
            (t
@@ -1273,22 +1316,18 @@ ordinary short repeats) are kept.  OUT is searched only within the recent
          (tmux-control--seed-screen)
          (tmux-control--refresh-alt-screen-option))))
     (:alt-screen-opt
-     (let ((val (car (cl-remove-if #'string-empty-p
-                                   (mapcar #'string-trim
-                                           tmux-control--command-output)))))
-       (cond
-        ((member val '("on" "off"))
-         (setq tmux-control--alt-screen-honored (string= val "on")))
-        (t
-         ;; Empty reply means the window inherits the option; resolve it
-         ;; from the global-window default.
-         (tmux-control--send-command "show-options -gwv alternate-screen"
-                                     :alt-screen-opt-global)))))
+     (let ((res (tmux-control--interpret-alt-screen-reply
+                 tmux-control--command-output nil)))
+       (if (eq res :inherit)
+           ;; Empty reply means the window inherits the option; resolve it
+           ;; from the global-window default.
+           (tmux-control--send-command "show-options -gwv alternate-screen"
+                                       :alt-screen-opt-global)
+         (setq tmux-control--alt-screen-honored (cdr res)))))
     (:alt-screen-opt-global
-     (let ((val (car (cl-remove-if #'string-empty-p
-                                   (mapcar #'string-trim
-                                           tmux-control--command-output)))))
-       (setq tmux-control--alt-screen-honored (not (equal val "off")))))
+     (setq tmux-control--alt-screen-honored
+           (cdr (tmux-control--interpret-alt-screen-reply
+                 tmux-control--command-output t))))
     (:capture
      (tmux-control--write-terminal
       (tmux-control--screen-seed-sequence

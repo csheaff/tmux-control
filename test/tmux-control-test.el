@@ -215,6 +215,143 @@
   (should-not (tmux-control--redraw-run-distinctive-p '("a" "a" "a" "a")))
   (should-not (tmux-control--redraw-run-distinctive-p '("a" "" "b" "" "c"))))
 
+;;; Compaction invariants (property tests over a realistic fixture).
+;;
+;; These guard the *class* of "repeated content in scrollback" bugs rather
+;; than one hand-picked example: they assert structural invariants on the
+;; compacted output instead of an exact string, so a regression that lets a
+;; redrawn panel through is caught even if its exact shape differs.
+
+(defun tmux-control-test--window-repeats-p (text n)
+  "Return non-nil when some run of N consecutive lines repeats in TEXT."
+  (let* ((lines (split-string text "\n"))
+         (len (length lines))
+         (seen (make-hash-table :test #'equal))
+         (found nil)
+         (i 0))
+    (while (and (<= (+ i n) len) (not found))
+      (let ((window (mapconcat #'identity (cl-subseq lines i (+ i n)) "\n")))
+        (if (gethash window seen)
+            (setq found t)
+          (puthash window t seen)))
+      (setq i (1+ i)))
+    found))
+
+(defconst tmux-control-test--copilot-redraw
+  (let ((panel (concat "  | file_alpha.py\n"
+                       "  | file_beta.py\n"
+                       "  | file_gamma.py\n"
+                       "  | file_delta.py\n"
+                       "  | file_epsilon.py\n"
+                       "  | file_zeta.py\n"
+                       "  | file_eta.py\n"
+                       "  + 7 lines"))
+        (status " @ files . # issues                  Auto -> GPT"))
+    (mapconcat (lambda (prompt)
+                 (concat "[Session]\n" panel "\n" prompt "\n" status))
+               '("> s" "> se" "> sea")
+               "\n"))
+  "A copilot-style capture: one panel redrawn across three keystroke frames,
+each wrapped in an evolving prompt line and a status bar.")
+
+(ert-deftest tmux-control-test-compact-no-repeated-redraw-run ()
+  ;; The panel body (8 distinctive lines) must appear at most once: no run
+  ;; of 6 consecutive lines may repeat in the compacted output.
+  (let* ((tmux-control-compact-scrollback-window 300)
+         (out (tmux-control--compact-repeated-redraw-lines
+               tmux-control-test--copilot-redraw)))
+    (should-not (tmux-control-test--window-repeats-p out 6))
+    ;; The distinctive panel survives exactly once.
+    (should (= 1 (length (seq-filter (lambda (l) (equal l "  | file_eta.py"))
+                                     (split-string out "\n")))))))
+
+(ert-deftest tmux-control-test-compact-is-idempotent ()
+  ;; Compacting already-compacted text changes nothing: a stable fixpoint.
+  (let* ((tmux-control-compact-scrollback-window 300)
+         (once (tmux-control--compact-repeated-redraw-lines
+                tmux-control-test--copilot-redraw))
+         (twice (tmux-control--compact-repeated-redraw-lines once)))
+    (should (equal once twice))))
+
+(ert-deftest tmux-control-test-compact-output-is-subset-of-input ()
+  ;; Compaction only ever drops lines: every nonblank line in the output
+  ;; must have appeared verbatim in the input, and the output is no longer
+  ;; than the input.  This catches accidental duplication or fabrication.
+  (let* ((tmux-control-compact-scrollback-window 300)
+         (input tmux-control-test--copilot-redraw)
+         (in-lines (split-string input "\n"))
+         (out (tmux-control--compact-repeated-redraw-lines input))
+         (out-lines (split-string out "\n")))
+    (should (<= (length out-lines) (length in-lines)))
+    (dolist (line out-lines)
+      (unless (string-empty-p (string-trim line))
+        (should (member line in-lines))))))
+
+;;; Live-state decision logic (pure predicates extracted from the
+;;; side-effecting wheel/alt-screen code, so the truth tables can be
+;;; exhaustively tested without a live tmux server or Eat terminal).
+
+(ert-deftest tmux-control-test-interpret-alt-screen-reply-window ()
+  ;; Window-level query: "on"/"off" resolve; anything else means inherit.
+  (should (equal (tmux-control--interpret-alt-screen-reply '("on") nil)
+                 '(:honored . t)))
+  (should (equal (tmux-control--interpret-alt-screen-reply '("off") nil)
+                 '(:honored . nil)))
+  ;; Whitespace around a real value is trimmed.
+  (should (equal (tmux-control--interpret-alt-screen-reply '("  on  ") nil)
+                 '(:honored . t)))
+  ;; Empty / blank / missing replies fall through to a global lookup.
+  (should (eq (tmux-control--interpret-alt-screen-reply '() nil) :inherit))
+  (should (eq (tmux-control--interpret-alt-screen-reply '("") nil) :inherit))
+  (should (eq (tmux-control--interpret-alt-screen-reply '("   ") nil) :inherit))
+  ;; An unrecognized value is treated as inherit, not silently honored.
+  (should (eq (tmux-control--interpret-alt-screen-reply '("maybe") nil)
+              :inherit)))
+
+(ert-deftest tmux-control-test-interpret-alt-screen-reply-global ()
+  ;; Global default: on unless explicitly "off".  This is the branch that
+  ;; the phantom-alt-screen fix depends on.
+  (should (equal (tmux-control--interpret-alt-screen-reply '("off") t)
+                 '(:honored . nil)))
+  (should (equal (tmux-control--interpret-alt-screen-reply '("on") t)
+                 '(:honored . t)))
+  ;; A missing global value means the built-in default (on).
+  (should (equal (tmux-control--interpret-alt-screen-reply '() t)
+                 '(:honored . t)))
+  (should (equal (tmux-control--interpret-alt-screen-reply '("") t)
+                 '(:honored . t))))
+
+(ert-deftest tmux-control-test-alt-screen-effective-p ()
+  ;; Truly on the alternate screen only when tmux honors it AND Eat reports
+  ;; it.  The phantom case (Eat says alt, tmux says not honored) is nil.
+  (should (eq (tmux-control--alt-screen-effective-p t t) t))
+  (should (eq (tmux-control--alt-screen-effective-p t nil) nil))
+  (should (eq (tmux-control--alt-screen-effective-p nil t) nil))
+  (should (eq (tmux-control--alt-screen-effective-p nil nil) nil))
+  ;; Always returns a normalized boolean, never a truthy non-t value.
+  (should (eq (tmux-control--alt-screen-effective-p t "alt") t)))
+
+(ert-deftest tmux-control-test-wheel-should-enter-scrollback-p ()
+  ;; The full gate: enter scrollback only on wheel-up, when enabled and
+  ;; detectable, over a normal-screen pane that has not grabbed the mouse.
+  (should (tmux-control--wheel-should-enter-scrollback-p
+           'wheel-up t t nil nil))
+  ;; Wheel-down is always forwarded.
+  (should-not (tmux-control--wheel-should-enter-scrollback-p
+               'wheel-down t t nil nil))
+  ;; Disabled by configuration.
+  (should-not (tmux-control--wheel-should-enter-scrollback-p
+               'wheel-up nil t nil nil))
+  ;; Screen state cannot be read -> stay conservative, forward the event.
+  (should-not (tmux-control--wheel-should-enter-scrollback-p
+               'wheel-up t nil nil nil))
+  ;; Genuine alternate-screen application keeps the wheel.
+  (should-not (tmux-control--wheel-should-enter-scrollback-p
+               'wheel-up t t t nil))
+  ;; Mouse-aware application keeps the wheel.
+  (should-not (tmux-control--wheel-should-enter-scrollback-p
+               'wheel-up t t nil t)))
+
 ;;; Session and window listing (parsing only; the process call is stubbed).
 
 (ert-deftest tmux-control-test-list-sessions-parses ()
