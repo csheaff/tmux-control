@@ -296,12 +296,15 @@ Queries tmux on HOST using SOCKET-NAME."
           (mapcar
            (lambda (line)
              (when (string-match "\\`\\([0-9]+\\)\t\\(.*\\)\t\\([01]\\)\\'" line)
-               (let ((index (match-string 1 line))
-                     (name (match-string 2 line))
-                     (active (string= (match-string 3 line) "1")))
+               (let* ((index (match-string 1 line))
+                      (name (match-string 2 line))
+                      (active (string= (match-string 3 line) "1"))
+                      (label (format "%s: %s%s" index name
+                                     (if active " (active)" ""))))
                  (cons index
-                       (format "%s: %s%s" index name
-                               (if active " (active)" ""))))))
+                       (if active
+                           (propertize label 'tmux-window-active t)
+                         label)))))
            (split-string (string-trim text) "\n" t)))))
 
 (defun tmux-control--ensure-live ()
@@ -812,6 +815,23 @@ own ordinary letters in a read-only buffer.")
   (forward-line -1)
   (beginning-of-line))
 
+(defun tmux-control--chooser-goto-active ()
+  "Move point to the line of the active window entry, if any.
+The active entry's label carries a `tmux-window-active' text
+property (added by `tmux-control--list-windows').  Fall back to the
+first entry when no active window is marked."
+  (goto-char (point-min))
+  (let ((pos (point-min))
+        (found nil))
+    (while (and (not found) (< pos (point-max)))
+      (if (get-text-property pos 'tmux-window-active)
+          (setq found pos)
+        (setq pos (or (next-single-property-change pos 'tmux-window-active)
+                      (point-max)))))
+    (when found
+      (goto-char found)
+      (beginning-of-line))))
+
 (defun tmux-control--capture-window-screen (host socket-name session index)
   "Capture the visible screen of SESSION:INDEX active pane as colored text.
 Run tmux on HOST using SOCKET-NAME, or locally when HOST is nil/empty."
@@ -963,7 +983,7 @@ completion so the user is never stranded in a half-built chooser."
                          (lambda (w)
                            (propertize (cdr w) 'tmux-window-index (car w)))
                          windows "\n")))
-              (goto-char (point-min))
+              (tmux-control--chooser-goto-active)
               (setq tmux-control--chooser-host host
                     tmux-control--chooser-socket socket
                     tmux-control--chooser-session session

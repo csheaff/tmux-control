@@ -43,7 +43,9 @@ These commands act on the connected session (no key bindings by default):
   in the session.  By default it opens a two-pane chooser with a live
   preview of the highlighted window's screen (like tmux's `choose-tree`
   menu): move with the arrow keys, `n`/`p`, or the mouse; press `RET` (or
-  click) to select; and `q` or `C-g` to cancel.  The preview is captured on
+  click) to select; and `q` or `C-g` to cancel.  The chooser opens on the
+  session's currently active window, so the preview immediately shows where
+  you are.  The preview is captured on
   demand with a short idle debounce and cached per window for the chooser's
   lifetime.  The chooser's own keys take precedence over modal-editing
   packages such as `xah-fly-keys` or `evil`.  Disable the chooser to fall
