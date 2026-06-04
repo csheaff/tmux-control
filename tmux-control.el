@@ -2122,12 +2122,22 @@ by the `:pane-size' branch of `tmux-control--finish-command-output'."
   "Handle PROCESS exit with MESSAGE."
   (when (buffer-live-p (process-buffer process))
     (with-current-buffer (process-buffer process)
+      ;; If the session died while tiled, tear the tiling down so its pane
+      ;; render buffers are not left orphaned without a process.
+      (when tmux-control--tiled
+        (tmux-control--teardown-tiling (current-buffer)))
       (unless (string-match-p "\\`finished\\|exited" message)
         (tmux-control--message (string-trim-right message)))
       (setq tmux-control--process nil))))
 
 (defun tmux-control--kill-process ()
-  "Delete the tmux control process for the current buffer."
+  "Delete the tmux control process and any tiled pane buffers."
+  (when tmux-control--panes
+    (dolist (np tmux-control--panes)
+      (when (buffer-live-p (cdr np))
+        (let ((kill-buffer-query-functions nil))
+          (kill-buffer (cdr np)))))
+    (setq tmux-control--panes nil))
   (when (process-live-p tmux-control--process)
     (delete-process tmux-control--process)))
 
@@ -2583,23 +2593,32 @@ screen.  Safe to call repeatedly; a %layout-change routes here."
                                :process tmux-control--process
                                :fallback tmux-control--fallback-target))
                    (focus-pane (tmux-control--selected-pane-id old-panes))
-                   (new-panes '()))
+                   (new-panes '())
+                   ;; Only newly created or resized panes need a (synchronous,
+                   ;; possibly remote) reseed; reused same-size panes keep
+                   ;; streaming live, which cuts round-trips and flicker.
+                   (to-seed '()))
               (dolist (leaf leaves)
                 (let ((pane (plist-get leaf :pane)))
                   (when pane
                     (let* ((existing (cdr (assoc pane old-panes)))
-                           (buf (if (buffer-live-p existing)
-                                    existing
+                           (reuse (buffer-live-p existing))
+                           (buf (if reuse existing
                                   (tmux-control--make-pane-buffer
-                                   pane leaf controller meta))))
+                                   pane leaf controller meta)))
+                           (w (max 1 (plist-get leaf :w)))
+                           (h (max 1 (plist-get leaf :h)))
+                           (seed (not reuse)))
                       (with-current-buffer buf
                         (setq tmux-control--pane-info (plist-get leaf :info))
                         (when (and tmux-control--terminal
                                    (eat-term-live-p tmux-control--terminal))
-                          (eat-term-resize tmux-control--terminal
-                                           (max 1 (plist-get leaf :w))
-                                           (max 1 (plist-get leaf :h)))))
-                      (push (cons pane buf) new-panes)))))
+                          (let ((sz (eat-term-size tmux-control--terminal)))
+                            (unless (and sz (= (car sz) w) (= (cdr sz) h))
+                              (setq seed t)
+                              (eat-term-resize tmux-control--terminal w h)))))
+                      (push (cons pane buf) new-panes)
+                      (when seed (push buf to-seed))))))
               (setq new-panes (nreverse new-panes))
               ;; Kill render buffers for panes that no longer exist.
               (dolist (op old-panes)
@@ -2615,8 +2634,8 @@ screen.  Safe to call repeatedly; a %layout-change routes here."
                 (if (null pane-windows)
                     ;; Arrangement failed; abandon tiling cleanly.
                     (tmux-control--teardown-tiling controller)
-                  (dolist (np new-panes)
-                    (tmux-control--seed-pane-buffer-sync (cdr np)))
+                  (dolist (buf to-seed)
+                    (tmux-control--seed-pane-buffer-sync buf))
                   (let ((fw (and focus-pane
                                  (cdr (assoc focus-pane pane-windows)))))
                     (when (window-live-p fw) (select-window fw)))))))))))))
