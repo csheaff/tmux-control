@@ -1389,6 +1389,16 @@ per message."
       (setq tmux-control--command-output nil)
       (setq tmux-control--current-command-kind :ignore)
       (tmux-control--message "tmux command failed"))
+     ((or (string= line "%exit") (string-prefix-p "%exit " line))
+      ;; tmux is closing the control connection (the session was killed,
+      ;; the server exited, or the client was detached).  The process
+      ;; sentinel will tear the buffer down; surface tmux's reason, if any,
+      ;; so the disconnect is not silent.
+      (let ((reason (string-trim (substring line (length "%exit")))))
+        (tmux-control--message
+         (if (string-empty-p reason)
+             "tmux session ended"
+           (format "tmux session ended: %s" reason)))))
      (tmux-control--collecting-command
       (push line tmux-control--command-output))
      ((string-match "\\`%window-pane-changed [^ ]+ \\(%[0-9]+\\)\\'" line)
