@@ -86,6 +86,37 @@
   ;; Multibyte characters are encoded as their UTF-8 bytes.
   (should (equal (tmux-control--string-to-hex-args "é") "c3 a9")))
 
+(ert-deftest tmux-control-test-bytes-to-hex-args ()
+  (let ((bytes (encode-coding-string "ABC" 'utf-8-unix)))
+    (should (equal (tmux-control--bytes-to-hex-args bytes 0 3) "41 42 43"))
+    ;; A sub-range hexes only those bytes.
+    (should (equal (tmux-control--bytes-to-hex-args bytes 1 3) "42 43"))
+    ;; An empty range is the empty string.
+    (should (equal (tmux-control--bytes-to-hex-args bytes 0 0) ""))))
+
+(ert-deftest tmux-control-test-send-input-chunks-large-paste ()
+  ;; A paste larger than the chunk size is split into several bounded
+  ;; send-keys commands (tmux drops an over-long control command).
+  (let ((sent '()))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'tmux-control--send-command)
+               (lambda (cmd &optional _kind) (push cmd sent))))
+      (let ((tmux-control--process 'fake)
+            (tmux-control--active-pane "%0")
+            (tmux-control--suppress-responses nil))
+        ;; 2500 ASCII bytes with a 1024-byte chunk -> 1024 + 1024 + 452.
+        (tmux-control--send-input nil (make-string 2500 ?x))))
+    (setq sent (nreverse sent))
+    (should (= 3 (length sent)))
+    (dolist (c sent)
+      (should (string-prefix-p "send-keys -t %0 -H " c)))
+    (let ((counts (mapcar
+                   (lambda (c)
+                     (length (split-string
+                              (substring c (length "send-keys -t %0 -H ")) " " t)))
+                   sent)))
+      (should (equal counts '(1024 1024 452))))))
+
 ;;; Trailing/blank line trimming and squeezing.
 
 (ert-deftest tmux-control-test-trim-trailing-blank-lines ()

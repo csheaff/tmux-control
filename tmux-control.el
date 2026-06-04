@@ -1644,30 +1644,56 @@ flushed once per filter chunk."
       (tmux-control--feed-terminal output)
       (tmux-control--flush-display sync-windows))))
 
+(defconst tmux-control--send-keys-chunk-bytes 1024
+  "Maximum number of input bytes per `send-keys -H' control command.
+tmux silently rejects an over-long control command, so a large paste sent
+as a single `send-keys' is dropped.  Input is split into chunks of at most
+this many bytes, each its own command.  The pane receives the bytes in
+order, so a split -- even in the middle of a multibyte character -- is
+invisible to the application.")
+
 (defun tmux-control--send-input (_terminal string)
   "Send STRING as input to the active tmux pane.
 Sends are dropped while `tmux-control--suppress-responses' is bound, so
 the terminal query replies Eat generates while rendering output are not
 injected into the pane (see `tmux-control--write-terminal').  Genuine
-user keystrokes arrive outside that dynamic extent and are sent."
+user keystrokes arrive outside that dynamic extent and are sent.
+
+The UTF-8 byte stream is split into `tmux-control--send-keys-chunk-bytes'
+chunks so a large paste is not dropped as one over-long `send-keys'."
   (when (and (process-live-p tmux-control--process)
              (> (length string) 0)
              (not tmux-control--suppress-responses))
     (let ((target (or tmux-control--active-pane tmux-control--fallback-target)))
       (if target
-          (tmux-control--send-command
-           (format "send-keys -t %s -H %s"
-                   target
-                   (tmux-control--string-to-hex-args string)))
+          (let* ((bytes (encode-coding-string string 'utf-8-unix))
+                 (n (length bytes))
+                 (size tmux-control--send-keys-chunk-bytes)
+                 (i 0))
+            (while (< i n)
+              (let ((end (min n (+ i size))))
+                (tmux-control--send-command
+                 (format "send-keys -t %s -H %s"
+                         target
+                         (tmux-control--bytes-to-hex-args bytes i end)))
+                (setq i end))))
         (tmux-control--message "No active tmux pane yet")))))
+
+(defun tmux-control--bytes-to-hex-args (bytes start end)
+  "Return BYTES from START (inclusive) to END (exclusive) as hex args.
+The result is space-separated two-digit hexadecimal, as `send-keys -H'
+expects."
+  (let ((hex nil)
+        (i start))
+    (while (< i end)
+      (push (format "%02x" (aref bytes i)) hex)
+      (setq i (1+ i)))
+    (string-join (nreverse hex) " ")))
 
 (defun tmux-control--string-to-hex-args (string)
   "Return STRING encoded as space-separated UTF-8 hexadecimal bytes."
-  (let* ((bytes (encode-coding-string string 'utf-8-unix))
-         (hex nil))
-    (dotimes (i (length bytes))
-      (push (format "%02x" (aref bytes i)) hex))
-    (string-join (nreverse hex) " ")))
+  (let ((bytes (encode-coding-string string 'utf-8-unix)))
+    (tmux-control--bytes-to-hex-args bytes 0 (length bytes))))
 
 (defun tmux-control--send-command (command &optional kind)
   "Send tmux control mode COMMAND.
