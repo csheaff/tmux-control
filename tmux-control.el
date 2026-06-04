@@ -1486,10 +1486,29 @@ windows are excluded so they are not yanked to the bottom."
           (setq guard (1+ guard)))
         (set-window-start window start t)))))
 
+(defvar tmux-control--suppress-responses nil
+  "When non-nil, drop terminal replies Eat would send back to the pane.
+Bound around `eat-term-process-output' in `tmux-control--write-terminal'
+so the reactive query responses (device-attributes, cursor-position, and
+color reports) Eat generates while rendering tmux output are not injected
+into the pane as input.")
+
 (defun tmux-control--write-terminal (output)
-  "Write decoded terminal OUTPUT to Eat."
+  "Write decoded terminal OUTPUT to Eat.
+
+While Eat parses OUTPUT it may generate replies to terminal queries the
+pane's program emitted (device attributes, cursor-position and color
+reports).  In a control-mode client those replies must not be sent back:
+tmux is the terminal the program talks to and already answers the queries
+programs block on (it replied to DA and DSR even with no client attached
+in testing), so a reply from here is at best a duplicate and at worst --
+for queries tmux passes through, such as OSC 10/11 color requests --
+arrives long after the program stopped reading and lands as garbage on
+the shell's command line.  Bind `tmux-control--suppress-responses' so
+`tmux-control--send-input' drops those sends while rendering."
   (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
     (let ((inhibit-read-only t)
+          (tmux-control--suppress-responses t)
           (sync-windows (and (fboundp 'eat--synchronize-scroll-windows)
                              (eat--synchronize-scroll-windows))))
       (eat-term-process-output tmux-control--terminal output)
@@ -1501,9 +1520,14 @@ windows are excluded so they are not yanked to the bottom."
       (run-hooks 'eat-update-hook))))
 
 (defun tmux-control--send-input (_terminal string)
-  "Send STRING as input to the active tmux pane."
+  "Send STRING as input to the active tmux pane.
+Sends are dropped while `tmux-control--suppress-responses' is bound, so
+the terminal query replies Eat generates while rendering output are not
+injected into the pane (see `tmux-control--write-terminal').  Genuine
+user keystrokes arrive outside that dynamic extent and are sent."
   (when (and (process-live-p tmux-control--process)
-             (> (length string) 0))
+             (> (length string) 0)
+             (not tmux-control--suppress-responses))
     (let ((target (or tmux-control--active-pane tmux-control--fallback-target)))
       (if target
           (tmux-control--send-command
