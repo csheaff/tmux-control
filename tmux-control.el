@@ -215,6 +215,7 @@ whenever the active pane changes.")
     (define-key map (kbd "C-c C-e") #'tmux-control-scrollback)
     (define-key map (kbd "C-c C-k") #'tmux-control-disconnect)
     (define-key map (kbd "C-c C-l") #'tmux-control-clear-and-repaint)
+    (define-key map (kbd "C-c C-o") #'tmux-control-other-pane)
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
     map)
   "High-precedence keymap for tmux-control buffers.")
@@ -229,6 +230,7 @@ whenever the active pane changes.")
     (define-key map (kbd "C-c C-e") #'tmux-control-scrollback)
     (define-key map (kbd "C-c C-k") #'tmux-control-disconnect)
     (define-key map (kbd "C-c C-l") #'tmux-control-clear-and-repaint)
+    (define-key map (kbd "C-c C-o") #'tmux-control-other-pane)
     map)
   "Keymap for `tmux-control-mode'.")
 
@@ -550,6 +552,16 @@ is left untouched."
    (format "rename-window -t %s:%s %s"
            tmux-control--session index
            (tmux-control--quote-tmux-arg name))))
+
+(defun tmux-control-other-pane ()
+  "Switch the live view to the next pane in the current window.
+Only the active pane is mirrored in the live terminal, so in a split-pane
+window -- for example a Claude Code agent team -- this steps to the next
+pane (the next teammate).  tmux reports the change with %window-pane-changed
+and the view repaints on the newly active pane.  Bound to \\`C-c C-o'."
+  (interactive)
+  (tmux-control--ensure-live)
+  (tmux-control--send-command "select-pane -t :.+"))
 
 
 (defun tmux-control-scrollback ()
@@ -1429,6 +1441,18 @@ per message."
       (setq tmux-control--output-batch nil)
       (tmux-control--feed-terminal out))))
 
+(defun tmux-control--batch-pane-output (pane payload)
+  "Queue PANE's encoded output PAYLOAD for rendering, when PANE is active.
+The single live terminal mirrors only the active pane; a split-pane window
+reports %output for every pane, and rendering them all into one terminal
+would interleave them.  When no active pane has been resolved yet, the
+first output bootstraps it (the `#{pane_id}' query then confirms it)."
+  (unless tmux-control--active-pane
+    (setq tmux-control--active-pane pane))
+  (when (equal pane tmux-control--active-pane)
+    (push (tmux-control--decode-output payload)
+          tmux-control--output-batch)))
+
 (defun tmux-control--handle-line (line)
   "Handle one tmux control protocol LINE."
   (cond
@@ -1437,18 +1461,16 @@ per message."
    ;; ordering) and at the end of each filter chunk.
    ((and (not tmux-control--collecting-command)
          (string-match "\\`%output \\(%[0-9]+\\)\\(?: \\(.*\\)\\)?\\'" line))
-    (setq tmux-control--active-pane (match-string 1 line))
-    (push (tmux-control--decode-output (or (match-string 2 line) ""))
-          tmux-control--output-batch))
+    (tmux-control--batch-pane-output (match-string 1 line)
+                                     (or (match-string 2 line) "")))
    ((and (not tmux-control--collecting-command)
          (string-match "\\`%extended-output \\(%[0-9]+\\) [^:]*: ?\\(.*\\)\\'" line))
     ;; With flow control on (`tmux-control-pause-after'), tmux delivers
     ;; output as "%extended-output PANE AGE ... : VALUE" instead of %output.
     ;; The value is escaped exactly like %output; the age and reserved
     ;; fields before the colon are ignored.
-    (setq tmux-control--active-pane (match-string 1 line))
-    (push (tmux-control--decode-output (match-string 2 line))
-          tmux-control--output-batch))
+    (tmux-control--batch-pane-output (match-string 1 line)
+                                     (match-string 2 line)))
    (t
     ;; Any control line: flush pending output first so it lands before the
     ;; state change (a resize, a seed, a pane switch) that follows it.
@@ -1484,7 +1506,11 @@ per message."
      (tmux-control--collecting-command
       (push line tmux-control--command-output))
      ((string-match "\\`%window-pane-changed [^ ]+ \\(%[0-9]+\\)\\'" line)
+      ;; The window's active pane changed (a split, a select-pane, a closed
+      ;; pane).  Follow it: repaint the new pane from its current screen,
+      ;; since only the active pane is mirrored into the live terminal.
       (setq tmux-control--active-pane (match-string 1 line))
+      (tmux-control--seed-screen)
       (tmux-control--refresh-alt-screen-option)
       (tmux-control--refresh-pane-size))
      ((string-prefix-p "%layout-change " line)

@@ -87,6 +87,21 @@
     (should (equal tmux-control--active-pane "%3"))
     (should (equal tmux-control--output-batch '("hello\n")))))
 
+(ert-deftest tmux-control-test-batch-pane-output-routes-active ()
+  ;; The first output bootstraps the active pane; output from other panes is
+  ;; dropped so a split-pane window does not interleave into one terminal.
+  (let ((tmux-control--active-pane nil)
+        (tmux-control--output-batch nil))
+    (tmux-control--batch-pane-output "%1" "from-one\\012")
+    (should (equal tmux-control--active-pane "%1"))
+    (should (equal tmux-control--output-batch '("from-one\n")))
+    ;; A different pane's output is ignored, not interleaved.
+    (tmux-control--batch-pane-output "%2" "from-two\\012")
+    (should (equal tmux-control--output-batch '("from-one\n")))
+    ;; More output from the active pane is queued (reverse order in the batch).
+    (tmux-control--batch-pane-output "%1" "more\\012")
+    (should (equal tmux-control--output-batch '("more\n" "from-one\n")))))
+
 (ert-deftest tmux-control-test-handle-pause-resumes ()
   ;; A %pause reseeds the active pane and asks tmux to continue streaming.
   (let ((sent '())
