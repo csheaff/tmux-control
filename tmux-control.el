@@ -93,6 +93,22 @@ screen, e.g. the copilot TUI, vim, or less), the wheel is forwarded to
 that application so it keeps its own mouse scrolling."
   :type 'boolean)
 
+(defcustom tmux-control-window-preview t
+  "Non-nil means `tmux-control-select-window' shows a live preview chooser.
+
+When enabled, choosing a window interactively opens a two-pane chooser
+that lists the session's windows on one side and shows a snapshot of the
+highlighted window's visible screen on the other, similar to tmux's own
+`choose-tree' menu.  Set to nil to fall back to a plain completion prompt."
+  :type 'boolean)
+
+(defcustom tmux-control-window-preview-delay 0.15
+  "Idle seconds to wait before refreshing the window preview as you move.
+
+A small debounce keeps navigation snappy when previews require a remote
+tmux query over SSH."
+  :type 'number)
+
 (defvar-local tmux-control--process nil)
 (defvar-local tmux-control--terminal nil)
 (defvar-local tmux-control--accumulator "")
@@ -327,12 +343,28 @@ Queries tmux on HOST using SOCKET-NAME."
 (defun tmux-control-select-window (&optional index)
   "Switch the live tmux-control view to window INDEX in the same session.
 
-Interactively, prompt with completion over the session's windows.
-Switching changes the session's active window, so any other client
-attached to the same session follows along."
-  (interactive (list (tmux-control--read-window-index "Window: ")))
+Interactively, open a preview chooser (see `tmux-control-window-preview')
+or, when that is disabled, prompt with completion over the session's
+windows.  Switching changes the session's active window, so any other
+client attached to the same session follows along.
+
+When INDEX is given non-interactively, switch to it directly."
+  (interactive (list nil))
   (tmux-control--ensure-live)
-  (setq index (tmux-control--normalize-window-index index))
+  (cond
+   (index
+    (tmux-control--do-select-window
+     (tmux-control--normalize-window-index index)))
+   (tmux-control-window-preview
+    (tmux-control--open-window-chooser))
+   (t
+    (tmux-control--do-select-window
+     (tmux-control--normalize-window-index
+      (tmux-control--read-window-index "Window: "))))))
+
+(defun tmux-control--do-select-window (index)
+  "Select tmux window INDEX in the current buffer's session."
+  (tmux-control--ensure-live)
   (tmux-control--send-command
    (format "select-window -t %s:%s" tmux-control--session index))
   (tmux-control--refresh-active-pane))
@@ -702,6 +734,267 @@ ignore text properties -- keep working unchanged."
      (if tmux-control-compact-scrollback
          (tmux-control--compact-repeated-redraw-lines text)
        text))))
+
+
+;;;; Window chooser with live preview
+
+(defvar-local tmux-control--chooser-host nil)
+(defvar-local tmux-control--chooser-socket nil)
+(defvar-local tmux-control--chooser-session nil)
+(defvar-local tmux-control--chooser-live-buffer nil)
+(defvar-local tmux-control--chooser-preview-buffer nil)
+(defvar-local tmux-control--chooser-saved-config nil)
+(defvar-local tmux-control--chooser-cache nil)
+(defvar-local tmux-control--chooser-last-index nil)
+(defvar-local tmux-control--window-chooser-keys-active nil)
+(defvar tmux-control--window-preview-timer nil
+  "Idle timer that refreshes the window preview, or nil.")
+
+(defvar tmux-control--window-chooser-override-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "n") #'tmux-control--window-chooser-next)
+    (define-key map (kbd "p") #'tmux-control--window-chooser-previous)
+    (define-key map (kbd "C-n") #'tmux-control--window-chooser-next)
+    (define-key map (kbd "C-p") #'tmux-control--window-chooser-previous)
+    (define-key map (kbd "<down>") #'tmux-control--window-chooser-next)
+    (define-key map (kbd "<up>") #'tmux-control--window-chooser-previous)
+    (define-key map (kbd "RET") #'tmux-control--window-chooser-select)
+    (define-key map (kbd "C-m") #'tmux-control--window-chooser-select)
+    (define-key map (kbd "q") #'tmux-control--window-chooser-abort)
+    (define-key map (kbd "C-g") #'tmux-control--window-chooser-abort)
+    (define-key map [mouse-1] #'tmux-control--window-chooser-mouse-select)
+    (define-key map [double-mouse-1] #'tmux-control--window-chooser-mouse-select)
+    map)
+  "High-precedence keymap for the tmux-control window chooser.
+Installed through `emulation-mode-map-alists' so its bindings win over
+modal-editing packages such as `xah-fly-keys' or `evil' that otherwise
+own ordinary letters in a read-only buffer.")
+
+(defvar tmux-control--window-chooser-emulation-alist
+  `((tmux-control--window-chooser-keys-active
+     . ,tmux-control--window-chooser-override-map))
+  "Emulation map alist that activates the window-chooser override map.")
+
+(define-derived-mode tmux-control-window-chooser-mode special-mode
+  "tmux-window-chooser"
+  "Major mode for the tmux-control window chooser buffer."
+  (setq-local emulation-mode-map-alists
+              (cons tmux-control--window-chooser-emulation-alist
+                    (delq tmux-control--window-chooser-emulation-alist
+                          emulation-mode-map-alists)))
+  (setq tmux-control--window-chooser-keys-active t)
+  (setq-local cursor-type nil)
+  (setq-local truncate-lines t)
+  (hl-line-mode 1)
+  ;; The user's global `hl-line' background may be too subtle to mark the
+  ;; selection, and the cursor is hidden, so remap the current-line
+  ;; highlight to the theme's prominent `region' face just in this buffer.
+  (face-remap-add-relative 'hl-line 'region)
+  (tmux-control--disable-line-numbers)
+  (tmux-control--disable-margins))
+
+(defun tmux-control--chooser-line-index ()
+  "Return the window index stored on the current chooser line, or nil."
+  (get-text-property (line-beginning-position) 'tmux-window-index))
+
+(defun tmux-control--window-chooser-next ()
+  "Move to the next window entry in the chooser."
+  (interactive)
+  (let ((start (point)))
+    (forward-line 1)
+    (if (tmux-control--chooser-line-index)
+        (beginning-of-line)
+      (goto-char start))))
+
+(defun tmux-control--window-chooser-previous ()
+  "Move to the previous window entry in the chooser."
+  (interactive)
+  (forward-line -1)
+  (beginning-of-line))
+
+(defun tmux-control--capture-window-screen (host socket-name session index)
+  "Capture the visible screen of SESSION:INDEX active pane as colored text.
+Run tmux on HOST using SOCKET-NAME, or locally when HOST is nil/empty."
+  (let* ((target (format "%s:%s" session index))
+         (args (append (when socket-name (list "-L" socket-name))
+                       (list "capture-pane" "-p" "-e" "-t" target))))
+    (if (and host (not (string-empty-p host)))
+        (tmux-control--call
+         "ssh"
+         (list host
+               (concat tmux-control-remote-tmux-socket-setup
+                       " && "
+                       (tmux-control--tmux-command-string args))))
+      (tmux-control--call "tmux" args))))
+
+(defun tmux-control--render-window-preview (host socket-name session index)
+  "Return colored preview text for SESSION:INDEX, or an error placeholder."
+  (condition-case err
+      (tmux-control--colorize-scrollback
+       (tmux-control--capture-window-screen host socket-name session index))
+    (error (format "[preview unavailable: %s]" (error-message-string err)))))
+
+(defun tmux-control--chooser-update-preview ()
+  "Render the highlighted window into the preview buffer, using a cache."
+  (let ((index tmux-control--chooser-last-index)
+        (preview tmux-control--chooser-preview-buffer)
+        (host tmux-control--chooser-host)
+        (socket tmux-control--chooser-socket)
+        (session tmux-control--chooser-session))
+    (when (and index (buffer-live-p preview))
+      (let ((rendered
+             (or (cdr (assoc index tmux-control--chooser-cache))
+                 (let ((text (tmux-control--render-window-preview
+                              host socket session index)))
+                   (push (cons index text) tmux-control--chooser-cache)
+                   text))))
+        (with-current-buffer preview
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert rendered)
+            (goto-char (point-min))))))))
+
+(defun tmux-control--chooser-maybe-preview ()
+  "When the highlighted window changed, schedule a debounced preview refresh."
+  (let ((index (tmux-control--chooser-line-index)))
+    (unless (equal index tmux-control--chooser-last-index)
+      (setq tmux-control--chooser-last-index index)
+      (when (timerp tmux-control--window-preview-timer)
+        (cancel-timer tmux-control--window-preview-timer))
+      (let ((buffer (current-buffer)))
+        (setq tmux-control--window-preview-timer
+              (run-with-idle-timer
+               tmux-control-window-preview-delay nil
+               (lambda ()
+                 (when (buffer-live-p buffer)
+                   (with-current-buffer buffer
+                     (tmux-control--chooser-update-preview))))))))))
+
+(defun tmux-control--window-chooser-dispose ()
+  "Tear down any existing chooser buffers and preview timer.
+Unlike `tmux-control--window-chooser-cleanup', this does not assume the
+current buffer is the chooser and does not restore a window
+configuration.  It enforces a single live chooser by removing leftovers
+before a new one opens."
+  (when (timerp tmux-control--window-preview-timer)
+    (cancel-timer tmux-control--window-preview-timer)
+    (setq tmux-control--window-preview-timer nil))
+  (let ((kill-buffer-query-functions nil))
+    (dolist (name '("*tmux-control-window-chooser*"
+                    "*tmux-control-window-preview*"))
+      (let ((buf (get-buffer name)))
+        (when (buffer-live-p buf)
+          (kill-buffer buf))))))
+
+(defun tmux-control--window-chooser-cleanup ()
+  "Tear down the chooser: cancel timers, restore windows, remove buffers."
+  (when (timerp tmux-control--window-preview-timer)
+    (cancel-timer tmux-control--window-preview-timer)
+    (setq tmux-control--window-preview-timer nil))
+  (let ((saved tmux-control--chooser-saved-config)
+        (preview tmux-control--chooser-preview-buffer)
+        (chooser (current-buffer)))
+    (when (window-configuration-p saved)
+      (set-window-configuration saved))
+    (when (buffer-live-p preview)
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer preview)))
+    (when (buffer-live-p chooser)
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer chooser)))))
+
+(defun tmux-control--window-chooser-select ()
+  "Select the highlighted window and return to the live pane."
+  (interactive)
+  (let ((index (tmux-control--chooser-line-index))
+        (live tmux-control--chooser-live-buffer))
+    (unless index
+      (user-error "No window on this line"))
+    (tmux-control--window-chooser-cleanup)
+    (if (buffer-live-p live)
+        (with-current-buffer live
+          (tmux-control--do-select-window
+           (tmux-control--normalize-window-index index)))
+      (user-error "tmux-control buffer is gone"))))
+
+(defun tmux-control--window-chooser-mouse-select (event)
+  "Select the window clicked in the chooser via EVENT."
+  (interactive "e")
+  (mouse-set-point event)
+  (tmux-control--window-chooser-select))
+
+(defun tmux-control--window-chooser-abort ()
+  "Cancel window selection and restore the previous layout."
+  (interactive)
+  (tmux-control--window-chooser-cleanup)
+  (message "Window selection canceled"))
+
+(defun tmux-control--open-window-chooser ()
+  "Open the two-pane window chooser for the current tmux-control session.
+On any failure to build the two-pane layout (for example a frame too
+small to split), restore the previous layout and fall back to plain
+completion so the user is never stranded in a half-built chooser."
+  (let* ((host tmux-control--host)
+         (socket tmux-control--socket-name)
+         (session tmux-control--session)
+         (live-buffer (current-buffer))
+         (windows (tmux-control--list-windows host socket session)))
+    (unless windows
+      (user-error "No windows to choose from"))
+    (tmux-control--window-chooser-dispose)
+    (let ((chooser (get-buffer-create "*tmux-control-window-chooser*"))
+          (preview (get-buffer-create "*tmux-control-window-preview*"))
+          (saved (current-window-configuration)))
+      (condition-case err
+          (progn
+            (with-current-buffer preview
+              (let ((inhibit-read-only t))
+                (erase-buffer))
+              (unless (derived-mode-p 'special-mode)
+                (special-mode))
+              (setq-local truncate-lines t)
+              (setq-local header-line-format " Preview")
+              (tmux-control--disable-line-numbers))
+            (with-current-buffer chooser
+              (tmux-control-window-chooser-mode)
+              (let ((inhibit-read-only t))
+                (erase-buffer)
+                (insert (mapconcat
+                         (lambda (w)
+                           (propertize (cdr w) 'tmux-window-index (car w)))
+                         windows "\n")))
+              (goto-char (point-min))
+              (setq tmux-control--chooser-host host
+                    tmux-control--chooser-socket socket
+                    tmux-control--chooser-session session
+                    tmux-control--chooser-live-buffer live-buffer
+                    tmux-control--chooser-preview-buffer preview
+                    tmux-control--chooser-saved-config saved
+                    tmux-control--chooser-cache nil
+                    tmux-control--chooser-last-index nil)
+              (setq-local header-line-format
+                          " Select window  —  move: arrows / n,p / mouse   RET: select   q or C-g: cancel")
+              (add-hook 'post-command-hook
+                        #'tmux-control--chooser-maybe-preview nil t))
+            (delete-other-windows)
+            (switch-to-buffer chooser)
+            (let ((preview-window (split-window-right)))
+              (set-window-buffer preview-window preview)
+              (set-window-parameter preview-window 'no-other-window t))
+            (tmux-control--chooser-maybe-preview))
+        (error
+         (when (window-configuration-p saved)
+           (set-window-configuration saved))
+         (let ((kill-buffer-query-functions nil))
+           (when (buffer-live-p preview) (kill-buffer preview))
+           (when (buffer-live-p chooser) (kill-buffer chooser)))
+         (message "tmux-control: window chooser unavailable (%s); using completion"
+                  (error-message-string err))
+         (when (buffer-live-p live-buffer)
+           (with-current-buffer live-buffer
+             (tmux-control--do-select-window
+              (tmux-control--normalize-window-index
+               (tmux-control--read-window-index "Window: "))))))))))
 
 (defun tmux-control--compact-repeated-redraw-lines (text)
   "Compact repeated full-screen redraw chunks in TEXT."

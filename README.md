@@ -40,7 +40,24 @@ creates that session (tmux attaches if it exists, otherwise creates it).
 These commands act on the connected session (no key bindings by default):
 
 - `M-x tmux-control-select-window` switches the live view to another window
-  in the session, with completion over the session's windows.
+  in the session.  By default it opens a two-pane chooser with a live
+  preview of the highlighted window's screen (like tmux's `choose-tree`
+  menu): move with the arrow keys, `n`/`p`, or the mouse; press `RET` (or
+  click) to select; and `q` or `C-g` to cancel.  The preview is captured on
+  demand with a short idle debounce and cached per window for the chooser's
+  lifetime.  The chooser's own keys take precedence over modal-editing
+  packages such as `xah-fly-keys` or `evil`.  Disable the chooser to fall
+  back to plain completion with:
+
+  ```elisp
+  (setq tmux-control-window-preview nil)
+  ```
+
+  Tune the preview debounce (seconds of idle before capturing) with:
+
+  ```elisp
+  (setq tmux-control-window-preview-delay 0.15)
+  ```
 - `M-x tmux-control-new-window` creates a window (optionally named) and
   switches to it.
 - `M-x tmux-control-rename-window` renames a window, with completion over
