@@ -2329,15 +2329,21 @@ matched to its real pane id."
   "Plist of a tiled render buffer's tmux pane metadata, for its mode line.")
 
 (defun tmux-control--pane-mode-line ()
-  "Return a concise mode-line string for a tiled pane render buffer."
+  "Return a concise mode-line string for a tiled pane render buffer.
+Leads with the pane id (so teammates in a split window are easy to tell
+apart), then the running command and, when distinct, the pane title."
   (let* ((info tmux-control--pane-info)
-         (pane (or tmux-control--active-pane "?"))
+         ;; Pane ids contain "%", which is a mode-line format construct, so
+         ;; double it to display literally.
+         (pane (replace-regexp-in-string
+                "%" "%%" (or tmux-control--active-pane "?")))
          (cmd (plist-get info :cmd))
          (title (plist-get info :title)))
-    (concat " " pane
-            (when (and cmd (not (string-empty-p cmd))) (concat "  " cmd))
+    (concat " "
+            (propertize (format "[%s]" pane) 'face 'mode-line-emphasis)
+            (when (and cmd (not (string-empty-p cmd))) (concat " " cmd))
             (when (and title (not (string-empty-p title)) (not (equal title cmd)))
-              (concat "  — " title)))))
+              (concat " — " title)))))
 
 (defun tmux-control--make-pane-buffer (pane-id leaf controller meta)
   "Create and return a render buffer for PANE-ID, sized from layout LEAF.
@@ -2397,9 +2403,30 @@ its own and routes commands through CONTROLLER."
       (setf (eat-term-parameter tmux-control--terminal 'eat--input-process) process)
       (setf (eat-term-parameter tmux-control--terminal 'eat--output-process) process)
       (setq-local mode-line-format '(:eval (tmux-control--pane-mode-line)))
+      ;; Focusing this pane in Emacs makes it tmux's active pane too.
+      (add-hook 'window-selection-change-functions
+                #'tmux-control--pane-window-selected nil t)
       (tmux-control--disable-line-numbers)
       (tmux-control--disable-margins))
     buffer))
+
+(defun tmux-control--pane-window-selected (frame)
+  "Tell tmux to select the pane of FRAME's newly selected tiled window.
+Installed buffer-locally on `window-selection-change-functions' in each
+pane render buffer so focusing a pane in Emacs makes it tmux's active
+pane too (other clients follow, and an untile reseeds the focused pane).
+The resulting %window-pane-changed only moves the pointer in tiling mode,
+so there is no reseed or flicker."
+  (let ((win (frame-selected-window frame)))
+    (when (window-live-p win)
+      (let ((buffer (window-buffer win)))
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (when (and tmux-control--controller
+                       tmux-control--active-pane
+                       (process-live-p tmux-control--process))
+              (tmux-control--send-command
+               (format "select-pane -t %s" tmux-control--active-pane)))))))))
 
 (defun tmux-control--seed-pane-buffer-sync (buffer)
   "Paint BUFFER's terminal from its pane's current screen (synchronous CLI).
