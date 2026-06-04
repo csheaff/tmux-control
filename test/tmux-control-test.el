@@ -666,5 +666,84 @@ each wrapped in an evolving prompt line and a status bar.")
   (should (= (tmux-control--display-width "\e[38:2::255:0:0mX\e[0m") 1))
   (should (= (tmux-control--display-width "plain") 5)))
 
+;;; Window-layout string parsing (multi-pane tiling).
+
+(ert-deftest tmux-control-test-layout-strip-checksum ()
+  (should (equal (tmux-control--layout-strip-checksum "bf3a,80x24,0,0,1")
+                 "80x24,0,0,1"))
+  ;; All-digit checksum is still stripped (hex digits, then a comma).
+  (should (equal (tmux-control--layout-strip-checksum "1234,80x24,0,0,1")
+                 "80x24,0,0,1"))
+  ;; An already-stripped string is returned unchanged: dims have an "x"
+  ;; before any comma, so they never look like a checksum.
+  (should (equal (tmux-control--layout-strip-checksum "80x24,0,0,1")
+                 "80x24,0,0,1")))
+
+(ert-deftest tmux-control-test-parse-layout-single ()
+  (let ((node (tmux-control--parse-layout "bf3a,80x24,0,0,1")))
+    (should (eq (plist-get node :type) 'leaf))
+    (should (= (plist-get node :w) 80))
+    (should (= (plist-get node :h) 24))
+    (should (= (plist-get node :x) 0))
+    (should (= (plist-get node :y) 0))
+    (should (equal (plist-get node :id) "1"))))
+
+(ert-deftest tmux-control-test-parse-layout-horizontal ()
+  ;; Two panes side by side: a row, split horizontally.
+  (let ((node (tmux-control--parse-layout
+               "c2d8,80x24,0,0{40x24,0,0,1,39x24,41,0,2}")))
+    (should (eq (plist-get node :type) 'split))
+    (should (eq (plist-get node :dir) 'h))
+    (let ((kids (plist-get node :children)))
+      (should (= (length kids) 2))
+      (should (equal (plist-get (nth 0 kids) :id) "1"))
+      (should (= (plist-get (nth 0 kids) :w) 40))
+      (should (equal (plist-get (nth 1 kids) :id) "2"))
+      (should (= (plist-get (nth 1 kids) :x) 41)))))
+
+(ert-deftest tmux-control-test-parse-layout-vertical ()
+  ;; Two panes stacked: a column, split vertically.
+  (let ((node (tmux-control--parse-layout
+               "abcd,80x24,0,0[80x12,0,0,1,80x11,0,13,2]")))
+    (should (eq (plist-get node :type) 'split))
+    (should (eq (plist-get node :dir) 'v))
+    (let ((kids (plist-get node :children)))
+      (should (= (length kids) 2))
+      (should (= (plist-get (nth 0 kids) :h) 12))
+      (should (= (plist-get (nth 1 kids) :y) 13)))))
+
+(ert-deftest tmux-control-test-parse-layout-nested ()
+  ;; A row whose right child is itself a column of two panes:
+  ;; left pane 1, right column of panes 2 (top) and 3 (bottom).
+  (let* ((node (tmux-control--parse-layout
+                "f00d,80x24,0,0{40x24,0,0,1,39x24,41,0[39x12,41,0,2,39x11,41,13,3]}"))
+         (kids (plist-get node :children)))
+    (should (eq (plist-get node :dir) 'h))
+    (should (= (length kids) 2))
+    (should (eq (plist-get (nth 0 kids) :type) 'leaf))
+    (should (equal (plist-get (nth 0 kids) :id) "1"))
+    (let ((right (nth 1 kids)))
+      (should (eq (plist-get right :type) 'split))
+      (should (eq (plist-get right :dir) 'v))
+      (should (= (length (plist-get right :children)) 2)))
+    ;; Leaves come back in reading order: 1, 2, 3.
+    (should (equal (mapcar (lambda (l) (plist-get l :id))
+                           (tmux-control--layout-leaves node))
+                   '("1" "2" "3")))))
+
+(ert-deftest tmux-control-test-parse-layout-leaves-single ()
+  (let ((node (tmux-control--parse-layout "bf3a,80x24,0,0,1")))
+    (should (equal (mapcar (lambda (l) (plist-get l :id))
+                           (tmux-control--layout-leaves node))
+                   '("1")))))
+
+(ert-deftest tmux-control-test-parse-layout-malformed ()
+  (should (null (tmux-control--parse-layout "")))
+  (should (null (tmux-control--parse-layout "   ")))
+  (should (null (tmux-control--parse-layout nil)))
+  ;; Truncated / unterminated lists return nil rather than signalling.
+  (should (null (tmux-control--parse-layout "bf3a,80x24,0,0{40x24,0,0,1")))
+  (should (null (tmux-control--parse-layout "bf3a,not-a-layout"))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

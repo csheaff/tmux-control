@@ -2076,6 +2076,137 @@ by the `:pane-size' branch of `tmux-control--finish-command-output'."
     (insert (propertize (format "\n[tmux-control] %s\n" message)
                         'face 'font-lock-comment-face))))
 
+
+;;;; Multi-pane tiling (experimental)
+;;
+;; A tmux window can hold several panes at once.  The single-pane client
+;; above mirrors only the active pane; the tiling layer renders ALL of the
+;; current window's panes at once, each in its own Eat buffer, with the
+;; Emacs windows split to match tmux's own layout -- the iTerm "show every
+;; pane" view.  It reuses the per-buffer rendering machinery (each pane
+;; buffer is an ordinary `tmux-control-mode' buffer with its own terminal,
+;; UTF-8 carry, and active-pane = its own id) and a single shared control
+;; process owned by the controller buffer, which routes %output per pane.
+;;
+;; tmux's `window_layout' string encodes the pane geometry as a recursive
+;; tree:
+;;
+;;   checksum,WxH,X,Y,paneid          a single leaf pane
+;;   checksum,WxH,X,Y{a,b,...}        a row: children left-to-right (h split)
+;;   checksum,WxH,X,Y[a,b,...]        a column: children top-to-bottom (v split)
+;;
+;; where each child is itself a node.  The parser below turns that string
+;; into a tree of plist nodes that the tiler walks to build Emacs windows.
+
+(defun tmux-control--layout-strip-checksum (layout)
+  "Strip a leading \"checksum,\" from a tmux LAYOUT string.
+The `window_layout' format prefixes the geometry with a hex checksum and a
+comma.  Dimensions always contain an \"x\" before any comma, so a checksum
+\(hex digits immediately followed by a comma) is unambiguous and an
+already-stripped string is returned unchanged."
+  (if (string-match "\\`[0-9a-f]+," layout)
+      (substring layout (match-end 0))
+    layout))
+
+(defun tmux-control--parse-layout-int (s i)
+  "Parse a non-negative integer from string S at index I.
+Return (N . NEXT-INDEX); signal an error when no digit is present."
+  (let ((start i)
+        (len (length s)))
+    (while (and (< i len) (<= ?0 (aref s i) ?9))
+      (setq i (1+ i)))
+    (when (= start i)
+      (error "tmux-control: expected integer at %d" i))
+    (cons (string-to-number (substring s start i)) i)))
+
+(defun tmux-control--parse-layout-dims (s i)
+  "Parse \"WxH,X,Y\" from string S at index I.
+Return ((W H X Y) . NEXT-INDEX)."
+  (let (w h x y r)
+    (setq r (tmux-control--parse-layout-int s i) w (car r) i (cdr r))
+    (unless (and (< i (length s)) (= (aref s i) ?x))
+      (error "tmux-control: expected x in layout dims"))
+    (setq i (1+ i))
+    (setq r (tmux-control--parse-layout-int s i) h (car r) i (cdr r))
+    (unless (and (< i (length s)) (= (aref s i) ?,))
+      (error "tmux-control: expected , after height"))
+    (setq i (1+ i))
+    (setq r (tmux-control--parse-layout-int s i) x (car r) i (cdr r))
+    (unless (and (< i (length s)) (= (aref s i) ?,))
+      (error "tmux-control: expected , after x"))
+    (setq i (1+ i))
+    (setq r (tmux-control--parse-layout-int s i) y (car r) i (cdr r))
+    (cons (list w h x y) i)))
+
+(defun tmux-control--parse-layout-node (s i)
+  "Parse one layout node from string S at index I.
+Return (NODE . NEXT-INDEX).  NODE is a plist:
+  leaf:  (:type leaf  :w W :h H :x X :y Y :id ID)
+  split: (:type split :dir h|v :w W :h H :x X :y Y :children (NODE...))."
+  (let* ((dims (tmux-control--parse-layout-dims s i))
+         (geom (car dims))
+         (w (nth 0 geom)) (h (nth 1 geom))
+         (x (nth 2 geom)) (y (nth 3 geom)))
+    (setq i (cdr dims))
+    (let ((ch (and (< i (length s)) (aref s i))))
+      (cond
+       ((eq ch ?{)
+        (let ((lst (tmux-control--parse-layout-list s (1+ i) ?})))
+          (cons (list :type 'split :dir 'h :w w :h h :x x :y y
+                      :children (car lst))
+                (cdr lst))))
+       ((eq ch ?\[)
+        (let ((lst (tmux-control--parse-layout-list s (1+ i) ?\])))
+          (cons (list :type 'split :dir 'v :w w :h h :x x :y y
+                      :children (car lst))
+                (cdr lst))))
+       ((eq ch ?,)
+        (let ((r (tmux-control--parse-layout-int s (1+ i))))
+          (cons (list :type 'leaf :w w :h h :x x :y y
+                      :id (number-to-string (car r)))
+                (cdr r))))
+       (t (error "tmux-control: malformed layout node at %d" i))))))
+
+(defun tmux-control--parse-layout-list (s i close)
+  "Parse a comma-separated node list from S at I until CLOSE character.
+Return (CHILDREN . NEXT-INDEX) with NEXT-INDEX positioned past CLOSE."
+  (let ((children '())
+        (len (length s))
+        (done nil))
+    (while (not done)
+      (let ((r (tmux-control--parse-layout-node s i)))
+        (push (car r) children)
+        (setq i (cdr r)))
+      (cond
+       ((>= i len) (error "tmux-control: unterminated layout list"))
+       ((= (aref s i) ?,) (setq i (1+ i)))
+       ((= (aref s i) close) (setq i (1+ i) done t))
+       (t (error "tmux-control: unexpected char in layout list at %d" i))))
+    (cons (nreverse children) i)))
+
+(defun tmux-control--parse-layout (layout)
+  "Parse a tmux window-layout LAYOUT string into a node tree.
+Return the root node plist, or nil when LAYOUT is empty or malformed.
+See `tmux-control--parse-layout-node' for the node shape."
+  (if (or (null layout) (string-empty-p (string-trim layout)))
+      nil
+    (condition-case nil
+        (car (tmux-control--parse-layout-node
+              (tmux-control--layout-strip-checksum (string-trim layout))
+              0))
+      (error nil))))
+
+(defun tmux-control--layout-leaves (node)
+  "Return the leaf nodes under layout NODE, left-to-right then top-to-bottom.
+The order follows the children order tmux records, which is exactly the
+left/top-to-right/bottom reading order used to lay out the panes."
+  (cond
+   ((null node) nil)
+   ((eq (plist-get node :type) 'leaf) (list node))
+   (t (apply #'append
+             (mapcar #'tmux-control--layout-leaves
+                     (plist-get node :children))))))
+
 (provide 'tmux-control)
 
 ;;; tmux-control.el ends here
