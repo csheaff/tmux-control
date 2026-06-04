@@ -174,6 +174,12 @@ Set by `tmux-control--feed-terminal' and cleared by
   "Reverse-order list of decoded %output payloads awaiting a single feed.
 Accumulated by `tmux-control--handle-line' and drained by
 `tmux-control--flush-output-batch'.")
+(defvar-local tmux-control--utf8-carry ""
+  "Unibyte bytes of an incomplete trailing UTF-8 sequence held for the next feed.
+tmux can split a multibyte character across two %output messages; the
+per-message decoding leaves the halves as raw bytes, so the trailing
+incomplete bytes are carried here and prepended to the next chunk by
+`tmux-control--feed-terminal'.")
 (defvar-local tmux-control--active-pane nil)
 (defvar-local tmux-control--fallback-target nil)
 (defvar-local tmux-control--host nil)
@@ -778,6 +784,7 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
     (setq tmux-control--accumulator "")
     (setq tmux-control--display-dirty nil)
     (setq tmux-control--output-batch nil)
+    (setq tmux-control--utf8-carry "")
     (setq tmux-control--active-pane nil)
     (setq tmux-control--alt-screen-honored t)
     (setq tmux-control--command-queue nil)
@@ -1635,6 +1642,45 @@ so the reactive query responses (device-attributes, cursor-position, and
 color reports) Eat generates while rendering tmux output are not injected
 into the pane as input.")
 
+(defconst tmux-control--eight-bit-char-regexp
+  (format "[%c-%c]" #x3fff80 #x3fffff)
+  "Regexp matching any Emacs eight-bit (raw byte) character.")
+
+(defun tmux-control--utf8-complete-len (bytes)
+  "Return the byte length of the longest complete-UTF-8 prefix of BYTES.
+BYTES is a unibyte string.  A trailing incomplete multibyte sequence -- a
+lead byte without all its continuation bytes -- is excluded so it can be
+carried over and finished by the next chunk.  Pure, for unit testing."
+  (let* ((n (length bytes))
+         (i (1- n)))
+    ;; Walk back over at most three continuation bytes (10xxxxxx).
+    (while (and (>= i 0)
+                (< (- n i) 4)
+                (= (logand (aref bytes i) #xc0) #x80))
+      (setq i (1- i)))
+    (if (< i 0)
+        n
+      (let ((b (aref bytes i)))
+        (cond
+         ((< b #x80) n)                      ; ASCII: whole string is complete
+         ((= (logand b #xc0) #x80) n)        ; only continuation bytes: leave as-is
+         (t                                  ; a lead byte at I
+          (let ((need (cond ((>= b #xf0) 4) ((>= b #xe0) 3) (t 2))))
+            (if (>= (- n i) need) n i))))))))
+
+(defun tmux-control--utf8-decode-stream (carry output)
+  "Reassemble a UTF-8 stream across chunks; return (DECODED . NEW-CARRY).
+CARRY is a unibyte string of bytes held back from the previous chunk (an
+incomplete trailing multibyte sequence).  OUTPUT is the next text, which
+may itself contain raw eight-bit bytes left when tmux split a multibyte
+character across two %output messages.  DECODED is the complete-UTF-8
+prefix as characters; NEW-CARRY is the leftover incomplete tail to prepend
+next time.  Pure, for unit testing."
+  (let* ((bytes (concat carry (encode-coding-string output 'utf-8)))
+         (len (tmux-control--utf8-complete-len bytes)))
+    (cons (decode-coding-string (substring bytes 0 len) 'utf-8)
+          (substring bytes len))))
+
 (defun tmux-control--current-sync-windows ()
   "Return the windows that should scroll-follow the live terminal cursor.
 Must be called BEFORE feeding new output: Eat identifies a following
@@ -1664,11 +1710,25 @@ in testing), so a reply from here is at best a duplicate and at worst --
 for queries tmux passes through, such as OSC 10/11 color requests --
 arrives long after the program stopped reading and lands as garbage on
 the shell's command line.  Bind `tmux-control--suppress-responses' so
-`tmux-control--send-input' drops those sends while rendering."
+`tmux-control--send-input' drops those sends while rendering.
+
+tmux can split a multibyte character across two %output messages; the
+per-message UTF-8 decoding then leaves the halves as raw eight-bit bytes,
+which Eat (working on characters) renders as octal escapes.  Reassemble
+the UTF-8 stream across feeds first -- carrying an incomplete trailing
+sequence in `tmux-control--utf8-carry' -- so split characters are made
+whole before they reach Eat."
   (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
     (let ((inhibit-read-only t)
           (tmux-control--suppress-responses t))
-      (eat-term-process-output tmux-control--terminal output)
+      (if (and (= 0 (length tmux-control--utf8-carry))
+               (not (string-match-p tmux-control--eight-bit-char-regexp output)))
+          ;; Fast path: no pending partial char and no raw bytes.
+          (eat-term-process-output tmux-control--terminal output)
+        (let ((res (tmux-control--utf8-decode-stream
+                    tmux-control--utf8-carry output)))
+          (setq tmux-control--utf8-carry (cdr res))
+          (eat-term-process-output tmux-control--terminal (car res))))
       (setq tmux-control--display-dirty t))))
 
 (defun tmux-control--flush-display (sync-windows)
@@ -1694,6 +1754,9 @@ For one-shot writes (screen seed, resize repaint) that are not part of a
 streamed flood; live %output is fed via `tmux-control--feed-terminal' and
 flushed once per filter chunk."
   (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+    ;; A full repaint stands alone; drop any partial multibyte char carried
+    ;; from streamed output so it cannot prefix the repaint.
+    (setq tmux-control--utf8-carry "")
     (let ((sync-windows (tmux-control--current-sync-windows)))
       (tmux-control--feed-terminal output)
       (tmux-control--flush-display sync-windows))))

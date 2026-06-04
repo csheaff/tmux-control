@@ -100,6 +100,34 @@
     (should seeded)
     (should (member "refresh-client -A \"%0:continue\"" sent))))
 
+;;; UTF-8 stream reassembly (multibyte characters tmux split across messages).
+
+(ert-deftest tmux-control-test-utf8-complete-len ()
+  ;; ASCII and complete multibyte sequences: the whole string is complete.
+  (should (= 3 (tmux-control--utf8-complete-len (unibyte-string ?a ?b ?c))))
+  (should (= 3 (tmux-control--utf8-complete-len (unibyte-string #xe2 #x94 #x80)))) ; ─
+  (should (= 0 (tmux-control--utf8-complete-len (unibyte-string))))
+  ;; Incomplete trailing sequences are held back.
+  (should (= 0 (tmux-control--utf8-complete-len (unibyte-string #xe2 #x94))))     ; ─ less one
+  (should (= 1 (tmux-control--utf8-complete-len (unibyte-string ?x #xe2))))       ; lead byte only
+  ;; A 4-byte lead (emoji) missing two continuation bytes.
+  (should (= 2 (tmux-control--utf8-complete-len (unibyte-string ?x ?y #xf0 #x9f)))))
+
+(ert-deftest tmux-control-test-utf8-decode-stream-reassembles-split ()
+  ;; A ─ (E2 94 80) split across two feeds is reassembled, not left as bytes.
+  (let* ((e2 (decode-char 'eight-bit #xe2))
+         (b94 (decode-char 'eight-bit #x94))
+         (b80 (decode-char 'eight-bit #x80))
+         (r1 (tmux-control--utf8-decode-stream "" (string e2 b94)))
+         (r2 (tmux-control--utf8-decode-stream (cdr r1) (string b80))))
+    (should (equal (car r1) ""))               ; nothing complete yet
+    (should (equal (car r2) (string #x2500)))  ; reassembled ─
+    (should (equal (cdr r2) "")))              ; nothing carried
+  ;; Plain (already-complete) text passes through with no carry.
+  (let ((r (tmux-control--utf8-decode-stream "" "héllo")))
+    (should (equal (car r) "héllo"))
+    (should (equal (cdr r) ""))))
+
 ;;; Input hex encoding.
 
 (ert-deftest tmux-control-test-string-to-hex-args ()
