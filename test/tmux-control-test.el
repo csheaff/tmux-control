@@ -371,6 +371,36 @@ each wrapped in an evolving prompt line and a status bar.")
   (should-not (tmux-control--parse-pane-size '("")))
   (should-not (tmux-control--parse-pane-size nil)))
 
+(ert-deftest tmux-control-test-parse-cursor-pos ()
+  ;; A well-formed "X,Y" reply yields a (X . Y) cons of 0-indexed coords.
+  (should (equal '(42 . 2) (tmux-control--parse-cursor-pos '("42,2"))))
+  (should (equal '(0 . 0) (tmux-control--parse-cursor-pos '("0,0"))))
+  ;; Reverse-order/padded reply lists and surrounding whitespace are tolerated.
+  (should (equal '(7 . 3) (tmux-control--parse-cursor-pos '("" "  7,3 " ""))))
+  ;; Malformed or empty replies yield nil rather than a bogus position.
+  (should-not (tmux-control--parse-cursor-pos '("42 2")))
+  (should-not (tmux-control--parse-cursor-pos '("nope")))
+  (should-not (tmux-control--parse-cursor-pos '("")))
+  (should-not (tmux-control--parse-cursor-pos nil)))
+
+(ert-deftest tmux-control-test-screen-seed-sequence-cursor ()
+  ;; With no live terminal the grid defaults to 80x24.  The seed string
+  ;; paints the captured lines and ends with a cursor-positioning escape
+  ;; derived from tmux's 0-indexed (X . Y), converted to 1-based row/column.
+  (let ((tmux-control--terminal nil))
+    (let ((seq (tmux-control--screen-seed-sequence "line one\nline two\n" '(42 . 2))))
+      (should (string-match-p "line one" seq))
+      (should (string-match-p "line two" seq))
+      (should (string-suffix-p "\e[3;43H" seq)))
+    ;; Without a queried cursor, fall back to the bottom-left of the grid.
+    (should (string-suffix-p
+             "\e[24;1H"
+             (tmux-control--screen-seed-sequence "x\n" nil)))
+    ;; Out-of-range coordinates are clamped to the grid.
+    (should (string-suffix-p
+             "\e[24;80H"
+             (tmux-control--screen-seed-sequence "x\n" '(200 . 100))))))
+
 ;;; Session and window listing (parsing only; the process call is stubbed).
 
 (ert-deftest tmux-control-test-list-sessions-parses ()

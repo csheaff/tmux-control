@@ -123,6 +123,11 @@ tmux query over SSH."
 (defvar-local tmux-control--current-command-kind :ignore)
 (defvar-local tmux-control--collecting-command nil)
 (defvar-local tmux-control--command-output nil)
+(defvar-local tmux-control--seed-cursor nil
+  "Most recent (X . Y) cursor position queried for a screen seed.
+X and Y are tmux's 0-indexed cursor column and row on the visible
+screen, or nil when the position has not been queried.  Used by the
+`:capture' reply handler to place the cursor on the seeded screen.")
 (defvar-local tmux-control--keys-active nil)
 (defvar-local tmux-control--live-buffer nil)
 (defvar-local tmux-control--alt-screen-honored t
@@ -710,6 +715,7 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
     (setq tmux-control--current-command-kind :ignore)
     (setq tmux-control--collecting-command nil)
     (setq tmux-control--command-output nil)
+    (setq tmux-control--seed-cursor nil)
     (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
     (setq eat-terminal tmux-control--terminal)
     (eat-semi-char-mode)
@@ -1346,19 +1352,31 @@ ordinary short repeats) are kept.  OUT is searched only within the recent
      (setq tmux-control--alt-screen-honored
            (cdr (tmux-control--interpret-alt-screen-reply
                  tmux-control--command-output t))))
+    (:cursor-pos
+     (setq tmux-control--seed-cursor
+           (tmux-control--parse-cursor-pos tmux-control--command-output)))
     (:capture
      (tmux-control--write-terminal
       (tmux-control--screen-seed-sequence
        (mapconcat #'identity
                   (nreverse tmux-control--command-output)
-                  "\n")))))
+                  "\n")
+       tmux-control--seed-cursor))))
   (setq tmux-control--collecting-command nil)
   (setq tmux-control--current-command-kind :ignore)
   (setq tmux-control--command-output nil))
 
 (defun tmux-control--seed-screen ()
-  "Seed the Eat buffer with the current tmux pane contents."
+  "Seed the Eat buffer with the current tmux pane contents.
+Query the pane's real cursor position first, so the seeded screen places
+the cursor exactly where tmux has it instead of guessing from the prompt.
+tmux replies in command order, so the `:cursor-pos' reply lands before
+the `:capture' reply that paints the screen and consumes it."
   (when tmux-control--active-pane
+    (tmux-control--send-command
+     (format "display-message -p -t %s \"#{cursor_x},#{cursor_y}\""
+             tmux-control--active-pane)
+     :cursor-pos)
     (tmux-control--send-command
      (format "capture-pane -p -e -t %s"
              tmux-control--active-pane)
@@ -1377,8 +1395,12 @@ ordinary short repeats) are kept.  OUT is searched only within the recent
   "Return the display width of STRING, ignoring ANSI control sequences."
   (string-width (tmux-control--strip-ansi string)))
 
-(defun tmux-control--screen-seed-sequence (text)
-  "Return terminal escapes to paint captured visible-screen TEXT."
+(defun tmux-control--screen-seed-sequence (text &optional cursor)
+  "Return terminal escapes to paint captured visible-screen TEXT.
+CURSOR, when non-nil, is a (X . Y) cons of tmux's 0-indexed cursor column
+and row on the visible screen; the cursor is placed there (clamped to the
+grid).  When nil -- the position could not be queried -- the cursor falls
+back to the bottom-left of the screen."
   (let* ((size (and tmux-control--terminal
                     (eat-term-live-p tmux-control--terminal)
                     (eat-term-size tmux-control--terminal)))
@@ -1390,8 +1412,6 @@ ordinary short repeats) are kept.  OUT is searched only within the recent
                   lines))
          (lines (last lines (min height (length lines))))
          (row 1)
-         (cursor-row height)
-         (cursor-column 1)
          (out '("\e[H\e[2J")))
     (dolist (line lines)
       (setq line (string-trim-right line))
@@ -1401,16 +1421,15 @@ ordinary short repeats) are kept.  OUT is searched only within the recent
       (when (> (tmux-control--display-width line) width)
         (setq line (truncate-string-to-width
                     (tmux-control--strip-ansi line) width nil nil "")))
-      (let ((plain (tmux-control--strip-ansi line)))
-        (when (string-match "❯[[:blank:]]*" plain)
-          (setq cursor-row row)
-          (setq cursor-column
-                (1+ (string-width (substring plain 0 (match-end 0)))))))
       ;; Reset attributes before erasing so a line's background color does
       ;; not bleed into the cleared remainder of the row.
       (push (format "\e[%d;1H%s\e[m\e[K" row line) out)
       (setq row (1+ row)))
-    (push (format "\e[%d;%dH" cursor-row (max 1 cursor-column)) out)
+    ;; Place the cursor where tmux reports it (converted to 1-based and
+    ;; clamped to the grid), or at the bottom-left when unknown.
+    (let ((cursor-row (if cursor (min height (max 1 (1+ (cdr cursor)))) height))
+          (cursor-column (if cursor (min width (max 1 (1+ (car cursor)))) 1)))
+      (push (format "\e[%d;%dH" cursor-row cursor-column) out))
     (apply #'concat (nreverse out))))
 
 (defun tmux-control--decode-output (payload)
@@ -1576,6 +1595,17 @@ cons of positive integers, or nil when no well-formed positive size is found."
             (h (string-to-number (match-string 2 val))))
         (when (and (> w 0) (> h 0))
           (cons w h))))))
+
+(defun tmux-control--parse-cursor-pos (output)
+  "Parse \"X,Y\" cursor coordinates from control-mode reply OUTPUT lines.
+OUTPUT is the raw (reverse-order) reply line list.  Return a (X . Y) cons
+of tmux's 0-indexed cursor column and row, or nil when no well-formed pair
+is found.  Pure: no side effects, for unit testing the seed cursor query."
+  (let ((val (car (cl-remove-if #'string-empty-p
+                                (mapcar #'string-trim output)))))
+    (when (and val (string-match "\\`\\([0-9]+\\),\\([0-9]+\\)\\'" val))
+      (cons (string-to-number (match-string 1 val))
+            (string-to-number (match-string 2 val))))))
 
 (defun tmux-control--refresh-pane-size ()
   "Query the active pane's real size and sync the Eat grid to it.
