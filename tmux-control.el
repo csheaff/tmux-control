@@ -87,10 +87,11 @@ pane history can contain many repeated copies of the visible screen."
 (defcustom tmux-control-wheel-enters-scrollback t
   "Non-nil means scrolling up with the mouse wheel enters scrollback view.
 
-The wheel is only intercepted while the live pane shows its normal
-screen.  When a full-screen application is running (the alternate
-screen, e.g. the copilot TUI, vim, or less), the wheel is forwarded to
-that application so it keeps its own mouse scrolling."
+The wheel is only intercepted this way while the live pane shows its
+normal screen.  When a full-screen application owns the alternate
+screen (e.g. vim or less under a tmux that honors alternate-screen),
+or when the application requests mouse events itself, the wheel event
+is forwarded to the terminal unchanged."
   :type 'boolean)
 
 (defcustom tmux-control-window-preview t
@@ -124,6 +125,13 @@ tmux query over SSH."
 (defvar-local tmux-control--command-output nil)
 (defvar-local tmux-control--keys-active nil)
 (defvar-local tmux-control--live-buffer nil)
+(defvar-local tmux-control--alt-screen-honored t
+  "Non-nil when the controlled tmux honors alternate-screen for the active window.
+When the active window's effective `alternate-screen' option is off,
+tmux keeps the pane on its normal screen even while an application
+requests the alternate screen, so Eat's alternate-display state is a
+phantom and must be ignored.  Refreshed over the control connection
+whenever the active pane changes.")
 
 (defvar tmux-control--override-map
   (let ((map (make-sparse-keymap)))
@@ -318,6 +326,18 @@ Queries tmux on HOST using SOCKET-NAME."
   "Re-query the session's active pane id, repaint the live view, and resize."
   (tmux-control--send-command "display-message -p '#{pane_id}'" :pane-id)
   (tmux-control--resize-to-window))
+
+(defun tmux-control--refresh-alt-screen-option ()
+  "Re-query whether the active window honors the alternate-screen option.
+Sends a control-mode `show-options' query for the active pane; the reply
+updates `tmux-control--alt-screen-honored' so `tmux-control--alt-screen-p'
+can distinguish a real alternate screen from a phantom one created when
+tmux runs with `alternate-screen off'."
+  (when (and tmux-control--active-pane
+             (process-live-p tmux-control--process))
+    (tmux-control--send-command
+     (format "show-options -wv -t %s alternate-screen" tmux-control--active-pane)
+     :alt-screen-opt)))
 
 (defun tmux-control--read-window-index (prompt)
   "Read a window index for the current session using PROMPT with completion."
@@ -522,12 +542,16 @@ keystroke, rather than dropping it."
       (eat-self-input 1 event))))
 
 (defun tmux-control--alt-screen-p ()
-  "Return non-nil when the live pane shows the alternate (full-screen) display.
-This is the screen used by TUI applications such as the copilot TUI,
-vim, or less.  Uses Eat's public predicate when available, falling back
-to the internal accessor for older Eat versions.  Read locally, with no
-tmux query."
-  (and tmux-control--terminal
+  "Return non-nil when the live pane truly shows the alternate display.
+This is the full-screen display used by TUI applications such as vim or
+less when the controlled tmux honors the alternate screen.  It is non-nil
+only when BOTH Eat reports the alternate display AND the active window's
+effective `alternate-screen' option is on (`tmux-control--alt-screen-honored').
+When that option is off, tmux keeps the pane on its normal screen and
+forwards a phantom alternate-screen request to the control client, so
+Eat's state alone is unreliable.  Read locally, with no tmux query."
+  (and tmux-control--alt-screen-honored
+       tmux-control--terminal
        (eat-term-live-p tmux-control--terminal)
        (cond
         ((fboundp 'eat-term-in-alternative-display-p)
@@ -552,28 +576,37 @@ Such applications (full-screen TUIs, but also normal-screen programs like
 (defun tmux-control-wheel-scroll (event)
   "Handle a mouse wheel EVENT in a live tmux-control buffer.
 
-When `tmux-control-wheel-enters-scrollback' is enabled and the pane is on
-its normal screen with no application mouse tracking, scrolling up enters
-the scrollback buffer.  Otherwise the event is forwarded to the terminal
-so full-screen or mouse-aware applications keep their own scrolling.  The
-feature is only active when Eat's screen state can be read, so the live
-behavior is otherwise unchanged."
+When scrolling up over a pane that shows its normal screen and whose
+application has not requested mouse tracking, enter the Emacs scrollback
+buffer (when `tmux-control-wheel-enters-scrollback').  This is the
+Emacs-side analog of tmux's default wheel-up binding, which opens
+copy-mode scrollback for normal-screen panes.
+
+In every other case -- a genuine full-screen (alternate-screen)
+application, a mouse-aware application, or wheel-down -- the event is
+forwarded to the terminal unchanged so the application keeps its own
+handling.
+
+The scrollback interception is only active when Eat's screen state can
+be read, so the live behavior is otherwise unchanged."
   (interactive "e")
-  (let ((window (posn-window (event-start event))))
-    (if (and tmux-control-wheel-enters-scrollback
-             (window-live-p window)
-             (with-current-buffer (window-buffer window)
-               (and (derived-mode-p 'tmux-control-mode)
-                    (tmux-control--wheel-detectable-p)
-                    (not (tmux-control--alt-screen-p))
-                    (not (tmux-control--pane-grabs-mouse-p)))))
-        (progn
-          (select-window window)
-          (tmux-control-scrollback))
-      (if (window-live-p window)
-          (with-selected-window window
-            (eat-self-input 1 event))
-        (eat-self-input 1 event)))))
+  (let ((window (posn-window (event-start event)))
+        (direction (event-basic-type event)))
+    (if (window-live-p window)
+        (with-current-buffer (window-buffer window)
+          (cond
+           ((and tmux-control-wheel-enters-scrollback
+                 (eq direction 'wheel-up)
+                 (derived-mode-p 'tmux-control-mode)
+                 (tmux-control--wheel-detectable-p)
+                 (not (tmux-control--alt-screen-p))
+                 (not (tmux-control--pane-grabs-mouse-p)))
+            (select-window window)
+            (tmux-control-scrollback))
+           (t
+            (with-selected-window window
+              (eat-self-input 1 event)))))
+      (eat-self-input 1 event))))
 
 (defun tmux-control--disable-line-numbers ()
   "Disable line numbers in tmux-control buffers."
@@ -622,6 +655,7 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
     (setq tmux-control--keys-active t)
     (setq tmux-control--accumulator "")
     (setq tmux-control--active-pane nil)
+    (setq tmux-control--alt-screen-honored t)
     (setq tmux-control--command-queue nil)
     (setq tmux-control--current-command-kind :ignore)
     (setq tmux-control--collecting-command nil)
@@ -1162,7 +1196,8 @@ completion so the user is never stranded in a half-built chooser."
       (setq tmux-control--active-pane pane)
       (tmux-control--write-terminal (tmux-control--decode-output payload))))
    ((string-match "\\`%window-pane-changed [^ ]+ \\(%[0-9]+\\)\\'" line)
-    (setq tmux-control--active-pane (match-string 1 line)))))
+    (setq tmux-control--active-pane (match-string 1 line))
+    (tmux-control--refresh-alt-screen-option))))
 
 (defun tmux-control--finish-command-output ()
   "Handle the end of a tmux command reply."
@@ -1173,7 +1208,25 @@ completion so the user is never stranded in a half-built chooser."
                              tmux-control--command-output)))
        (when pane
          (setq tmux-control--active-pane pane)
-         (tmux-control--seed-screen))))
+         (tmux-control--seed-screen)
+         (tmux-control--refresh-alt-screen-option))))
+    (:alt-screen-opt
+     (let ((val (car (cl-remove-if #'string-empty-p
+                                   (mapcar #'string-trim
+                                           tmux-control--command-output)))))
+       (cond
+        ((member val '("on" "off"))
+         (setq tmux-control--alt-screen-honored (string= val "on")))
+        (t
+         ;; Empty reply means the window inherits the option; resolve it
+         ;; from the global-window default.
+         (tmux-control--send-command "show-options -gwv alternate-screen"
+                                     :alt-screen-opt-global)))))
+    (:alt-screen-opt-global
+     (let ((val (car (cl-remove-if #'string-empty-p
+                                   (mapcar #'string-trim
+                                           tmux-control--command-output)))))
+       (setq tmux-control--alt-screen-honored (not (equal val "off")))))
     (:capture
      (tmux-control--write-terminal
       (tmux-control--screen-seed-sequence

@@ -85,10 +85,14 @@ Useful bindings:
   `xah-fly-keys`: this only fires for self-inserting keys, so command-mode
   navigation in the read-only scrollback buffer is preserved.)
 - Scrolling up with the mouse wheel also enters the scrollback view, but only
-  while the pane shows its normal screen.  When a full-screen application is
-  running (the alternate screen, e.g. a TUI, `vim`, or `less`), the wheel is
-  forwarded to that application so it keeps its own mouse scrolling.  Disable
-  this with:
+  while the pane shows its normal screen.  When a full-screen application
+  genuinely owns the alternate screen (e.g. `vim` or `less` under a tmux that
+  honors `alternate-screen`), the wheel is forwarded to that application so it
+  keeps its own mouse scrolling.  Note that with `alternate-screen off` (a
+  common setting that preserves scrollback for TUIs), tmux keeps even
+  full-screen apps on the normal screen, so the wheel correctly opens the
+  scrollback view for them too -- matching tmux's own wheel-up behavior.
+  Disable this with:
 
   ```elisp
   (setq tmux-control-wheel-enters-scrollback nil)
