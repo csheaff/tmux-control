@@ -1101,12 +1101,74 @@ completion so the user is never stranded in a half-built chooser."
    ((tmux-control--line-list-contains-p out chunk) out)
    (t
     (let ((overlap (tmux-control--line-list-overlap out chunk)))
-      (append out
-              (unless (or (> overlap 0)
-                          (string-empty-p (string-trim (car (last out))))
-                          (string-empty-p (string-trim (car chunk))))
-                '(""))
-              (nthcdr overlap chunk))))))
+      (if (> overlap 0)
+          ;; A clean suffix/prefix overlap: extend OUT with the new tail.
+          (append out (nthcdr overlap chunk))
+        ;; No clean overlap.  The chunk may still embed a previously seen
+        ;; full-screen redraw body wrapped in new volatile lines (an
+        ;; evolving prompt, a status bar).  Drop those already-seen
+        ;; interior runs, then append whatever genuinely new lines remain.
+        (let ((remainder (tmux-control--trim-blank-line-list
+                          (tmux-control--strip-seen-runs out chunk))))
+          (cond
+           ((null remainder) out)
+           ((tmux-control--line-list-contains-p out remainder) out)
+           (t
+            (append out
+                    (unless (or (string-empty-p (string-trim (car (last out))))
+                                (string-empty-p (string-trim (car remainder))))
+                      '(""))
+                    remainder)))))))))
+
+(defconst tmux-control--scrollback-min-redraw-run 6
+  "Minimum contiguous line-run length treated as a repeated redraw body.
+Shorter repeats are preserved, so ordinary repeated command output (a
+small table, a two-line banner) is never silently dropped.")
+
+(defun tmux-control--redraw-run-distinctive-p (lines)
+  "Return non-nil when LINES are substantial enough to be a redraw body.
+Requires several nonblank lines with enough distinct content, so that
+generic filler (blank lines, repeated rule characters) is not mistaken
+for a repeated full-screen panel."
+  (let ((nonblank (seq-filter (lambda (line)
+                                (not (string-empty-p (string-trim line))))
+                              lines)))
+    (and (>= (length nonblank) 4)
+         (>= (length (seq-uniq (mapcar #'string-trim nonblank))) 3))))
+
+(defun tmux-control--seen-run-length (haystack chunk start n)
+  "Return the length of the longest already-seen redraw run of CHUNK at START.
+Considers runs from START up to N, returning the longest contiguous run
+that is distinctive (`tmux-control--redraw-run-distinctive-p') and already
+present in HAYSTACK, or nil when no qualifying run starts at START."
+  (let ((len (min (- n start) tmux-control-compact-scrollback-window))
+        (found nil))
+    (while (and (>= len tmux-control--scrollback-min-redraw-run)
+                (not found))
+      (let ((candidate (cl-subseq chunk start (+ start len))))
+        (when (and (tmux-control--redraw-run-distinctive-p candidate)
+                   (cl-search candidate haystack :test #'string=))
+          (setq found len)))
+      (setq len (1- len)))
+    found))
+
+(defun tmux-control--strip-seen-runs (out chunk)
+  "Remove from CHUNK contiguous line runs already present in recent OUT.
+Only long, distinctive runs are removed, so repeated full-screen TUI
+redraw bodies collapse to a single copy while genuinely new lines (and
+ordinary short repeats) are kept.  OUT is searched only within the recent
+`tmux-control-compact-scrollback-window' lines."
+  (let* ((haystack (last out tmux-control-compact-scrollback-window))
+         (n (length chunk))
+         (i 0)
+         (result '()))
+    (while (< i n)
+      (let ((run-len (tmux-control--seen-run-length haystack chunk i n)))
+        (if run-len
+            (setq i (+ i run-len))
+          (push (nth i chunk) result)
+          (setq i (1+ i)))))
+    (nreverse result)))
 
 (defun tmux-control--line-list-contains-p (haystack needle)
   "Return non-nil when HAYSTACK contains NEEDLE as contiguous lines."

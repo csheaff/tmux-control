@@ -166,6 +166,55 @@
                     "[Session] x\nalpha\nbeta\n[Session] x\ngamma\ndelta")
                    "alpha\nbeta\n\ngamma\ndelta"))))
 
+(ert-deftest tmux-control-test-compact-strips-redrawn-body-behind-new-lines ()
+  (let ((tmux-control-compact-scrollback-window 300))
+    ;; A repeated full-screen panel (6+ distinctive lines) wrapped in new
+    ;; volatile lines (an evolving prompt) collapses: the panel survives
+    ;; once and only the genuinely new prompt line is appended.
+    (should (equal (tmux-control--compact-repeated-redraw-lines
+                    (concat "[Session]\nA\nB\nC\nD\nE\nF\n"
+                            "[Session]\nXP\nA\nB\nC\nD\nE\nF"))
+                   "A\nB\nC\nD\nE\nF\n\nXP"))))
+
+(ert-deftest tmux-control-test-compact-keeps-short-repeats ()
+  (let ((tmux-control-compact-scrollback-window 300))
+    ;; Short repeated blocks (below the redraw-run threshold) are NOT
+    ;; stripped, so ordinary repeated command output is never lost.
+    (should (equal (tmux-control--compact-repeated-redraw-lines
+                    "[Session]\nA\nB\nC\nD\n[Session]\nXP\nA\nB\nC\nD")
+                   "A\nB\nC\nD\n\nXP\nA\nB\nC\nD"))))
+
+(ert-deftest tmux-control-test-compact-respects-window-for-runs ()
+  ;; A repeated body older than the recent window is not stripped: the
+  ;; interior-run search only looks back `tmux-control-compact-scrollback-window'
+  ;; lines.
+  (let ((tmux-control-compact-scrollback-window 2))
+    (should (equal (tmux-control--compact-repeated-redraw-lines
+                    (concat "[Session]\nA\nB\nC\nD\nE\nF\n"
+                            "[Session]\nXP\nA\nB\nC\nD\nE\nF"))
+                   "A\nB\nC\nD\nE\nF\n\nXP\nA\nB\nC\nD\nE\nF"))))
+
+(ert-deftest tmux-control-test-strip-seen-runs ()
+  (let ((tmux-control-compact-scrollback-window 300))
+    ;; A distinctive 6-line run already in OUT is removed, leaving the
+    ;; new leading line.
+    (should (equal (tmux-control--strip-seen-runs
+                    '("A" "B" "C" "D" "E" "F")
+                    '("new" "A" "B" "C" "D" "E" "F"))
+                   '("new")))
+    ;; A short run (below threshold) is preserved.
+    (should (equal (tmux-control--strip-seen-runs
+                    '("A" "B" "C" "D")
+                    '("new" "A" "B" "C" "D"))
+                   '("new" "A" "B" "C" "D")))))
+
+(ert-deftest tmux-control-test-redraw-run-distinctive-p ()
+  ;; Needs >=4 nonblank lines and >=3 distinct ones.
+  (should (tmux-control--redraw-run-distinctive-p '("a" "b" "c" "d")))
+  (should-not (tmux-control--redraw-run-distinctive-p '("a" "b" "c")))
+  (should-not (tmux-control--redraw-run-distinctive-p '("a" "a" "a" "a")))
+  (should-not (tmux-control--redraw-run-distinctive-p '("a" "" "b" "" "c"))))
+
 ;;; Session and window listing (parsing only; the process call is stubbed).
 
 (ert-deftest tmux-control-test-list-sessions-parses ()
