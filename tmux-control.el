@@ -84,6 +84,15 @@ pane history can contain many repeated copies of the visible screen."
   "Maximum line window used to merge repeated redraw chunks in scrollback view."
   :type 'integer)
 
+(defcustom tmux-control-wheel-enters-scrollback t
+  "Non-nil means scrolling up with the mouse wheel enters scrollback view.
+
+The wheel is only intercepted while the live pane shows its normal
+screen.  When a full-screen application is running (the alternate
+screen, e.g. the copilot TUI, vim, or less), the wheel is forwarded to
+that application so it keeps its own mouse scrolling."
+  :type 'boolean)
+
 (defvar-local tmux-control--process nil)
 (defvar-local tmux-control--terminal nil)
 (defvar-local tmux-control--accumulator "")
@@ -105,6 +114,7 @@ pane history can contain many repeated copies of the visible screen."
     (define-key map (kbd "C-c C-e") #'tmux-control-scrollback)
     (define-key map (kbd "C-c C-k") #'tmux-control-disconnect)
     (define-key map (kbd "C-c C-l") #'tmux-control-clear-and-repaint)
+    (define-key map [wheel-up] #'tmux-control-wheel-scroll)
     map)
   "High-precedence keymap for tmux-control buffers.")
 
@@ -461,6 +471,60 @@ Use `tmux-control-live' to return to the live interactive pane."
       (tmux-control-connect tmux-control--host
                             tmux-control--socket-name
                             tmux-control--session))))
+
+(defun tmux-control--alt-screen-p ()
+  "Return non-nil when the live pane shows the alternate (full-screen) display.
+This is the screen used by TUI applications such as the copilot TUI,
+vim, or less.  Uses Eat's public predicate when available, falling back
+to the internal accessor for older Eat versions.  Read locally, with no
+tmux query."
+  (and tmux-control--terminal
+       (eat-term-live-p tmux-control--terminal)
+       (cond
+        ((fboundp 'eat-term-in-alternative-display-p)
+         (eat-term-in-alternative-display-p tmux-control--terminal))
+        ((fboundp 'eat--t-term-main-display)
+         (eat--t-term-main-display tmux-control--terminal)))
+       t))
+
+(defun tmux-control--pane-grabs-mouse-p ()
+  "Return non-nil when the pane's application has requested mouse tracking.
+Such applications (full-screen TUIs, but also normal-screen programs like
+`less -X') expect to receive wheel events themselves."
+  (and (boundp 'eat--mouse-grabbing-type)
+       eat--mouse-grabbing-type
+       t))
+
+(defun tmux-control--wheel-detectable-p ()
+  "Return non-nil when Eat exposes the screen state used for wheel gating."
+  (or (fboundp 'eat-term-in-alternative-display-p)
+      (fboundp 'eat--t-term-main-display)))
+
+(defun tmux-control-wheel-scroll (event)
+  "Handle a mouse wheel EVENT in a live tmux-control buffer.
+
+When `tmux-control-wheel-enters-scrollback' is enabled and the pane is on
+its normal screen with no application mouse tracking, scrolling up enters
+the scrollback buffer.  Otherwise the event is forwarded to the terminal
+so full-screen or mouse-aware applications keep their own scrolling.  The
+feature is only active when Eat's screen state can be read, so the live
+behavior is otherwise unchanged."
+  (interactive "e")
+  (let ((window (posn-window (event-start event))))
+    (if (and tmux-control-wheel-enters-scrollback
+             (window-live-p window)
+             (with-current-buffer (window-buffer window)
+               (and (derived-mode-p 'tmux-control-mode)
+                    (tmux-control--wheel-detectable-p)
+                    (not (tmux-control--alt-screen-p))
+                    (not (tmux-control--pane-grabs-mouse-p)))))
+        (progn
+          (select-window window)
+          (tmux-control-scrollback))
+      (if (window-live-p window)
+          (with-selected-window window
+            (eat-self-input 1 event))
+        (eat-self-input 1 event)))))
 
 (defun tmux-control--disable-line-numbers ()
   "Disable line numbers in tmux-control buffers."

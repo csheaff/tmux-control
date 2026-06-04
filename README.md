@@ -60,6 +60,15 @@ Useful bindings:
   captured from tmux.  In that view, use normal Emacs movement/search/copy,
   `g` to refresh, and `q`, `l`, `RET`, `C-c C-e`, or
   `M-x eat-semi-char-mode` to return to the live pane.
+- Scrolling up with the mouse wheel also enters the scrollback view, but only
+  while the pane shows its normal screen.  When a full-screen application is
+  running (the alternate screen, e.g. a TUI, `vim`, or `less`), the wheel is
+  forwarded to that application so it keeps its own mouse scrolling.  Disable
+  this with:
+
+  ```elisp
+  (setq tmux-control-wheel-enters-scrollback nil)
+  ```
 
 Line numbers are disabled locally in live and scrollback buffers.
 
