@@ -1302,7 +1302,10 @@ ordinary short repeats) are kept.  OUT is searched only within the recent
       (tmux-control--write-terminal (tmux-control--decode-output payload))))
    ((string-match "\\`%window-pane-changed [^ ]+ \\(%[0-9]+\\)\\'" line)
     (setq tmux-control--active-pane (match-string 1 line))
-    (tmux-control--refresh-alt-screen-option))))
+    (tmux-control--refresh-alt-screen-option)
+    (tmux-control--refresh-pane-size))
+   ((string-prefix-p "%layout-change " line)
+    (tmux-control--refresh-pane-size))))
 
 (defun tmux-control--finish-command-output ()
   "Handle the end of a tmux command reply."
@@ -1314,7 +1317,15 @@ ordinary short repeats) are kept.  OUT is searched only within the recent
        (when pane
          (setq tmux-control--active-pane pane)
          (tmux-control--seed-screen)
-         (tmux-control--refresh-alt-screen-option))))
+         (tmux-control--refresh-alt-screen-option)
+         (tmux-control--refresh-pane-size))))
+    (:pane-size
+     (let ((size (tmux-control--parse-pane-size tmux-control--command-output)))
+       (when (and size
+                  (tmux-control--apply-eat-size (car size) (cdr size)))
+         ;; The grid changed under already-rendered output, so repaint
+         ;; the visible screen at the corrected width.
+         (tmux-control--seed-screen))))
     (:alt-screen-opt
      (let ((res (tmux-control--interpret-alt-screen-reply
                  tmux-control--command-output nil)))
@@ -1515,7 +1526,12 @@ KIND identifies the command reply handler."
               (floor (window-screen-lines)))))))
 
 (defun tmux-control--resize (width height)
-  "Resize the local renderer and tmux client to WIDTH by HEIGHT."
+  "Resize the local renderer and request WIDTH by HEIGHT from tmux.
+The renderer is sized to the requested dimensions immediately, but tmux
+may keep the pane at another size (for example when another, larger client
+is attached under `window-size latest').  `tmux-control--refresh-pane-size'
+then reconciles the Eat grid with the pane's real size so cursor-addressed
+redraws stay aligned."
   (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
     (let ((inhibit-read-only t))
       (eat-term-resize tmux-control--terminal width height)
@@ -1523,7 +1539,48 @@ KIND identifies the command reply handler."
       (when (fboundp 'eat--synchronize-scroll-windows)
         (tmux-control--keep-cursor-visible
          (eat--synchronize-scroll-windows)))))
-  (tmux-control--send-command (format "refresh-client -C %dx%d" width height)))
+  (tmux-control--send-command (format "refresh-client -C %dx%d" width height))
+  (tmux-control--refresh-pane-size))
+
+(defun tmux-control--apply-eat-size (width height)
+  "Resize the Eat grid to WIDTH by HEIGHT when it differs from the current.
+Return non-nil when a resize actually happened, so callers can repaint."
+  (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+    (let ((size (eat-term-size tmux-control--terminal)))
+      (unless (and size
+                   (= (car size) width)
+                   (= (cdr size) height))
+        (let ((inhibit-read-only t))
+          (eat-term-resize tmux-control--terminal width height)
+          (eat-term-redisplay tmux-control--terminal)
+          (when (fboundp 'eat--synchronize-scroll-windows)
+            (tmux-control--keep-cursor-visible
+             (eat--synchronize-scroll-windows))))
+        t))))
+
+(defun tmux-control--parse-pane-size (output)
+  "Parse a WxH pane size from control-mode reply OUTPUT lines.
+OUTPUT is the raw (reverse-order) reply line list.  Return a (WIDTH . HEIGHT)
+cons of positive integers, or nil when no well-formed positive size is found."
+  (let ((val (car (cl-remove-if #'string-empty-p
+                                (mapcar #'string-trim output)))))
+    (when (and val (string-match "\\`\\([0-9]+\\)x\\([0-9]+\\)\\'" val))
+      (let ((w (string-to-number (match-string 1 val)))
+            (h (string-to-number (match-string 2 val))))
+        (when (and (> w 0) (> h 0))
+          (cons w h))))))
+
+(defun tmux-control--refresh-pane-size ()
+  "Query the active pane's real size and sync the Eat grid to it.
+A control client cannot always force the pane to the requested size, so
+the renderer follows tmux's actual pane dimensions.  The reply is handled
+by the `:pane-size' branch of `tmux-control--finish-command-output'."
+  (when (and tmux-control--active-pane
+             (process-live-p tmux-control--process))
+    (tmux-control--send-command
+     (format "display-message -p -t %s \"#{pane_width}x#{pane_height}\""
+             tmux-control--active-pane)
+     :pane-size)))
 
 (defun tmux-control--sentinel (process message)
   "Handle PROCESS exit with MESSAGE."

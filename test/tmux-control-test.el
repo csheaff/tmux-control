@@ -352,6 +352,25 @@ each wrapped in an evolving prompt line and a status bar.")
   (should-not (tmux-control--wheel-should-enter-scrollback-p
                'wheel-up t t nil t)))
 
+(ert-deftest tmux-control-test-parse-pane-size ()
+  ;; A well-formed reply yields a (WIDTH . HEIGHT) cons of positive ints.
+  ;; The reply list arrives in reverse order, possibly padded with blanks.
+  (should (equal '(92 . 44)
+                 (tmux-control--parse-pane-size '("92x44"))))
+  (should (equal '(90 . 24)
+                 (tmux-control--parse-pane-size '("" "90x24" ""))))
+  ;; Surrounding whitespace is tolerated.
+  (should (equal '(80 . 25)
+                 (tmux-control--parse-pane-size '("  80x25  "))))
+  ;; Zero or negative dimensions are rejected.
+  (should-not (tmux-control--parse-pane-size '("0x44")))
+  (should-not (tmux-control--parse-pane-size '("92x0")))
+  ;; Malformed or empty replies yield nil rather than a bogus size.
+  (should-not (tmux-control--parse-pane-size '("can't find pane")))
+  (should-not (tmux-control--parse-pane-size '("92 44")))
+  (should-not (tmux-control--parse-pane-size '("")))
+  (should-not (tmux-control--parse-pane-size nil)))
+
 ;;; Session and window listing (parsing only; the process call is stubbed).
 
 (ert-deftest tmux-control-test-list-sessions-parses ()
