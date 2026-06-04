@@ -554,11 +554,14 @@ When INDEX is given non-interactively, switch to it directly."
       (tmux-control--read-window-index "Window: "))))))
 
 (defun tmux-control--do-select-window (index)
-  "Select tmux window INDEX in the current buffer's session."
+  "Select tmux window INDEX in the current buffer's session.
+When part of a tiling, the %session-window-changed notification re-tiles
+to the new window's panes, so only the single-pane view reseeds here."
   (tmux-control--ensure-live)
   (tmux-control--send-command
    (format "select-window -t %s:%s" tmux-control--session index))
-  (tmux-control--refresh-active-pane))
+  (unless (tmux-control--tiling-controller)
+    (tmux-control--refresh-active-pane)))
 
 (defun tmux-control-new-window (&optional name)
   "Create a new window in the current tmux-control session and switch to it.
@@ -1618,7 +1621,15 @@ the matching pane's render buffer instead, so every pane updates at once."
       ;; mode just reconcile the active pane's size.
       (if tmux-control--tiled
           (setq tmux-control--retile-pending t)
-        (tmux-control--refresh-pane-size)))))))
+        (tmux-control--refresh-pane-size)))
+     ((and tmux-control--tiled
+           (string-prefix-p "%session-window-changed " line))
+      ;; The session's active window changed (switched here or by another
+      ;; client).  In tiling mode re-tile to the new window's panes.  In
+      ;; single-pane mode this notification is ignored -- window switches go
+      ;; through `tmux-control--do-select-window', which reseeds directly --
+      ;; so the single-pane path is unchanged.
+      (setq tmux-control--retile-pending t))))))
 
 (defun tmux-control--finish-command-output ()
   "Handle the end of a tmux command reply."
@@ -2501,6 +2512,17 @@ an alist (PANE-ID . WINDOW), or nil when the windows could not be built."
   "Return the pane id whose render buffer is in the selected window, or nil."
   (car (rassq (window-buffer (selected-window)) panes)))
 
+(defun tmux-control--tiling-controller ()
+  "Return the controller buffer when this buffer is part of a live tiling.
+Works from the controller itself or from one of its pane render buffers;
+returns nil otherwise."
+  (cond
+   (tmux-control--tiled (current-buffer))
+   ((and tmux-control--controller
+         (buffer-live-p tmux-control--controller)
+         (buffer-local-value 'tmux-control--tiled tmux-control--controller))
+    tmux-control--controller)))
+
 ;;; Building / refreshing / tearing down a tiling.
 
 (defun tmux-control--flush-tiled-panes ()
@@ -2532,6 +2554,16 @@ screen.  Safe to call repeatedly; a %layout-change routes here."
           (cond
            ((or (null tree) (null leaves) (null geometry))
             (tmux-control--message "tiling: could not read the window layout"))
+           ((and (equal layout tmux-control--tiled-layout)
+                 tmux-control--panes
+                 (cl-every (lambda (np)
+                             (and (buffer-live-p (cdr np))
+                                  (get-buffer-window (cdr np) t)))
+                           tmux-control--panes))
+            ;; Layout unchanged and every pane window is intact -- skip a
+            ;; redundant rebuild (avoids flicker and focus loss on spurious
+            ;; notifications).
+            nil)
            (t
             ;; Resolve each layout leaf to its real pane id by coordinate.
             (dolist (leaf leaves)
@@ -2646,13 +2678,23 @@ the single-pane view."
     (unless (and controller (buffer-live-p controller)
                  (buffer-local-value 'tmux-control--tiled controller))
       (user-error "Not tiling"))
-    (let ((active (buffer-local-value 'tmux-control--active-pane controller)))
-      (tmux-control--teardown-tiling controller)
-      (with-current-buffer controller
-        (when active
-          (setq tmux-control--active-pane active)
-          (tmux-control--resize-to-window)
-          (tmux-control--seed-screen))))))
+    (tmux-control--teardown-tiling controller)
+    (with-current-buffer controller
+      ;; Re-query the session's real active pane synchronously (the cached
+      ;; one can be stale after window switches) BEFORE anything repaints, so
+      ;; every subsequent seed and any live %output route to the right pane.
+      (let ((pane (ignore-errors
+                    (string-trim
+                     (tmux-control--run-tmux
+                      (list "display-message" "-p" "#{pane_id}"))))))
+        (when (and pane (string-match-p "\\`%[0-9]+\\'" pane))
+          (setq tmux-control--active-pane pane)))
+      (tmux-control--resize-to-window)
+      ;; Hard-clear the terminal (it still holds the frozen pre-tiling
+      ;; screen) and paint the active pane synchronously, so the single-pane
+      ;; view is exactly one clean screen rather than old content plus new.
+      (tmux-control--write-terminal "\e[3J\e[H\e[2J")
+      (tmux-control--seed-pane-buffer-sync controller))))
 
 (defun tmux-control-toggle-tiling ()
   "Toggle between the tiled multi-pane view and the single-pane view.
