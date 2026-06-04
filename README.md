@@ -58,8 +58,13 @@ Useful bindings:
   sending input to the pane.
 - `C-c C-e` switches the current buffer into a normal Emacs scrollback view
   captured from tmux.  In that view, use normal Emacs movement/search/copy,
-  `g` to refresh, and `q`, `l`, `RET`, `C-c C-e`, or
+  `g` to refresh, and `q`, `RET`, `C-c C-e`, or
   `M-x eat-semi-char-mode` to return to the live pane.
+- In the scrollback view, simply typing an ordinary character also returns to
+  the live pane and forwards that keystroke to it, so you can start your next
+  command without an explicit exit step.  (Modal-editing users, e.g.
+  `xah-fly-keys`: this only fires for self-inserting keys, so command-mode
+  navigation in the read-only scrollback buffer is preserved.)
 - Scrolling up with the mouse wheel also enters the scrollback view, but only
   while the pane shows its normal screen.  When a full-screen application is
   running (the alternate screen, e.g. a TUI, `vim`, or `less`), the wheel is

@@ -141,10 +141,10 @@ that application so it keeps its own mouse scrolling."
     (set-keymap-parent map special-mode-map)
     (define-key map (kbd "g") #'tmux-control-scrollback-refresh)
     (define-key map (kbd "C-c C-e") #'tmux-control-live)
-    (define-key map (kbd "l") #'tmux-control-live)
     (define-key map (kbd "RET") #'tmux-control-live)
     (define-key map (kbd "q") #'tmux-control-live)
     (define-key map [remap eat-semi-char-mode] #'tmux-control-live)
+    (define-key map [remap self-insert-command] #'tmux-control-live-self-insert)
     map)
   "Keymap for `tmux-control-scrollback-mode'.")
 
@@ -471,6 +471,20 @@ Use `tmux-control-live' to return to the live interactive pane."
       (tmux-control-connect tmux-control--host
                             tmux-control--socket-name
                             tmux-control--session))))
+
+(defun tmux-control-live-self-insert ()
+  "Return to the live pane and send the typed character to it.
+Bound to ordinary text keys in scrollback view so that simply starting
+to type your next command resumes the live pane and forwards the
+keystroke, rather than dropping it."
+  (interactive)
+  (let ((event last-command-event))
+    (tmux-control-live)
+    (when (and (characterp event)
+               (derived-mode-p 'tmux-control-mode)
+               tmux-control--terminal
+               (eat-term-live-p tmux-control--terminal))
+      (eat-self-input 1 event))))
 
 (defun tmux-control--alt-screen-p ()
   "Return non-nil when the live pane shows the alternate (full-screen) display.
