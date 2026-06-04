@@ -507,6 +507,18 @@ each wrapped in an evolving prompt line and a status bar.")
   (should-not (tmux-control--parse-cursor-pos '("")))
   (should-not (tmux-control--parse-cursor-pos nil)))
 
+(ert-deftest tmux-control-test-capture-n-supported-p ()
+  ;; capture-pane -N landed in tmux 3.1.
+  (should (tmux-control--capture-n-supported-p "3.1"))
+  (should (tmux-control--capture-n-supported-p "3.6a"))
+  (should (tmux-control--capture-n-supported-p "next-3.5"))
+  (should (tmux-control--capture-n-supported-p "4.0"))
+  (should-not (tmux-control--capture-n-supported-p "3.0a"))
+  (should-not (tmux-control--capture-n-supported-p "2.9"))
+  (should-not (tmux-control--capture-n-supported-p "1.8"))
+  (should-not (tmux-control--capture-n-supported-p nil))
+  (should-not (tmux-control--capture-n-supported-p "garbage")))
+
 (ert-deftest tmux-control-test-screen-seed-sequence-cursor ()
   ;; With no live terminal the grid defaults to 80x24.  The seed string
   ;; paints the captured lines and ends with a cursor-positioning escape
@@ -524,6 +536,17 @@ each wrapped in an evolving prompt line and a status bar.")
     (should (string-suffix-p
              "\e[24;80H"
              (tmux-control--screen-seed-sequence "x\n" '(200 . 100))))))
+
+(ert-deftest tmux-control-test-screen-seed-sequence-preserves-trailing ()
+  ;; A captured line with a trailing background fill (as `capture-pane -N'
+  ;; produces for a full-width panel) must keep its trailing cells -- not be
+  ;; right-trimmed -- and the row must be reset+erased BEFORE the line is
+  ;; painted so the fill is preserved rather than cleared away after it.
+  (let ((tmux-control--terminal nil))
+    (let ((seq (tmux-control--screen-seed-sequence
+                (concat "\e[42mbox" (make-string 5 ?\s) "\n") nil)))
+      (should (string-match-p (concat "box" (make-string 5 ?\s)) seq))
+      (should (string-match-p "\e\\[1;1H\e\\[m\e\\[K\e\\[42mbox" seq)))))
 
 ;;; Session and window listing (parsing only; the process call is stubbed).
 

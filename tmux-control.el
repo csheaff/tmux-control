@@ -195,6 +195,11 @@ incomplete bytes are carried here and prepended to the next chunk by
 X and Y are tmux's 0-indexed cursor column and row on the visible
 screen, or nil when the position has not been queried.  Used by the
 `:capture' reply handler to place the cursor on the seeded screen.")
+(defvar-local tmux-control--capture-trailing-p nil
+  "Non-nil when the connected tmux supports `capture-pane -N' (3.1+).
+With it, the screen seed preserves trailing background cells so full-width
+background fills (tool-call panels, selections, status bars) survive a
+reseed; set from the `#{version}' query on connect.")
 (defvar-local tmux-control--keys-active nil)
 (defvar-local tmux-control--live-buffer nil)
 (defvar-local tmux-control--alt-screen-honored t
@@ -349,6 +354,10 @@ session (tmux attaches if it exists, otherwise creates it)."
     (pop-to-buffer buffer)
     (with-current-buffer buffer
       (tmux-control--resize-to-window)
+      ;; Learn the server version first so the screen seed knows whether it
+      ;; can ask `capture-pane' to preserve trailing background cells (-N,
+      ;; tmux 3.1+).  The reply lands before the :pane-id reply that seeds.
+      (tmux-control--send-command "display-message -p '#{version}'" :version)
       (tmux-control--send-command "display-message -p '#{pane_id}'" :pane-id)
       (when (and (integerp tmux-control-pause-after)
                  (> tmux-control-pause-after 0))
@@ -785,6 +794,7 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
     (setq tmux-control--display-dirty nil)
     (setq tmux-control--output-batch nil)
     (setq tmux-control--utf8-carry "")
+    (setq tmux-control--capture-trailing-p nil)
     (setq tmux-control--active-pane nil)
     (setq tmux-control--alt-screen-honored t)
     (setq tmux-control--command-queue nil)
@@ -1484,6 +1494,12 @@ per message."
      (setq tmux-control--alt-screen-honored
            (cdr (tmux-control--interpret-alt-screen-reply
                  tmux-control--command-output t))))
+    (:version
+     (setq tmux-control--capture-trailing-p
+           (tmux-control--capture-n-supported-p
+            (car (cl-remove-if #'string-empty-p
+                               (mapcar #'string-trim
+                                       tmux-control--command-output))))))
     (:cursor-pos
      (setq tmux-control--seed-cursor
            (tmux-control--parse-cursor-pos tmux-control--command-output)))
@@ -1514,7 +1530,9 @@ the `:capture' reply that paints the screen and consumes it."
              tmux-control--active-pane)
      :cursor-pos)
     (tmux-control--send-command
-     (format "capture-pane -p -e -t %s"
+     (format "capture-pane -p -e%s -t %s"
+             ;; -N keeps trailing background cells so full-width fills survive.
+             (if tmux-control--capture-trailing-p " -N" "")
              tmux-control--active-pane)
      :capture)))
 
@@ -1563,22 +1581,26 @@ back to the bottom-left of the screen."
          (row 1)
          (out '("\e[H\e[2J")))
     (dolist (line lines)
-      (setq line (string-trim-right line))
       ;; Clip to terminal width by visible columns, ignoring the
       ;; non-printing color escapes; only over-wide lines (rare and
       ;; transient) fall back to a stripped truncation.
       (when (> (tmux-control--display-width line) width)
         (setq line (truncate-string-to-width
                     (tmux-control--strip-ansi line) width nil nil "")))
-      ;; Reset attributes before erasing so a line's background color does
-      ;; not bleed into the cleared remainder of the row.
-      (push (format "\e[%d;1H%s\e[m\e[K" row line) out)
+      ;; Erase the row to the default background BEFORE painting, then paint
+      ;; the captured line.  Doing the reset-and-erase first preserves the
+      ;; line's own background -- including the trailing cells `capture-pane
+      ;; -N' keeps for a full-width fill (a tool panel, a selection, a status
+      ;; bar) -- instead of clearing it away after the text.  Lines are not
+      ;; right-trimmed, so those trailing background cells reach Eat.
+      (push (format "\e[%d;1H\e[m\e[K%s" row line) out)
       (setq row (1+ row)))
     ;; Place the cursor where tmux reports it (converted to 1-based and
-    ;; clamped to the grid), or at the bottom-left when unknown.
+    ;; clamped to the grid), or at the bottom-left when unknown.  Reset
+    ;; attributes first so a line's lingering background does not tint it.
     (let ((cursor-row (if cursor (min height (max 1 (1+ (cdr cursor)))) height))
           (cursor-column (if cursor (min width (max 1 (1+ (car cursor)))) 1)))
-      (push (format "\e[%d;%dH" cursor-row cursor-column) out))
+      (push (format "\e[m\e[%d;%dH" cursor-row cursor-column) out))
     (apply #'concat (nreverse out))))
 
 (defun tmux-control--decode-output (payload)
@@ -1898,6 +1920,15 @@ is found.  Pure: no side effects, for unit testing the seed cursor query."
     (when (and val (string-match "\\`\\([0-9]+\\),\\([0-9]+\\)\\'" val))
       (cons (string-to-number (match-string 1 val))
             (string-to-number (match-string 2 val))))))
+
+(defun tmux-control--capture-n-supported-p (version)
+  "Return non-nil when tmux VERSION supports `capture-pane -N' (3.1 or later).
+VERSION is a `#{version}' string such as \"3.6a\" or \"next-3.5\"; the first
+MAJOR.MINOR it contains is compared against 3.1.  Pure, for unit testing."
+  (when (and version (string-match "\\([0-9]+\\)\\.\\([0-9]+\\)" version))
+    (let ((major (string-to-number (match-string 1 version)))
+          (minor (string-to-number (match-string 2 version))))
+      (or (> major 3) (and (= major 3) (>= minor 1))))))
 
 (defun tmux-control--refresh-pane-size ()
   "Query the active pane's real size and sync the Eat grid to it.
