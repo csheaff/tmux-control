@@ -4,6 +4,14 @@
 the [iTerm2 tmux-integration](https://iterm2.com/documentation-tmux-integration.html)
 idea, but in Emacs.
 
+![The same tmux session in iTerm2 and in Emacs via tmux-control](docs/images/iterm-vs-tmux-control.png)
+
+*The same live tmux session — a [`pi-agents-tmux`](https://www.npmjs.com/package/@vanillagreen/pi-agents-tmux)
+agent team in split panes — rendered by iTerm2's native tmux integration
+(left) and by tmux-control in Emacs (right). Multi-pane **tiling** is
+[experimental](#tiling-every-pane-at-once-experimental); the shipped client
+mirrors one pane at a time.*
+
 Unlike running tmux inside a terminal buffer (`vterm`, `eat`, `ansi-term`),
 where the session dies with the Emacs frame, `tmux-control` speaks tmux
 control mode (`tmux -C`) to a **persistent, possibly remote** tmux server
