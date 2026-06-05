@@ -102,6 +102,8 @@ watch a whole agent team work side by side.  In the tiled view:
   window makes it tmux's active pane too (other clients follow).
 - Splitting, resizing, or closing a pane in tmux re-tiles automatically,
   and the mode line labels each pane by its id, command, and title.
+- Resizing the Emacs frame re-divides the tmux window to match, so the
+  panes re-fit instead of clipping.
 - Each pane is a normal `tmux-control` buffer, so `C-c C-e` scrollback and
   the usual movement/search/copy work in any of them.
 
@@ -113,8 +115,12 @@ again (or `M-x tmux-control-untile`) returns to the single-pane view on the
 currently active pane.
 
 Tiling is experimental and devotes the whole frame to the session
-(`delete-other-windows`); panes are sized to tmux's grid and the windows
-split to match, so the fit is close but not pixel-exact.
+(`delete-other-windows`).  Each pane's terminal is sized to tmux's grid
+(so the rendering matches tmux exactly) and the Emacs windows split to
+match; a vertical stack can leave a one-row gap where Emacs spends a mode
+line that tmux spends on a pane border, but content is never clipped.
+Re-tiles are debounced and their tmux queries batched, so a busy remote
+session is not stalled by layout changes.
 
 Useful bindings:
 
