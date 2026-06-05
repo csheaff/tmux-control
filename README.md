@@ -68,6 +68,14 @@ These commands act on the connected session (no key bindings by default):
   ```elisp
   (setq tmux-control-window-preview-delay 0.15)
   ```
+- `C-c C-n` (`tmux-control-next-window`) and `C-c C-p`
+  (`tmux-control-previous-window`) flip to the next or previous window in the
+  session, wrapping around — like a terminal's next/previous-tab keys, with no
+  menu and without rearranging your Emacs windows (a code buffer beside the
+  live view stays put).  `M-x tmux-control-last-window` toggles back to the
+  window you came from.  These delegate to tmux's own
+  `next-window`/`previous-window`/`last-window`, so they follow the session's
+  window order and any other attached client stays in sync.
 - `M-x tmux-control-new-window` creates a window (optionally named) and
   switches to it.
 - `M-x tmux-control-rename-window` renames a window, with completion over
@@ -77,6 +85,26 @@ These commands act on the connected session (no key bindings by default):
 
 Switching, creating, or removing a window changes the session's active
 window, so any other client attached to the same session follows along.
+
+#### The window tab bar
+
+In the single-pane view, a **tab bar** in the header line lists the session's
+windows like iTerm's tmux tabs — `index:name` for each, the current one
+highlighted.  It is the at-a-glance map of the session: click a tab to switch
+to it, and watch a **dot** appear on any *background* window whose pane
+produces output while you are looking elsewhere — the "which window (or agent)
+wants me" signal for a window-per-agent workflow.  Visiting a window clears its
+dot; a window that rings its bell shows a `!`.
+
+The dot reflects genuine background output: the prompt/redraw burst that a
+connect, window switch, or frame resize provokes in every pane is deliberately
+*not* counted, so an idle session does not light up.  The bar costs one
+terminal row (tmux is sized to match, so nothing clips) and is hidden in the
+tiled view, where each pane already carries its own label.  Turn it off with:
+
+```elisp
+(setq tmux-control-window-tab-bar nil)
+```
 
 ### Panes (and agent teams)
 
@@ -234,8 +262,10 @@ This is a first MVP.  It can attach to tmux, seed the live terminal from
 can optionally compact repeated TUI redraws, render live `%output` through Eat
 in batches, send keyboard input back with `send-keys -H` (chunking large
 pastes), resize the tmux client, and optionally use tmux flow control (pause
-mode) for very high-volume output.  Mouse handling and broader edge-case
-hardening still need work.
+mode) for very high-volume output.  Windows are navigated like tabs —
+next/previous/last switching and a clickable header-line **tab bar** that
+flags background windows with unseen output.  Mouse handling and broader
+edge-case hardening still need work.
 
 There is also an **experimental multi-pane tiling** view (`C-c C-t`, see
 [Tiling every pane at once](#tiling-every-pane-at-once-experimental)) that
@@ -264,7 +294,9 @@ There is also a **live integration suite** that asserts render fidelity —
 that the text tmux-control paints into an Eat buffer matches tmux's own
 `capture-pane` for the same screen, for the connect-time seed and the live
 `%output` stream, across plain text, colors, UTF-8 box-drawing, wide lines,
-and double-width CJK/emoji glyphs.  It needs a real tmux on `PATH` (it uses a dedicated `tc-ert-test`
+and double-width CJK/emoji glyphs; it also covers window navigation
+(next/previous/last switching with reseed) and the tab bar's activity
+flagging.  It needs a real tmux on `PATH` (it uses a dedicated `tc-ert-test`
 socket and never touches other servers; tests skip where tmux is absent):
 
 ```sh
