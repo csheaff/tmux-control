@@ -236,6 +236,9 @@ inline on every %layout-change.")
   "(W . H) char size last requested from tmux for the tiled frame area.
 Compared on frame resize so tmux is only re-sized (and the panes re-tiled)
 when the area devoted to tiling actually changed.")
+(defvar-local tmux-control--unmatched-retries 0
+  "Consecutive re-tiles where a layout leaf matched no pane.
+Bounds the retry so a persistent mismatch cannot reschedule forever.")
 (defvar-local tmux-control--suppress-focus-follow nil
   "When non-nil on a controller, pane focus does not drive tmux's select-pane.
 Set while a window switch is in flight so the still-selected old window's
@@ -2720,23 +2723,34 @@ screen.  Safe to call repeatedly; a %layout-change routes here."
             ;; notifications).
             nil)
            (t
-            ;; Resolve each layout leaf to its real pane id by coordinate.
+            ;; Resolve each layout leaf to its real pane id.  A leaf's id in
+            ;; the window-layout string IS the pane number (%N), so match on
+            ;; that directly -- robust even when `pane_top'/`pane_left' are
+            ;; offset from the layout coordinates (e.g. tmux `pane-border-status'
+            ;; adds a title row, which some tools like pi-agents-tmux enable).
+            ;; Fall back to a top-left coordinate match only if the id is unknown.
             (let ((unmatched nil))
               (dolist (leaf leaves)
-                (let ((hit (cl-find-if
-                            (lambda (g)
-                              (and (= (plist-get (cdr g) :left) (plist-get leaf :x))
-                                   (= (plist-get (cdr g) :top) (plist-get leaf :y))))
-                            geometry)))
+                (let ((hit (or (assoc (concat "%" (plist-get leaf :id)) geometry)
+                               (cl-find-if
+                                (lambda (g)
+                                  (and (= (plist-get (cdr g) :left)
+                                          (plist-get leaf :x))
+                                       (= (plist-get (cdr g) :top)
+                                          (plist-get leaf :y))))
+                                geometry))))
                   (if hit
                       (progn (plist-put leaf :pane (car hit))
                              (plist-put leaf :info (cdr hit)))
                     (setq unmatched t))))
-              ;; A leaf with no geometry match means the layout and pane list
-              ;; we read disagree (a rare transient).  Rather than tile a
-              ;; partial mapping that leaves a pane blank, try again shortly.
+              ;; A leaf with no pane match means the layout and pane list we
+              ;; read disagree (a rare transient).  Rather than tile a partial
+              ;; mapping that leaves a pane blank, try again shortly -- but only
+              ;; a few times, so a persistent mismatch can't reschedule forever.
               (if unmatched
-                  (tmux-control--schedule-retile controller)
+                  (when (< (cl-incf tmux-control--unmatched-retries) 5)
+                    (tmux-control--schedule-retile controller))
+                (setq tmux-control--unmatched-retries 0)
                 (let* ((old-panes tmux-control--panes)
                    (meta (list :host tmux-control--host
                                :socket tmux-control--socket-name

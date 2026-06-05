@@ -277,5 +277,38 @@ the full async pipeline (process filter -> batch -> Eat), not just the seed."
       (ignore-errors (delete-file fa))
       (ignore-errors (delete-file fb)))))
 
+;;; Layout-leaf -> pane-id matching must be by id, not coordinates.
+
+(ert-deftest tmux-control-it-leaf-id-matches-pane-id ()
+  "A window-layout leaf's id is the pane number, so tiling resolves panes by
+id -- robust even when `pane-border-status' shifts `pane_top'/`pane_left'
+away from the layout coordinates (as pi-agents-tmux and similar tools cause).
+A coordinate-only match silently fails there; matching by id does not."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-x" "80" "-y" "24")
+  ;; A top pane-border title row shifts pane_top off the layout y.
+  (tmux-control-it--tmux "set-option" "-t" "t" "pane-border-status" "top")
+  (tmux-control-it--tmux "split-window" "-v" "-t" "t")
+  (tmux-control-it--tmux "split-window" "-h" "-t" "t")
+  (unwind-protect
+      (let* ((layout (string-trim
+                      (tmux-control-it--tmux "display-message" "-p" "-t" "t"
+                                             "#{window_layout}")))
+             (leaves (tmux-control--layout-leaves
+                      (tmux-control--parse-layout layout)))
+             (rows (split-string
+                    (string-trim
+                     (tmux-control-it--tmux "list-panes" "-t" "t" "-F"
+                                            "#{pane_id} #{pane_top}"))
+                    "\n" t))
+             (pane-ids (mapcar (lambda (r) (car (split-string r))) rows)))
+        (should (= (length leaves) 3))
+        ;; Every leaf id resolves to a real pane as %<id> -- the invariant
+        ;; tmux-control--build-tiling relies on.
+        (dolist (leaf leaves)
+          (should (member (concat "%" (plist-get leaf :id)) pane-ids))))
+    (tmux-control-it--tmux-ok "kill-server")))
+
 (provide 'tmux-control-integration)
 ;;; tmux-control-integration.el ends here
