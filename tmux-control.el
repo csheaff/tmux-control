@@ -341,8 +341,15 @@ Interactively, the session prompt completes over existing sessions on the
 chosen host and socket; entering a name that does not exist creates that
 session (tmux attaches if it exists, otherwise creates it)."
   (interactive
-   (let* ((host (read-string "Host (empty for local): "
-                             nil nil tmux-control-default-host))
+   (let* ((host (read-string
+                 "Host (empty for local): "
+                 ;; Offer the default host as *editable initial input*, not as
+                 ;; `read-string's default value: a default value would make an
+                 ;; empty RET return the default, so a configured
+                 ;; `tmux-control-default-host' could never be cleared to mean
+                 ;; local.  Pre-filled instead, RET keeps it and clearing it
+                 ;; (then RET) connects locally, matching the prompt.
+                 tmux-control-default-host))
           (socket-name (read-string "Socket name: "
                                     nil nil
                                     tmux-control-default-socket-name))
