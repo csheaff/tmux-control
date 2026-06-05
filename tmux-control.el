@@ -162,6 +162,30 @@ A small debounce keeps navigation snappy when previews require a remote
 tmux query over SSH."
   :type 'number)
 
+(defcustom tmux-control-window-tab-bar t
+  "Non-nil shows a header-line tab bar of the session's windows.
+
+In the single-pane live view the header line lists every window in the
+session like a row of tabs -- index and name -- with the current window
+highlighted, a marker on any background window that has produced output
+since you last visited it, and a bell marker when a window rang its bell.
+Click a tab to switch to that window.  It is the iTerm-style \"tabs\" view of
+a tmux session, and the natural companion to `tmux-control-next-window' and
+friends.  Set to nil to hide it."
+  :type 'boolean)
+
+(defface tmux-control-tab-active
+  '((t :inherit highlight :weight bold))
+  "Face for the current window's tab in the `tmux-control' tab bar.")
+
+(defface tmux-control-tab-inactive
+  '((t :inherit shadow))
+  "Face for an inactive window's tab in the `tmux-control' tab bar.")
+
+(defface tmux-control-tab-activity
+  '((t :inherit warning :weight bold))
+  "Face for an inactive window with unseen output, in the tab bar.")
+
 (defvar-local tmux-control--process nil)
 (defvar-local tmux-control--terminal nil)
 (defvar-local tmux-control--accumulator "")
@@ -257,6 +281,8 @@ kills, which are deliberate.")
     (define-key map (kbd "C-c C-l") #'tmux-control-clear-and-repaint)
     (define-key map (kbd "C-c C-o") #'tmux-control-other-pane)
     (define-key map (kbd "C-c C-t") #'tmux-control-toggle-tiling)
+    (define-key map (kbd "C-c C-n") #'tmux-control-next-window)
+    (define-key map (kbd "C-c C-p") #'tmux-control-previous-window)
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
     map)
   "High-precedence keymap for tmux-control buffers.")
@@ -264,6 +290,24 @@ kills, which are deliberate.")
 (defvar tmux-control--emulation-mode-map-alist
   `((tmux-control--keys-active . ,tmux-control--override-map))
   "Emulation map alist used to override Eat minor-mode bindings.")
+
+(defvar-local tmux-control--windows nil
+  "Cached window list for the tab bar.
+A list of plists (:index INDEX :name NAME :active BOOL :bell BOOL),
+refreshed asynchronously from tmux.")
+(defvar-local tmux-control--current-window nil
+  "Index string of the session's currently active window, for the tab bar.")
+(defvar-local tmux-control--activity nil
+  "Hash table of window-index -> t for background windows with unseen output.
+A window's panes producing %output while it is not the current window set its
+entry; arriving at the window clears it.  Drives the tab bar activity marker.")
+(defvar-local tmux-control--pane-window nil
+  "Hash table of pane-id -> window-index for the whole session.
+Lets streamed %output be attributed to a window for the activity marker.")
+(defvar-local tmux-control--activity-quiet-until 0
+  "Float-time before which background-activity flagging is suppressed.
+Set around client-driven full repaints (connect, switch, resize) so the
+resulting prompt/redraw burst in every pane does not flag every window.")
 
 (defvar tmux-control-mode-map
   (let ((map (make-sparse-keymap)))
@@ -412,6 +456,15 @@ session (tmux attaches if it exists, otherwise creates it)."
       ;; tmux 3.1+).  The reply lands before the :pane-id reply that seeds.
       (tmux-control--send-command "display-message -p '#{version}'" :version)
       (tmux-control--send-command "display-message -p '#{pane_id}'" :pane-id)
+      ;; Tab bar: track the session's windows and which window holds each pane,
+      ;; so the header line can show tabs and flag background activity.
+      (when tmux-control-window-tab-bar
+        (setq tmux-control--activity (make-hash-table :test 'equal))
+        (setq-local header-line-format '(:eval (tmux-control--window-tab-bar)))
+        ;; The connect seed repaints every pane; don't let that flag everything.
+        (tmux-control--quiet-activity 1.5)
+        (tmux-control--refresh-windows)
+        (tmux-control--refresh-pane-window-map))
       (when (and (integerp tmux-control-pause-after)
                  (> tmux-control-pause-after 0))
         ;; Opt-in control-mode flow control: tmux pauses a lagging pane and
@@ -507,6 +560,7 @@ running command, its title when that differs, and whether it is active."
 
 (defun tmux-control--refresh-active-pane ()
   "Re-query the session's active pane id, repaint the live view, and resize."
+  (tmux-control--quiet-activity)
   (tmux-control--send-command "display-message -p '#{pane_id}'" :pane-id)
   (tmux-control--resize-to-window))
 
@@ -695,6 +749,131 @@ is left untouched."
    (format "rename-window -t %s:%s %s"
            tmux-control--session index
            (tmux-control--quote-tmux-arg name))))
+
+;;;; Window tab bar
+;;
+;; A header-line row of the session's windows, like iTerm's tmux tabs: the
+;; current window highlighted, background windows that produced output since
+;; you last saw them flagged, and a bell marked.  The window list and the
+;; pane->window map are refreshed asynchronously over the existing control
+;; connection -- never a blocking CLI call from the process filter -- so a busy
+;; remote session is not stalled by tab-bar upkeep.
+
+(defun tmux-control--refresh-windows ()
+  "Asynchronously refresh the cached window list that feeds the tab bar."
+  (when (and tmux-control-window-tab-bar
+             (process-live-p tmux-control--process))
+    (tmux-control--send-command
+     (format "list-windows -t %s -F '#{window_index}\t#{window_name}\t#{window_active}\t#{window_bell_flag}'"
+             tmux-control--session)
+     :windows)))
+
+(defun tmux-control--refresh-pane-window-map ()
+  "Asynchronously refresh the pane-id -> window-index map for activity routing."
+  (when (and tmux-control-window-tab-bar
+             (process-live-p tmux-control--process))
+    (tmux-control--send-command
+     (format "list-panes -s -t %s -F '#{pane_id}\t#{window_index}'"
+             tmux-control--session)
+     :pane-window)))
+
+(defun tmux-control--update-windows (lines)
+  "Parse a list-windows reply LINES into `tmux-control--windows'.
+Records the active window as the current one and clears its activity marker,
+then refreshes the header line."
+  (let (parsed active)
+    (dolist (line lines)
+      (when (string-match "\\`\\([0-9]+\\)\t\\(.*\\)\t\\([01]\\)\t\\([01]\\)\\'" line)
+        (let ((idx (match-string 1 line))
+              (act (string= (match-string 3 line) "1")))
+          (push (list :index idx
+                      :name (match-string 2 line)
+                      :active act
+                      :bell (string= (match-string 4 line) "1"))
+                parsed)
+          (when act (setq active idx)))))
+    ;; Reply line order is not guaranteed (the filter collects command output
+    ;; in reverse); sort by numeric index so tabs read left-to-right 0,1,2,...
+    (setq tmux-control--windows
+          (sort parsed
+                (lambda (a b)
+                  (< (string-to-number (plist-get a :index))
+                     (string-to-number (plist-get b :index))))))
+    (when active
+      (setq tmux-control--current-window active)
+      (when (hash-table-p tmux-control--activity)
+        (remhash active tmux-control--activity)))
+    (force-mode-line-update)))
+
+(defun tmux-control--update-pane-window-map (lines)
+  "Parse a list-panes reply LINES into `tmux-control--pane-window'."
+  (let ((map (make-hash-table :test 'equal)))
+    (dolist (line lines)
+      (when (string-match "\\`\\(%[0-9]+\\)\t\\([0-9]+\\)\\'" line)
+        (puthash (match-string 1 line) (match-string 2 line) map)))
+    (setq tmux-control--pane-window map)))
+
+(defun tmux-control--quiet-activity (&optional secs)
+  "Suppress background-activity flagging for SECS seconds (default 0.8).
+Called around client-driven full repaints -- connect, window switch, resize --
+so the resulting prompt/redraw burst in every pane does not flag every window
+as if its agent had done something.  The burst can trail the triggering event
+by a few hundred ms (the refresh-client round-trip plus a prompt redraw), so
+the window is deliberately generous."
+  (setq tmux-control--activity-quiet-until (+ (float-time) (or secs 0.8))))
+
+(defun tmux-control--note-pane-activity (pane)
+  "Flag PANE's window as having unseen output when it is not the current one.
+Suppressed during the quiet period after a full repaint (see
+`tmux-control--quiet-activity')."
+  (when (and (not tmux-control--tiled)
+             tmux-control--current-window
+             (> (float-time) tmux-control--activity-quiet-until)
+             (hash-table-p tmux-control--pane-window))
+    (let ((win (gethash pane tmux-control--pane-window)))
+      (when (and win (not (equal win tmux-control--current-window)))
+        (unless (hash-table-p tmux-control--activity)
+          (setq tmux-control--activity (make-hash-table :test 'equal)))
+        (unless (gethash win tmux-control--activity)
+          (puthash win t tmux-control--activity)
+          (force-mode-line-update))))))
+
+(defun tmux-control--tab-keymap (index)
+  "Return a header-line keymap that switches to window INDEX on a click."
+  (let ((map (make-sparse-keymap)))
+    (define-key map [header-line mouse-1]
+      (lambda (_event)
+        (interactive "e")
+        (tmux-control--do-select-window index)))
+    map))
+
+(defun tmux-control--window-tab-bar ()
+  "Return the header-line string of the session's windows as tabs.
+Empty in a tiled view (each pane already carries its own mode-line label) and
+before the first window list arrives."
+  (if (or tmux-control--tiled (null tmux-control--windows))
+      ""
+    (mapconcat
+     (lambda (w)
+       (let* ((idx (plist-get w :index))
+              (name (plist-get w :name))
+              (active (plist-get w :active))
+              (busy (and (not active)
+                         (hash-table-p tmux-control--activity)
+                         (gethash idx tmux-control--activity)))
+              (mark (cond ((plist-get w :bell) " !")
+                          (busy " ●")
+                          (t "")))
+              (face (cond (active 'tmux-control-tab-active)
+                          (busy 'tmux-control-tab-activity)
+                          (t 'tmux-control-tab-inactive))))
+         (propertize (format " %s:%s%s " idx name mark)
+                     'face face
+                     'mouse-face 'highlight
+                     'help-echo (format "Switch to tmux window %s (%s)" idx name)
+                     'keymap (tmux-control--tab-keymap idx))))
+     tmux-control--windows
+     "")))
 
 (defun tmux-control-other-pane ()
   "Switch the live view to the next pane in the current window.
@@ -1655,6 +1834,7 @@ the matching pane's render buffer instead, so every pane updates at once."
           (let ((decoded (tmux-control--decode-output payload)))
             (with-current-buffer buf
               (push decoded tmux-control--output-batch)))))
+    (tmux-control--note-pane-activity pane)
     (unless tmux-control--active-pane
       (setq tmux-control--active-pane pane))
     (when (equal pane tmux-control--active-pane)
@@ -1727,18 +1907,32 @@ the matching pane's render buffer instead, so every pane updates at once."
      ((string-prefix-p "%layout-change " line)
       ;; The window's pane structure or sizes changed (a split, a resize, a
       ;; closed pane).  In tiling mode re-derive the tiling; in single-pane
-      ;; mode just reconcile the active pane's size.
+      ;; mode reconcile the active pane's size and refresh the pane->window map
+      ;; (panes came or went) for the tab bar's activity marker.
       (if tmux-control--tiled
           (setq tmux-control--retile-pending t)
-        (tmux-control--refresh-pane-size)))
-     ((and tmux-control--tiled
-           (string-prefix-p "%session-window-changed " line))
+        (tmux-control--refresh-pane-size)
+        (tmux-control--refresh-pane-window-map)))
+     ((string-prefix-p "%session-window-changed " line)
       ;; The session's active window changed (switched here or by another
-      ;; client).  In tiling mode re-tile to the new window's panes.  In
-      ;; single-pane mode this notification is ignored -- window switches go
-      ;; through `tmux-control--do-select-window', which reseeds directly --
-      ;; so the single-pane path is unchanged.
-      (setq tmux-control--retile-pending t))))))
+      ;; client).  In tiling mode re-tile to the new window's panes; in
+      ;; single-pane mode the select-window commands already reseed, but
+      ;; refresh the tab bar so its highlight and unseen-output markers track
+      ;; the new current window.
+      (if tmux-control--tiled
+          (setq tmux-control--retile-pending t)
+        (tmux-control--refresh-windows)))
+     ((and (not tmux-control--tiled)
+           (or (string-prefix-p "%window-add " line)
+               (string-prefix-p "%window-close " line)
+               (string-prefix-p "%unlinked-window-add " line)
+               (string-prefix-p "%unlinked-window-close " line)
+               (string-prefix-p "%window-renamed " line)
+               (string-prefix-p "%unlinked-window-renamed " line)))
+      ;; A window was created, closed, or renamed: refresh the tab bar and the
+      ;; pane->window map for the activity marker.
+      (tmux-control--refresh-windows)
+      (tmux-control--refresh-pane-window-map))))))
 
 (defun tmux-control--finish-command-output ()
   "Handle the end of a tmux command reply."
@@ -1759,6 +1953,10 @@ the matching pane's render buffer instead, so every pane updates at once."
          ;; The grid changed under already-rendered output, so repaint
          ;; the visible screen at the corrected width.
          (tmux-control--seed-screen))))
+    (:windows
+     (tmux-control--update-windows tmux-control--command-output))
+    (:pane-window
+     (tmux-control--update-pane-window-map tmux-control--command-output))
     (:alt-screen-opt
      (let ((res (tmux-control--interpret-alt-screen-reply
                  tmux-control--command-output nil)))
@@ -2177,6 +2375,7 @@ so every reply stays matched to the right handler on one queue."
 
 (defun tmux-control--resize-to-window ()
   "Resize tmux and Eat to the selected window."
+  (tmux-control--quiet-activity)
   (when-let* ((window (get-buffer-window (current-buffer) t)))
     (set-window-margins window 0 0)
     (tmux-control--resize
@@ -2996,7 +3195,13 @@ panes against a now-smaller Emacs window."
       ;; screen) and paint the active pane synchronously, so the single-pane
       ;; view is exactly one clean screen rather than old content plus new.
       (tmux-control--write-terminal "\e[3J\e[H\e[2J")
-      (tmux-control--seed-pane-buffer-sync controller))))
+      (tmux-control--seed-pane-buffer-sync controller)
+      ;; The tab bar's window/activity state was not tracked while tiled;
+      ;; refresh it for the returning single-pane view.
+      (when tmux-control-window-tab-bar
+        (tmux-control--quiet-activity)
+        (tmux-control--refresh-windows)
+        (tmux-control--refresh-pane-window-map)))))
 
 (defun tmux-control-toggle-tiling ()
   "Toggle between the tiled multi-pane view and the single-pane view.
