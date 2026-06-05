@@ -2483,23 +2483,6 @@ so there is no reseed or flicker."
               (tmux-control--send-command
                (format "select-pane -t %s" tmux-control--active-pane)))))))))
 
-(defun tmux-control--fit-pane-to-window (buffer window)
-  "Resize BUFFER's Eat grid to WINDOW's body size.
-Return non-nil when the size actually changed, so the caller can reseed
-the pane to match its new dimensions.  Fitting to the body (rather than the
-tmux pane size) ensures the rendered grid is exactly what the window shows,
-so full-width TUI borders are never clipped."
-  (when (and (buffer-live-p buffer) (window-live-p window))
-    (with-current-buffer buffer
-      (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
-        (let ((w (max 1 (window-body-width window)))
-              (h (max 1 (window-body-height window)))
-              (sz (eat-term-size tmux-control--terminal)))
-          (unless (and sz (= (car sz) w) (= (cdr sz) h))
-            (let ((inhibit-read-only t))
-              (eat-term-resize tmux-control--terminal w h))
-            t))))))
-
 (defun tmux-control--seed-pane-buffer-sync (buffer)
   "Paint BUFFER's terminal from its pane's current screen (synchronous CLI).
 Used on (re)tile; live %output keeps the pane current afterward."
@@ -2690,14 +2673,10 @@ screen.  Safe to call repeatedly; a %layout-change routes here."
                 (if (null pane-windows)
                     ;; Arrangement failed; abandon tiling cleanly.
                     (tmux-control--teardown-tiling controller)
-                  ;; Fit each Eat grid to its window's real body size (the
-                  ;; body now spans the full pane width, fringes/scroll bar
-                  ;; removed).  A grid whose size changed must be reseeded so
-                  ;; its painted contents line up with the new dimensions.
-                  (dolist (np new-panes)
-                    (when (tmux-control--fit-pane-to-window
-                           (cdr np) (cdr (assoc (car np) pane-windows)))
-                      (cl-pushnew (cdr np) to-seed)))
+                  ;; Each grid is already sized to its tmux pane (the source
+                  ;; of truth for what the app draws); fringe/scroll-bar
+                  ;; removal makes the body span the full pane width, so it
+                  ;; fits without shrinking the grid (which would drop a row).
                   (dolist (buf to-seed)
                     (tmux-control--seed-pane-buffer-sync buf))
                   (let ((fw (and focus-pane
