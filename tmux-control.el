@@ -1936,8 +1936,34 @@ cursor position and their cursor line is kept visible."
       (when (and sync-windows
                  (boundp 'eat--synchronize-scroll-function))
         (funcall eat--synchronize-scroll-function sync-windows)
+        ;; In a tiled pane, anchor to the top of the current terminal screen
+        ;; so a full-screen TUI (e.g. a Claude Code panel) shows from its top
+        ;; instead of being scrolled with its top cut off when tall
+        ;; box-drawing glyphs make the rows overflow the body in pixels.
+        (when tmux-control--controller
+          (tmux-control--anchor-windows-to-screen-top sync-windows))
         (tmux-control--keep-cursor-visible sync-windows))
       (run-hooks 'eat-update-hook))))
+
+(defun tmux-control--anchor-windows-to-screen-top (windows)
+  "Set each of WINDOWS to start at the top of the terminal's current screen.
+The current screen is the last `eat-term' height rows of the buffer, so
+this reveals a full-screen TUI from its top while still showing the latest
+screen of a scrolling pane.  `tmux-control--keep-cursor-visible' runs after
+and only pulls the start forward when the cursor would otherwise fall below
+the body (e.g. a tall prompt glyph on a scrolling log), so the follow-bottom
+behavior is preserved."
+  (let ((height (and tmux-control--terminal
+                     (eat-term-live-p tmux-control--terminal)
+                     (cdr (eat-term-size tmux-control--terminal)))))
+    (when (and height (> height 0))
+      (let ((top (save-excursion
+                   (goto-char (point-max))
+                   (forward-line (- (1- height)))
+                   (line-beginning-position))))
+        (dolist (window windows)
+          (when (window-live-p window)
+            (set-window-start window top t)))))))
 
 (defun tmux-control--write-terminal (output)
   "Process decoded terminal OUTPUT into Eat and redisplay immediately.
@@ -2424,6 +2450,14 @@ its own and routes commands through CONTROLLER."
       (setf (eat-term-parameter tmux-control--terminal 'eat--input-process) process)
       (setf (eat-term-parameter tmux-control--terminal 'eat--output-process) process)
       (setq-local mode-line-format '(:eval (tmux-control--pane-mode-line)))
+      ;; Fringes and a scroll bar would steal columns from the body, so the
+      ;; Eat grid (sized to the tmux pane) would not fit and full-width TUI
+      ;; borders (e.g. a Claude Code panel) would clip.  Drop them so the
+      ;; body uses every column; the grid is then fitted to the body on tile.
+      (setq-local left-fringe-width 0)
+      (setq-local right-fringe-width 0)
+      (setq-local vertical-scroll-bar nil)
+      (setq-local horizontal-scroll-bar nil)
       ;; Focusing this pane in Emacs makes it tmux's active pane too.
       (add-hook 'window-selection-change-functions
                 #'tmux-control--pane-window-selected nil t)
@@ -2448,6 +2482,23 @@ so there is no reseed or flicker."
                        (process-live-p tmux-control--process))
               (tmux-control--send-command
                (format "select-pane -t %s" tmux-control--active-pane)))))))))
+
+(defun tmux-control--fit-pane-to-window (buffer window)
+  "Resize BUFFER's Eat grid to WINDOW's body size.
+Return non-nil when the size actually changed, so the caller can reseed
+the pane to match its new dimensions.  Fitting to the body (rather than the
+tmux pane size) ensures the rendered grid is exactly what the window shows,
+so full-width TUI borders are never clipped."
+  (when (and (buffer-live-p buffer) (window-live-p window))
+    (with-current-buffer buffer
+      (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+        (let ((w (max 1 (window-body-width window)))
+              (h (max 1 (window-body-height window)))
+              (sz (eat-term-size tmux-control--terminal)))
+          (unless (and sz (= (car sz) w) (= (cdr sz) h))
+            (let ((inhibit-read-only t))
+              (eat-term-resize tmux-control--terminal w h))
+            t))))))
 
 (defun tmux-control--seed-pane-buffer-sync (buffer)
   "Paint BUFFER's terminal from its pane's current screen (synchronous CLI).
@@ -2478,7 +2529,12 @@ takes the remaining window."
        (when (and (window-live-p window) (buffer-live-p buf))
          (set-window-buffer window buf t)
          (set-window-parameter window 'tmux-control-pane pane)
+         ;; Reclaim every column for the terminal: no margins, fringes, or
+         ;; scroll bar, so the window body matches the tmux pane width and
+         ;; full-width TUI borders are not clipped.
          (set-window-margins window 0 0)
+         (set-window-fringes window 0 0)
+         (set-window-scroll-bars window 0 nil 0 nil)
          (funcall collect pane window))))
     ('split
      (let ((dir (plist-get node :dir))
@@ -2634,6 +2690,14 @@ screen.  Safe to call repeatedly; a %layout-change routes here."
                 (if (null pane-windows)
                     ;; Arrangement failed; abandon tiling cleanly.
                     (tmux-control--teardown-tiling controller)
+                  ;; Fit each Eat grid to its window's real body size (the
+                  ;; body now spans the full pane width, fringes/scroll bar
+                  ;; removed).  A grid whose size changed must be reseeded so
+                  ;; its painted contents line up with the new dimensions.
+                  (dolist (np new-panes)
+                    (when (tmux-control--fit-pane-to-window
+                           (cdr np) (cdr (assoc (car np) pane-windows)))
+                      (cl-pushnew (cdr np) to-seed)))
                   (dolist (buf to-seed)
                     (tmux-control--seed-pane-buffer-sync buf))
                   (let ((fw (and focus-pane
