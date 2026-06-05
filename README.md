@@ -4,6 +4,14 @@
 the [iTerm2 tmux-integration](https://iterm2.com/documentation-tmux-integration.html)
 idea, but in Emacs.
 
+![The same tmux session in iTerm2 and in Emacs via tmux-control](docs/images/iterm-vs-tmux-control.png)
+
+*The same live tmux session — a [`pi-agents-tmux`](https://www.npmjs.com/package/@vanillagreen/pi-agents-tmux)
+agent team in split panes — rendered by iTerm2's native tmux integration
+(left) and by tmux-control in Emacs (right). Multi-pane **tiling** is
+[experimental](#tiling-every-pane-at-once-experimental); the shipped client
+mirrors one pane at a time.*
+
 Unlike running tmux inside a terminal buffer (`vterm`, `eat`, `ansi-term`),
 where the session dies with the Emacs frame, `tmux-control` speaks tmux
 control mode (`tmux -C`) to a **persistent, possibly remote** tmux server
@@ -77,10 +85,9 @@ A tmux window can hold several panes at once.  A common case is a
 mode (`teammateMode: tmux`), which runs each teammate in its own pane so you
 can watch them work.
 
-`tmux-control` mirrors **one pane at a time** — the window's active pane,
-rendered cleanly (it does not tile every pane into Emacs windows; output
-from the other panes is not interleaved into the view).  Move between panes
-(teammates) with:
+By default `tmux-control` mirrors **one pane at a time** — the window's
+active pane, rendered cleanly (output from the other panes is not
+interleaved into the view).  Move between panes (teammates) with:
 
 - `C-c C-o` (`tmux-control-other-pane`) — cycle to the next pane.
 - `M-x tmux-control-select-pane` — jump to a pane by name, completing over
@@ -88,6 +95,40 @@ from the other panes is not interleaved into the view).  Move between panes
 
 Switching the pane sets the window's active pane, so other clients follow
 along and the live view repaints on the chosen pane.
+
+#### Tiling every pane at once (experimental)
+
+`C-c C-t` (`tmux-control-toggle-tiling`) flips between the single-pane view
+and a **tiled** view that renders *every* pane of the current window at
+once, each in its own buffer, with the Emacs windows split to match tmux's
+own layout — the iTerm "show every pane" view.  This is the natural way to
+watch a whole agent team work side by side.  In the tiled view:
+
+- Every pane updates live and independently; output is routed per pane, so
+  nothing is interleaved.
+- Type into a pane to send to that teammate; selecting a pane's Emacs
+  window makes it tmux's active pane too (other clients follow).
+- Splitting, resizing, or closing a pane in tmux re-tiles automatically,
+  and the mode line labels each pane by its id, command, and title.
+- Resizing the Emacs frame re-divides the tmux window to match, so the
+  panes re-fit instead of clipping.
+- Each pane is a normal `tmux-control` buffer, so `C-c C-e` scrollback and
+  the usual movement/search/copy work in any of them.
+
+For a session with **several windows — say two, each running its own agent
+team** — tile one window, then switch windows (`M-x
+tmux-control-select-window`) to bring the other team into the tiled view;
+each window tiles its own panes, like iTerm's per-window tabs.  `C-c C-t`
+again (or `M-x tmux-control-untile`) returns to the single-pane view on the
+currently active pane.
+
+Tiling is experimental and devotes the whole frame to the session
+(`delete-other-windows`).  Each pane's terminal is sized to tmux's grid
+(so the rendering matches tmux exactly) and the Emacs windows split to
+match; a vertical stack can leave a one-row gap where Emacs spends a mode
+line that tmux spends on a pane border, but content is never clipped.
+Re-tiles are debounced and their tmux queries batched, so a busy remote
+session is not stalled by layout changes.
 
 Useful bindings:
 
@@ -178,10 +219,13 @@ For an upper bound on that, enable tmux's control-mode flow control:
 When the output buffered for this client falls more than that many seconds
 behind, tmux pauses the pane and notifies the client, which reseeds from the
 pane's current screen and resumes — so the view jumps to the latest state
-instead of replaying the whole backlog.  It engages only when the client is
-genuinely behind, which is most likely over a higher-latency (e.g. remote SSH)
-connection; a fast local client often keeps up and never triggers it.  Off by
-default; requires tmux 3.2 or newer.
+instead of replaying the whole backlog.  It engages only when the client
+genuinely can't keep up with the stream, which in practice means a
+**low-bandwidth** link — Emacs reads the control socket eagerly, so a client
+with enough throughput keeps up and never triggers it.  That includes a fast
+local client and, in testing, even a high-latency remote SSH connection with
+ample bandwidth: latency alone does not trigger pause mode, only a starved
+pipe does.  Off by default; requires tmux 3.2 or newer.
 
 ## Status
 
@@ -192,6 +236,13 @@ in batches, send keyboard input back with `send-keys -H` (chunking large
 pastes), resize the tmux client, and optionally use tmux flow control (pause
 mode) for very high-volume output.  Mouse handling and broader edge-case
 hardening still need work.
+
+There is also an **experimental multi-pane tiling** view (`C-c C-t`, see
+[Tiling every pane at once](#tiling-every-pane-at-once-experimental)) that
+renders all of a window's panes at once, split to match tmux's layout.  It
+is rougher than the single-pane view — whole-frame only, approximate
+sizing — but already handles live per-pane output, per-pane input,
+focus-follow, and automatic re-tiling on split/resize/close.
 
 ## Development
 
@@ -207,6 +258,27 @@ elsewhere:
 
 ```sh
 make test EAT_DIR=/path/to/eat
+```
+
+There is also a **live integration suite** that asserts render fidelity —
+that the text tmux-control paints into an Eat buffer matches tmux's own
+`capture-pane` for the same screen, for the connect-time seed and the live
+`%output` stream, across plain text, colors, UTF-8 box-drawing, wide lines,
+and double-width CJK/emoji glyphs.  It needs a real tmux on `PATH` (it uses a dedicated `tc-ert-test`
+socket and never touches other servers; tests skip where tmux is absent):
+
+```sh
+make test-integration
+```
+
+For the GUI multi-pane tiling — which needs a real frame and can't be
+checked in batch — `test/tmux-control-live-oracle.el` exposes the same
+render-vs-`capture-pane` comparison as commands to run against a live GUI
+Emacs while exercising tiling by hand:
+
+```elisp
+(load-file "test/tmux-control-live-oracle.el")
+(tmux-control-live-compare-all "main")  ;; MATCH/DIFF per tiled pane
 ```
 
 ## License

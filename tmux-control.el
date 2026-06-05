@@ -210,12 +210,53 @@ requests the alternate screen, so Eat's alternate-display state is a
 phantom and must be ignored.  Refreshed over the control connection
 whenever the active pane changes.")
 
+;; Multi-pane tiling (experimental).  In tiling mode the controller buffer
+;; (the process buffer) stops rendering and instead fans the session's
+;; %output out to one render buffer per pane, tiled into Emacs windows to
+;; match tmux's window layout.  See the "Multi-pane tiling" section below.
+(defvar-local tmux-control--controller nil
+  "Controller buffer owning the shared tmux process, or nil.
+Set in a tiled pane render buffer so its commands (input, select-pane)
+route through the controller's single command queue and process.  nil in
+the controller buffer itself and in an ordinary single-pane client.")
+(defvar-local tmux-control--tiled nil
+  "Non-nil in a controller buffer whose window is rendered as tiled panes.")
+(defvar-local tmux-control--panes nil
+  "In a tiled controller, an alist (PANE-ID . RENDER-BUFFER) in layout order.")
+(defvar-local tmux-control--tiled-layout nil
+  "Last window-layout string this controller tiled, to skip redundant re-tiles.")
+(defvar-local tmux-control--retile-pending nil
+  "Non-nil when a %layout-change asked for a re-tile at the next flush.")
+(defvar-local tmux-control--retile-timer nil
+  "Idle timer coalescing notification-driven re-tiles, or nil.
+Re-tiling issues synchronous tmux queries (a blocking SSH round-trip when
+remote), so it is debounced off the process filter instead of running
+inline on every %layout-change.")
+(defvar-local tmux-control--tiled-client-size nil
+  "(W . H) char size last requested from tmux for the tiled frame area.
+Compared on frame resize so tmux is only re-sized (and the panes re-tiled)
+when the area devoted to tiling actually changed.")
+(defvar-local tmux-control--unmatched-retries 0
+  "Consecutive re-tiles where a layout leaf matched no pane.
+Bounds the retry so a persistent mismatch cannot reschedule forever.")
+(defvar-local tmux-control--suppress-focus-follow nil
+  "When non-nil on a controller, pane focus does not drive tmux's select-pane.
+Set while a window switch is in flight so the still-selected old window's
+focus-follow does not `select-pane' a pane in the old window and yank the
+active window back before the re-tile lands.  Cleared when the build finishes.")
+(defvar tmux-control--killing-pane nil
+  "Bound non-nil while tiling intentionally kills its own pane buffers.
+A pane buffer's `kill-buffer-hook' re-tiles to recover a pane killed out
+from under the tiling, but must not fire during teardown/reconciliation
+kills, which are deliberate.")
+
 (defvar tmux-control--override-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-e") #'tmux-control-scrollback)
     (define-key map (kbd "C-c C-k") #'tmux-control-disconnect)
     (define-key map (kbd "C-c C-l") #'tmux-control-clear-and-repaint)
     (define-key map (kbd "C-c C-o") #'tmux-control-other-pane)
+    (define-key map (kbd "C-c C-t") #'tmux-control-toggle-tiling)
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
     map)
   "High-precedence keymap for tmux-control buffers.")
@@ -231,6 +272,7 @@ whenever the active pane changes.")
     (define-key map (kbd "C-c C-k") #'tmux-control-disconnect)
     (define-key map (kbd "C-c C-l") #'tmux-control-clear-and-repaint)
     (define-key map (kbd "C-c C-o") #'tmux-control-other-pane)
+    (define-key map (kbd "C-c C-t") #'tmux-control-toggle-tiling)
     map)
   "Keymap for `tmux-control-mode'.")
 
@@ -302,8 +344,15 @@ Interactively, the session prompt completes over existing sessions on the
 chosen host and socket; entering a name that does not exist creates that
 session (tmux attaches if it exists, otherwise creates it)."
   (interactive
-   (let* ((host (read-string "Host (empty for local): "
-                             nil nil tmux-control-default-host))
+   (let* ((host (read-string
+                 "Host (empty for local): "
+                 ;; Offer the default host as *editable initial input*, not as
+                 ;; `read-string's default value: a default value would make an
+                 ;; empty RET return the default, so a configured
+                 ;; `tmux-control-default-host' could never be cleared to mean
+                 ;; local.  Pre-filled instead, RET keeps it and clearing it
+                 ;; (then RET) connects locally, matching the prompt.
+                 tmux-control-default-host))
           (socket-name (read-string "Socket name: "
                                     nil nil
                                     tmux-control-default-socket-name))
@@ -534,11 +583,21 @@ When INDEX is given non-interactively, switch to it directly."
       (tmux-control--read-window-index "Window: "))))))
 
 (defun tmux-control--do-select-window (index)
-  "Select tmux window INDEX in the current buffer's session."
+  "Select tmux window INDEX in the current buffer's session.
+When part of a tiling, the %session-window-changed notification re-tiles
+to the new window's panes, so only the single-pane view reseeds here."
   (tmux-control--ensure-live)
-  (tmux-control--send-command
-   (format "select-window -t %s:%s" tmux-control--session index))
-  (tmux-control--refresh-active-pane))
+  (let ((ctrl (tmux-control--tiling-controller)))
+    ;; Suppress focus-follow across the switch: until the re-tile rebuilds,
+    ;; the old window's pane stays selected, and its focus-follow would
+    ;; `select-pane' it -- pulling the active window back to the old one.
+    (when ctrl
+      (with-current-buffer ctrl
+        (setq tmux-control--suppress-focus-follow t)))
+    (tmux-control--send-command
+     (format "select-window -t %s:%s" tmux-control--session index))
+    (unless ctrl
+      (tmux-control--refresh-active-pane))))
 
 (defun tmux-control-new-window (&optional name)
   "Create a new window in the current tmux-control session and switch to it.
@@ -855,6 +914,11 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
 
 (defun tmux-control--reset-buffer ()
   "Reset the current buffer for a fresh tmux-control session."
+  ;; A reconnect into a buffer that was tiled would `kill-all-local-variables'
+  ;; (via `tmux-control-mode') and orphan its pane render buffers; tear the
+  ;; tiling down first so they are killed and the state is clean.
+  (when tmux-control--tiled
+    (tmux-control--teardown-tiling (current-buffer) t))
   (let ((inhibit-read-only t))
     (when (process-live-p tmux-control--process)
       (delete-process tmux-control--process))
@@ -1486,9 +1550,38 @@ ordinary short repeats) are kept.  OUT is searched only within the recent
         (setq tmux-control--accumulator
               (substring tmux-control--accumulator start))
         ;; Feed any output still batched at the end of the chunk, then do a
-        ;; single redisplay -- not one per %output message.
-        (tmux-control--flush-output-batch)
-        (tmux-control--flush-display sync-windows)))))
+        ;; single redisplay -- not one per %output message.  In tiling mode
+        ;; the controller renders nothing itself; it flushes each pane's
+        ;; render buffer instead.
+        (if tmux-control--tiled
+            (tmux-control--flush-tiled-panes)
+          (tmux-control--flush-output-batch)
+          (tmux-control--flush-display sync-windows))
+        ;; A %layout-change seen this chunk asked for a re-tile.  Debounce it
+        ;; off the filter -- re-tiling makes blocking (possibly SSH) tmux
+        ;; queries, so running it inline would freeze Emacs on every layout
+        ;; change, and a resize emits a burst of them.
+        (when tmux-control--retile-pending
+          (setq tmux-control--retile-pending nil)
+          (tmux-control--schedule-retile (current-buffer)))))))
+
+(defun tmux-control--schedule-retile (controller)
+  "Schedule a debounced re-tile of CONTROLLER on the idle timer.
+Coalesces a burst of layout changes into one rebuild, run when Emacs next
+idles so the blocking tmux queries do not stall output rendering."
+  (when (buffer-live-p controller)
+    (with-current-buffer controller
+      (when (timerp tmux-control--retile-timer)
+        (cancel-timer tmux-control--retile-timer))
+      (setq tmux-control--retile-timer
+            (run-with-idle-timer
+             0.06 nil
+             (lambda ()
+               (when (buffer-live-p controller)
+                 (with-current-buffer controller
+                   (setq tmux-control--retile-timer nil)
+                   (when tmux-control--tiled
+                     (tmux-control--build-tiling controller))))))))))
 
 (defun tmux-control--flush-output-batch ()
   "Feed any batched %output payloads to Eat as a single write.
@@ -1502,16 +1595,23 @@ per message."
       (tmux-control--feed-terminal out))))
 
 (defun tmux-control--batch-pane-output (pane payload)
-  "Queue PANE's encoded output PAYLOAD for rendering, when PANE is active.
-The single live terminal mirrors only the active pane; a split-pane window
-reports %output for every pane, and rendering them all into one terminal
-would interleave them.  When no active pane has been resolved yet, the
-first output bootstraps it (the `#{pane_id}' query then confirms it)."
-  (unless tmux-control--active-pane
-    (setq tmux-control--active-pane pane))
-  (when (equal pane tmux-control--active-pane)
-    (push (tmux-control--decode-output payload)
-          tmux-control--output-batch)))
+  "Queue PANE's encoded output PAYLOAD for rendering.
+In single-pane mode the live terminal mirrors only the active pane, so
+output for other panes is dropped (rendering them all into one terminal
+would interleave them); when no active pane is resolved yet the first
+output bootstraps it.  In tiling mode the controller fans output out to
+the matching pane's render buffer instead, so every pane updates at once."
+  (if tmux-control--tiled
+      (let ((buf (cdr (assoc pane tmux-control--panes))))
+        (when (buffer-live-p buf)
+          (let ((decoded (tmux-control--decode-output payload)))
+            (with-current-buffer buf
+              (push decoded tmux-control--output-batch)))))
+    (unless tmux-control--active-pane
+      (setq tmux-control--active-pane pane))
+    (when (equal pane tmux-control--active-pane)
+      (push (tmux-control--decode-output payload)
+            tmux-control--output-batch))))
 
 (defun tmux-control--handle-line (line)
   "Handle one tmux control protocol LINE."
@@ -1567,14 +1667,30 @@ first output bootstraps it (the `#{pane_id}' query then confirms it)."
       (push line tmux-control--command-output))
      ((string-match "\\`%window-pane-changed [^ ]+ \\(%[0-9]+\\)\\'" line)
       ;; The window's active pane changed (a split, a select-pane, a closed
-      ;; pane).  Follow it: repaint the new pane from its current screen,
-      ;; since only the active pane is mirrored into the live terminal.
+      ;; pane).  In single-pane mode only the active pane is mirrored, so
+      ;; follow it: repaint from its current screen.  In tiling mode every
+      ;; pane is already shown, so just record the pointer (no reseed, no
+      ;; flicker); the matching Emacs window can be focused on demand.
       (setq tmux-control--active-pane (match-string 1 line))
-      (tmux-control--seed-screen)
-      (tmux-control--refresh-alt-screen-option)
-      (tmux-control--refresh-pane-size))
+      (unless tmux-control--tiled
+        (tmux-control--seed-screen)
+        (tmux-control--refresh-alt-screen-option)
+        (tmux-control--refresh-pane-size)))
      ((string-prefix-p "%layout-change " line)
-      (tmux-control--refresh-pane-size))))))
+      ;; The window's pane structure or sizes changed (a split, a resize, a
+      ;; closed pane).  In tiling mode re-derive the tiling; in single-pane
+      ;; mode just reconcile the active pane's size.
+      (if tmux-control--tiled
+          (setq tmux-control--retile-pending t)
+        (tmux-control--refresh-pane-size)))
+     ((and tmux-control--tiled
+           (string-prefix-p "%session-window-changed " line))
+      ;; The session's active window changed (switched here or by another
+      ;; client).  In tiling mode re-tile to the new window's panes.  In
+      ;; single-pane mode this notification is ignored -- window switches go
+      ;; through `tmux-control--do-select-window', which reseeds directly --
+      ;; so the single-pane path is unchanged.
+      (setq tmux-control--retile-pending t))))))
 
 (defun tmux-control--finish-command-output ()
   "Handle the end of a tmux command reply."
@@ -1656,8 +1772,16 @@ With `tmux-control-pause-after' set, tmux stops sending a pane's buffered
 output once this client falls too far behind and sends %pause.  Reseed
 from the pane's current screen to skip the backlog tmux dropped, then ask
 tmux to continue so live output resumes from the present."
-  (when (equal pane tmux-control--active-pane)
-    (tmux-control--seed-screen))
+  (cond
+   ;; In tiling mode reseed the paused pane's own render buffer; the
+   ;; controller renders nothing, so `tmux-control--seed-screen' here would
+   ;; paint the invisible controller terminal and leave the pane stale.
+   (tmux-control--tiled
+    (let ((buf (cdr (assoc pane tmux-control--panes))))
+      (when (buffer-live-p buf)
+        (tmux-control--seed-pane-buffer-sync buf))))
+   ((equal pane tmux-control--active-pane)
+    (tmux-control--seed-screen)))
   ;; tmux's command parser rejects a bare "%0:continue" argument, so quote it.
   (tmux-control--send-command
    (format "refresh-client -A %s"
@@ -1881,8 +2005,34 @@ cursor position and their cursor line is kept visible."
       (when (and sync-windows
                  (boundp 'eat--synchronize-scroll-function))
         (funcall eat--synchronize-scroll-function sync-windows)
+        ;; In a tiled pane, anchor to the top of the current terminal screen
+        ;; so a full-screen TUI (e.g. a Claude Code panel) shows from its top
+        ;; instead of being scrolled with its top cut off when tall
+        ;; box-drawing glyphs make the rows overflow the body in pixels.
+        (when tmux-control--controller
+          (tmux-control--anchor-windows-to-screen-top sync-windows))
         (tmux-control--keep-cursor-visible sync-windows))
       (run-hooks 'eat-update-hook))))
+
+(defun tmux-control--anchor-windows-to-screen-top (windows)
+  "Set each of WINDOWS to start at the top of the terminal's current screen.
+The current screen is the last `eat-term' height rows of the buffer, so
+this reveals a full-screen TUI from its top while still showing the latest
+screen of a scrolling pane.  `tmux-control--keep-cursor-visible' runs after
+and only pulls the start forward when the cursor would otherwise fall below
+the body (e.g. a tall prompt glyph on a scrolling log), so the follow-bottom
+behavior is preserved."
+  (let ((height (and tmux-control--terminal
+                     (eat-term-live-p tmux-control--terminal)
+                     (cdr (eat-term-size tmux-control--terminal)))))
+    (when (and height (> height 0))
+      (let ((top (save-excursion
+                   (goto-char (point-max))
+                   (forward-line (- (1- height)))
+                   (line-beginning-position))))
+        (dolist (window windows)
+          (when (window-live-p window)
+            (set-window-start window top t)))))))
 
 (defun tmux-control--write-terminal (output)
   "Process decoded terminal OUTPUT into Eat and redisplay immediately.
@@ -1951,12 +2101,19 @@ expects."
 (defun tmux-control--send-command (command &optional kind)
   "Send tmux control mode COMMAND.
 
-KIND identifies the command reply handler."
-  (when (process-live-p tmux-control--process)
-    (setq tmux-control--command-queue
-          (append tmux-control--command-queue
-                  (list (or kind :ignore))))
-    (process-send-string tmux-control--process (concat command "\n"))))
+KIND identifies the command reply handler.  When called from a tiled pane
+render buffer (`tmux-control--controller' set), the command is enqueued on
+the controller's single command queue and written to the shared process,
+so every reply stays matched to the right handler on one queue."
+  (let ((ctrl (or tmux-control--controller (current-buffer))))
+    (when (buffer-live-p ctrl)
+      (with-current-buffer ctrl
+        (when (process-live-p tmux-control--process)
+          (setq tmux-control--command-queue
+                (append tmux-control--command-queue
+                        (list (or kind :ignore))))
+          (process-send-string tmux-control--process
+                               (concat command "\n")))))))
 
 (defun tmux-control--adjust-window-size (process windows)
   "Resize tmux and Eat for PROCESS according to WINDOWS."
@@ -2060,12 +2217,22 @@ by the `:pane-size' branch of `tmux-control--finish-command-output'."
   "Handle PROCESS exit with MESSAGE."
   (when (buffer-live-p (process-buffer process))
     (with-current-buffer (process-buffer process)
+      ;; If the session died while tiled, tear the tiling down so its pane
+      ;; render buffers are not left orphaned without a process.
+      (when tmux-control--tiled
+        (tmux-control--teardown-tiling (current-buffer)))
       (unless (string-match-p "\\`finished\\|exited" message)
         (tmux-control--message (string-trim-right message)))
       (setq tmux-control--process nil))))
 
 (defun tmux-control--kill-process ()
-  "Delete the tmux control process for the current buffer."
+  "Delete the tmux control process and any tiled pane buffers."
+  (when tmux-control--panes
+    (dolist (np tmux-control--panes)
+      (when (buffer-live-p (cdr np))
+        (let ((kill-buffer-query-functions nil))
+          (kill-buffer (cdr np)))))
+    (setq tmux-control--panes nil))
   (when (process-live-p tmux-control--process)
     (delete-process tmux-control--process)))
 
@@ -2075,6 +2242,721 @@ by the `:pane-size' branch of `tmux-control--finish-command-output'."
     (goto-char (point-max))
     (insert (propertize (format "\n[tmux-control] %s\n" message)
                         'face 'font-lock-comment-face))))
+
+
+;;;; Multi-pane tiling (experimental)
+;;
+;; A tmux window can hold several panes at once.  The single-pane client
+;; above mirrors only the active pane; the tiling layer renders ALL of the
+;; current window's panes at once, each in its own Eat buffer, with the
+;; Emacs windows split to match tmux's own layout -- the iTerm "show every
+;; pane" view.  It reuses the per-buffer rendering machinery (each pane
+;; buffer is an ordinary `tmux-control-mode' buffer with its own terminal,
+;; UTF-8 carry, and active-pane = its own id) and a single shared control
+;; process owned by the controller buffer, which routes %output per pane.
+;;
+;; tmux's `window_layout' string encodes the pane geometry as a recursive
+;; tree:
+;;
+;;   checksum,WxH,X,Y,paneid          a single leaf pane
+;;   checksum,WxH,X,Y{a,b,...}        a row: children left-to-right (h split)
+;;   checksum,WxH,X,Y[a,b,...]        a column: children top-to-bottom (v split)
+;;
+;; where each child is itself a node.  The parser below turns that string
+;; into a tree of plist nodes that the tiler walks to build Emacs windows.
+
+(defun tmux-control--layout-strip-checksum (layout)
+  "Strip a leading \"checksum,\" from a tmux LAYOUT string.
+The `window_layout' format prefixes the geometry with a hex checksum and a
+comma.  Dimensions always contain an \"x\" before any comma, so a checksum
+\(hex digits immediately followed by a comma) is unambiguous and an
+already-stripped string is returned unchanged."
+  (if (string-match "\\`[0-9a-f]+," layout)
+      (substring layout (match-end 0))
+    layout))
+
+(defun tmux-control--parse-layout-int (s i)
+  "Parse a non-negative integer from string S at index I.
+Return (N . NEXT-INDEX); signal an error when no digit is present."
+  (let ((start i)
+        (len (length s)))
+    (while (and (< i len) (<= ?0 (aref s i) ?9))
+      (setq i (1+ i)))
+    (when (= start i)
+      (error "tmux-control: expected integer at %d" i))
+    (cons (string-to-number (substring s start i)) i)))
+
+(defun tmux-control--parse-layout-dims (s i)
+  "Parse \"WxH,X,Y\" from string S at index I.
+Return ((W H X Y) . NEXT-INDEX)."
+  (let (w h x y r)
+    (setq r (tmux-control--parse-layout-int s i) w (car r) i (cdr r))
+    (unless (and (< i (length s)) (= (aref s i) ?x))
+      (error "tmux-control: expected x in layout dims"))
+    (setq i (1+ i))
+    (setq r (tmux-control--parse-layout-int s i) h (car r) i (cdr r))
+    (unless (and (< i (length s)) (= (aref s i) ?,))
+      (error "tmux-control: expected , after height"))
+    (setq i (1+ i))
+    (setq r (tmux-control--parse-layout-int s i) x (car r) i (cdr r))
+    (unless (and (< i (length s)) (= (aref s i) ?,))
+      (error "tmux-control: expected , after x"))
+    (setq i (1+ i))
+    (setq r (tmux-control--parse-layout-int s i) y (car r) i (cdr r))
+    (cons (list w h x y) i)))
+
+(defun tmux-control--parse-layout-node (s i)
+  "Parse one layout node from string S at index I.
+Return (NODE . NEXT-INDEX).  NODE is a plist:
+  leaf:  (:type leaf  :w W :h H :x X :y Y :id ID)
+  split: (:type split :dir h|v :w W :h H :x X :y Y :children (NODE...))."
+  (let* ((dims (tmux-control--parse-layout-dims s i))
+         (geom (car dims))
+         (w (nth 0 geom)) (h (nth 1 geom))
+         (x (nth 2 geom)) (y (nth 3 geom)))
+    (setq i (cdr dims))
+    (let ((ch (and (< i (length s)) (aref s i))))
+      (cond
+       ((eq ch ?{)
+        (let ((lst (tmux-control--parse-layout-list s (1+ i) ?})))
+          (cons (list :type 'split :dir 'h :w w :h h :x x :y y
+                      :children (car lst))
+                (cdr lst))))
+       ((eq ch ?\[)
+        (let ((lst (tmux-control--parse-layout-list s (1+ i) ?\])))
+          (cons (list :type 'split :dir 'v :w w :h h :x x :y y
+                      :children (car lst))
+                (cdr lst))))
+       ((eq ch ?,)
+        (let ((r (tmux-control--parse-layout-int s (1+ i))))
+          (cons (list :type 'leaf :w w :h h :x x :y y
+                      :id (number-to-string (car r)))
+                (cdr r))))
+       (t (error "tmux-control: malformed layout node at %d" i))))))
+
+(defun tmux-control--parse-layout-list (s i close)
+  "Parse a comma-separated node list from S at I until CLOSE character.
+Return (CHILDREN . NEXT-INDEX) with NEXT-INDEX positioned past CLOSE."
+  (let ((children '())
+        (len (length s))
+        (done nil))
+    (while (not done)
+      (let ((r (tmux-control--parse-layout-node s i)))
+        (push (car r) children)
+        (setq i (cdr r)))
+      (cond
+       ((>= i len) (error "tmux-control: unterminated layout list"))
+       ((= (aref s i) ?,) (setq i (1+ i)))
+       ((= (aref s i) close) (setq i (1+ i) done t))
+       (t (error "tmux-control: unexpected char in layout list at %d" i))))
+    (cons (nreverse children) i)))
+
+(defun tmux-control--parse-layout (layout)
+  "Parse a tmux window-layout LAYOUT string into a node tree.
+Return the root node plist, or nil when LAYOUT is empty or malformed.
+See `tmux-control--parse-layout-node' for the node shape."
+  (if (or (null layout) (string-empty-p (string-trim layout)))
+      nil
+    (condition-case nil
+        (car (tmux-control--parse-layout-node
+              (tmux-control--layout-strip-checksum (string-trim layout))
+              0))
+      (error nil))))
+
+(defun tmux-control--layout-leaves (node)
+  "Return the leaf nodes under layout NODE, left-to-right then top-to-bottom.
+The order follows the children order tmux records, which is exactly the
+left/top-to-right/bottom reading order used to lay out the panes."
+  (cond
+   ((null node) nil)
+   ((eq (plist-get node :type) 'leaf) (list node))
+   (t (apply #'append
+             (mapcar #'tmux-control--layout-leaves
+                     (plist-get node :children))))))
+
+;;; Synchronous tmux queries used to build a tiling.
+
+(defun tmux-control--run-tmux (args)
+  "Run tmux ARGS (a list, without the -L socket) and return stdout.
+Targets the current buffer's host/socket, going over SSH when a host is
+set, exactly like the other one-shot CLI queries.  Must be called in a
+controller or pane render buffer where those locals are bound."
+  (let ((full (append (when tmux-control--socket-name
+                        (list "-L" tmux-control--socket-name))
+                      args)))
+    (if (and tmux-control--host (not (string-empty-p tmux-control--host)))
+        (tmux-control--call
+         "ssh"
+         (list tmux-control--host
+               (concat tmux-control-remote-tmux-socket-setup " && "
+                       (tmux-control--tmux-command-string full))))
+      (tmux-control--call "tmux" full))))
+
+(defun tmux-control--query-window-state ()
+  "Return (LAYOUT . PANES) for the active window in one tmux query.
+LAYOUT is the `window_layout' string; PANES is an alist (PANE-ID . INFO)
+with INFO a plist of :left :top :width :height :active :cmd :title :cursor.
+Folding the layout, every pane's geometry, and every pane's cursor into a
+single `list-panes' call avoids a separate `display-message' for the layout
+and one per pane for the cursor -- each a blocking (possibly SSH) round-trip
+that previously ran for every re-tile."
+  (let* ((fmt (concat "#{window_layout}\t#{pane_id}\t#{pane_left}\t#{pane_top}\t"
+                      "#{pane_width}\t#{pane_height}\t#{pane_active}\t"
+                      "#{cursor_x}\t#{cursor_y}\t#{pane_current_command}\t"
+                      "#{pane_title}"))
+         (text (tmux-control--run-tmux
+                (list "list-panes" "-t" tmux-control--session "-F" fmt)))
+         (layout nil)
+         (panes nil))
+    (dolist (line (split-string (string-trim text) "\n" t))
+      (let ((f (split-string line "\t")))
+        (when (>= (length f) 11)
+          (unless layout (setq layout (nth 0 f)))
+          (push (cons (nth 1 f)
+                      (list :left (string-to-number (nth 2 f))
+                            :top (string-to-number (nth 3 f))
+                            :width (string-to-number (nth 4 f))
+                            :height (string-to-number (nth 5 f))
+                            :active (string= (nth 6 f) "1")
+                            :cursor (cons (string-to-number (nth 7 f))
+                                          (string-to-number (nth 8 f)))
+                            :cmd (nth 9 f)
+                            :title (nth 10 f)))
+                panes))))
+    (cons layout (nreverse panes))))
+
+(defun tmux-control--capture-pane-screen (pane)
+  "Return PANE's visible screen as colored text (no scrollback history)."
+  (tmux-control--run-tmux
+   (append (list "capture-pane" "-p" "-e")
+           (when tmux-control--capture-trailing-p (list "-N"))
+           (list "-t" pane))))
+
+(defun tmux-control--query-cursor (pane)
+  "Return PANE's cursor as an (X . Y) cons, or nil."
+  (tmux-control--parse-cursor-pos
+   (list (string-trim
+          (tmux-control--run-tmux
+           (list "display-message" "-p" "-t" pane
+                 "#{cursor_x},#{cursor_y}"))))))
+
+;;; Per-pane render buffers.
+
+(defvar-local tmux-control--pane-info nil
+  "Plist of a tiled render buffer's tmux pane metadata, for its mode line.")
+
+(defun tmux-control--pane-mode-line ()
+  "Return a concise mode-line string for a tiled pane render buffer.
+Leads with the pane id (so teammates in a split window are easy to tell
+apart), then the running command and, when distinct, the pane title."
+  (let* ((info tmux-control--pane-info)
+         ;; Pane ids contain "%", which is a mode-line format construct, so
+         ;; double it to display literally.
+         (pane (replace-regexp-in-string
+                "%" "%%" (or tmux-control--active-pane "?")))
+         (cmd (plist-get info :cmd))
+         (title (plist-get info :title)))
+    (concat " "
+            (propertize (format "[%s]" pane) 'face 'mode-line-emphasis)
+            (when (and cmd (not (string-empty-p cmd))) (concat " " cmd))
+            (when (and title (not (string-empty-p title)) (not (equal title cmd)))
+              (concat " — " title)))))
+
+(defun tmux-control--make-pane-buffer (pane-id leaf controller meta)
+  "Create and return a render buffer for PANE-ID, sized from layout LEAF.
+CONTROLLER owns the shared process; META carries the session locals to
+copy in.  The buffer is an ordinary `tmux-control-mode' buffer with its
+own Eat terminal whose `active pane' is PANE-ID, so the existing input and
+render helpers target this pane without modification; it has no process of
+its own and routes commands through CONTROLLER."
+  (let* ((w (max 1 (plist-get leaf :w)))
+         (h (max 1 (plist-get leaf :h)))
+         (host (plist-get meta :host))
+         (name (format "*tmux-control:%s:%s:%s*"
+                       (if (and host (not (string-empty-p host))) host "local")
+                       (plist-get meta :session)
+                       pane-id))
+         (process (plist-get meta :process))
+         (buffer (get-buffer-create name)))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t)) (erase-buffer))
+      (tmux-control-mode)
+      (setq-local emulation-mode-map-alists
+                  (cons tmux-control--emulation-mode-map-alist
+                        (delq tmux-control--emulation-mode-map-alist
+                              emulation-mode-map-alists)))
+      (setq tmux-control--keys-active t
+            tmux-control--controller controller
+            tmux-control--process process
+            tmux-control--host host
+            tmux-control--socket-name (plist-get meta :socket)
+            tmux-control--session (plist-get meta :session)
+            tmux-control--capture-trailing-p (plist-get meta :trailing)
+            tmux-control--fallback-target (plist-get meta :fallback)
+            tmux-control--active-pane pane-id
+            tmux-control--pane-info (plist-get leaf :info)
+            tmux-control--accumulator ""
+            tmux-control--output-batch nil
+            tmux-control--display-dirty nil
+            tmux-control--utf8-carry ""
+            tmux-control--alt-screen-honored t
+            tmux-control--seed-cursor nil)
+      (setq tmux-control--terminal (eat-term-make buffer (point-min)))
+      (setq eat-terminal tmux-control--terminal)
+      (eat-term-resize tmux-control--terminal w h)
+      (eat-semi-char-mode)
+      (setf (eat-term-parameter tmux-control--terminal 'input-function)
+            #'tmux-control--send-input)
+      (setf (eat-term-parameter tmux-control--terminal 'set-cursor-function)
+            (if (fboundp 'eat--set-cursor) #'eat--set-cursor #'ignore))
+      (setf (eat-term-parameter tmux-control--terminal 'grab-mouse-function)
+            (if (fboundp 'eat--grab-mouse) #'eat--grab-mouse #'ignore))
+      (setf (eat-term-parameter tmux-control--terminal 'ring-bell-function)
+            (if (fboundp 'eat--bell) #'eat--bell #'ignore))
+      (setf (eat-term-parameter tmux-control--terminal 'manipulate-selection-function)
+            (if (fboundp 'eat--manipulate-kill-ring)
+                #'eat--manipulate-kill-ring #'ignore))
+      (setf (eat-term-parameter tmux-control--terminal 'eat--process) process)
+      (setf (eat-term-parameter tmux-control--terminal 'eat--input-process) process)
+      (setf (eat-term-parameter tmux-control--terminal 'eat--output-process) process)
+      (setq-local mode-line-format '(:eval (tmux-control--pane-mode-line)))
+      ;; Fringes and a scroll bar would steal columns from the body, so the
+      ;; Eat grid (sized to the tmux pane) would not fit and full-width TUI
+      ;; borders (e.g. a Claude Code panel) would clip.  Drop them so the
+      ;; body uses every column; the grid is then fitted to the body on tile.
+      (setq-local left-fringe-width 0)
+      (setq-local right-fringe-width 0)
+      (setq-local vertical-scroll-bar nil)
+      (setq-local horizontal-scroll-bar nil)
+      ;; Focusing this pane in Emacs makes it tmux's active pane too.
+      (add-hook 'window-selection-change-functions
+                #'tmux-control--pane-window-selected nil t)
+      ;; If this buffer is killed out from under the tiling (e.g. C-x k),
+      ;; re-tile to recreate it -- the pane still exists in tmux.
+      (add-hook 'kill-buffer-hook #'tmux-control--pane-buffer-killed nil t)
+      (tmux-control--disable-line-numbers)
+      (tmux-control--disable-margins))
+    buffer))
+
+(defun tmux-control--pane-buffer-killed ()
+  "Recover a tiled pane buffer killed by the user, by scheduling a re-tile."
+  (unless tmux-control--killing-pane
+    (let ((ctrl tmux-control--controller))
+      (when (and (buffer-live-p ctrl)
+                 (buffer-local-value 'tmux-control--tiled ctrl))
+        (tmux-control--schedule-retile ctrl)))))
+
+(defun tmux-control--pane-window-selected (frame)
+  "Tell tmux to select the pane of FRAME's newly selected tiled window.
+Installed buffer-locally on `window-selection-change-functions' in each
+pane render buffer so focusing a pane in Emacs makes it tmux's active
+pane too (other clients follow, and an untile reseeds the focused pane).
+The resulting %window-pane-changed only moves the pointer in tiling mode,
+so there is no reseed or flicker."
+  (let ((win (frame-selected-window frame)))
+    (when (window-live-p win)
+      (let ((buffer (window-buffer win)))
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (when (and tmux-control--controller
+                       tmux-control--active-pane
+                       (buffer-live-p tmux-control--controller)
+                       (process-live-p tmux-control--process)
+                       (not (buffer-local-value 'tmux-control--suppress-focus-follow
+                                                 tmux-control--controller))
+                       ;; Skip when this pane is already tmux's active pane
+                       ;; (e.g. a re-tile re-selected the same window), so a
+                       ;; rebuild does not re-assert select-pane and tug a
+                       ;; shared session's active pane on every layout change.
+                       (not (equal tmux-control--active-pane
+                                   (buffer-local-value
+                                    'tmux-control--active-pane
+                                    tmux-control--controller))))
+              (tmux-control--send-command
+               (format "select-pane -t %s" tmux-control--active-pane)))))))))
+
+(defun tmux-control--seed-pane-buffer-sync (buffer)
+  "Paint BUFFER's terminal from its pane's current screen (synchronous CLI).
+Used on (re)tile; live %output keeps the pane current afterward.  The cursor
+comes from the batched window-state query (stored in `tmux-control--pane-info'),
+so only the screen capture costs a round-trip here."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+        (let* ((pane tmux-control--active-pane)
+               (cursor (or (plist-get tmux-control--pane-info :cursor)
+                           (ignore-errors (tmux-control--query-cursor pane))))
+               (text (ignore-errors (tmux-control--capture-pane-screen pane))))
+          (when text
+            (setq tmux-control--seed-cursor cursor)
+            ;; Clear the scrollback (\e[3J) before painting, not just the
+            ;; screen, so a reseed (e.g. after a resize) does not leave the
+            ;; previous, now-reflowed frame stacked above the fresh one -- an
+            ;; app on a tmux with `alternate-screen off' repaints by appending.
+            (tmux-control--write-terminal
+             (concat "\e[3J"
+                     (tmux-control--screen-seed-sequence text cursor)))))))))
+
+;;; Window arrangement from the parsed layout tree.
+
+(defun tmux-control--tile-arrange-node (node window panes collect)
+  "Subdivide WINDOW to match layout NODE, assigning PANES buffers to leaves.
+COLLECT is called as (PANE-ID WINDOW) for each leaf placed.  Splits follow
+tmux's geometry: a row (`:dir h') splits side by side, a column (`:dir v')
+stacks; each non-last child is given its tmux char size and the last child
+takes the remaining window."
+  (pcase (plist-get node :type)
+    ('leaf
+     (let* ((pane (plist-get node :pane))
+            (buf (cdr (assoc pane panes))))
+       (when (and (window-live-p window) (buffer-live-p buf))
+         (set-window-buffer window buf t)
+         (set-window-parameter window 'tmux-control-pane pane)
+         ;; Reclaim every column for the terminal: no margins, fringes, or
+         ;; scroll bar, so the window body matches the tmux pane width and
+         ;; full-width TUI borders are not clipped.
+         (set-window-margins window 0 0)
+         (set-window-fringes window 0 0)
+         (set-window-scroll-bars window 0 nil 0 nil)
+         (funcall collect pane window))))
+    ('split
+     (let ((dir (plist-get node :dir))
+           (kids (plist-get node :children))
+           (win window))
+       (while (cdr kids)
+         (let* ((child (car kids))
+                (size (if (eq dir 'h)
+                          (max window-min-width (plist-get child :w))
+                        ;; +1 row for the child window's mode line, so its
+                        ;; body height ends up near the tmux pane height.
+                        (max window-min-height (1+ (plist-get child :h)))))
+                (new (split-window win size (if (eq dir 'h) 'right 'below))))
+           (tmux-control--tile-arrange-node child win panes collect)
+           (setq win new kids (cdr kids))))
+       (tmux-control--tile-arrange-node (car kids) win panes collect)))))
+
+(defun tmux-control--tile-arrange (controller tree panes)
+  "Tile CONTROLLER's frame to match layout TREE, showing PANES buffers.
+Devotes the whole frame to the tiling (`delete-other-windows').  Returns
+an alist (PANE-ID . WINDOW), or nil when the windows could not be built."
+  ;; Prefer the selected window when it already shows the controller or one
+  ;; of our pane buffers, so a re-tile never reaches onto a different frame
+  ;; (an all-frames `get-buffer-window' could) and clobber its layout.
+  (let ((root (or (let ((b (window-buffer (selected-window))))
+                    (when (or (eq b controller) (rassq b panes))
+                      (selected-window)))
+                  (cl-some (lambda (np) (get-buffer-window (cdr np) t)) panes)
+                  (get-buffer-window controller t)
+                  (selected-window))))
+    (condition-case err
+        (progn
+          (select-window root)
+          (delete-other-windows root)
+          (let ((acc '()))
+            (tmux-control--tile-arrange-node
+             tree (selected-window) panes
+             (lambda (pane win) (push (cons pane win) acc)))
+            (nreverse acc)))
+      (error
+       (tmux-control--message
+        (format "tiling: could not arrange windows (%s)"
+                (error-message-string err)))
+       nil))))
+
+(defun tmux-control--selected-pane-id (panes)
+  "Return the pane id whose render buffer is in the selected window, or nil."
+  (car (rassq (window-buffer (selected-window)) panes)))
+
+(defun tmux-control--tiling-controller ()
+  "Return the controller buffer when this buffer is part of a live tiling.
+Works from the controller itself or from one of its pane render buffers;
+returns nil otherwise."
+  (cond
+   (tmux-control--tiled (current-buffer))
+   ((and tmux-control--controller
+         (buffer-live-p tmux-control--controller)
+         (buffer-local-value 'tmux-control--tiled tmux-control--controller))
+    tmux-control--controller)))
+
+;;; Building / refreshing / tearing down a tiling.
+
+(defun tmux-control--flush-tiled-panes ()
+  "Flush each tiled pane's batched output into its own terminal and redisplay.
+Runs in the controller buffer at the end of a filter chunk; each pane
+buffer captured its scroll-following windows just before its own feed."
+  (dolist (np tmux-control--panes)
+    (let ((buf (cdr np)))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when tmux-control--output-batch
+            (let ((sync (tmux-control--current-sync-windows)))
+              (tmux-control--flush-output-batch)
+              (tmux-control--flush-display sync))))))))
+
+(defun tmux-control--build-tiling (controller)
+  "Build or refresh the tiled view of CONTROLLER's current tmux window.
+Queries the live layout and pane geometry, reconciles the per-pane render
+buffers (reusing survivors, creating new panes, killing gone ones),
+arranges the Emacs windows to match, and seeds each pane from its current
+screen.  Safe to call repeatedly; a %layout-change routes here."
+  (when (buffer-live-p controller)
+    (with-current-buffer controller
+      (when (process-live-p tmux-control--process)
+        ;; One batched query: layout + every pane's geometry and cursor,
+        ;; read atomically so the layout and the pane list never disagree.
+        (let* ((state (ignore-errors (tmux-control--query-window-state)))
+               (layout (car state))
+               (geometry (cdr state))
+               (tree (tmux-control--parse-layout layout))
+               (leaves (tmux-control--layout-leaves tree)))
+          (cond
+           ((or (null tree) (null leaves) (null geometry))
+            (tmux-control--message "tiling: could not read the window layout"))
+           ((and (equal layout tmux-control--tiled-layout)
+                 tmux-control--panes
+                 (cl-every (lambda (np)
+                             (and (buffer-live-p (cdr np))
+                                  (get-buffer-window (cdr np) t)))
+                           tmux-control--panes))
+            ;; Layout unchanged and every pane window is intact -- skip a
+            ;; redundant rebuild (avoids flicker and focus loss on spurious
+            ;; notifications).
+            nil)
+           (t
+            ;; Resolve each layout leaf to its real pane id.  A leaf's id in
+            ;; the window-layout string IS the pane number (%N), so match on
+            ;; that directly -- robust even when `pane_top'/`pane_left' are
+            ;; offset from the layout coordinates (e.g. tmux `pane-border-status'
+            ;; adds a title row, which some tools like pi-agents-tmux enable).
+            ;; Fall back to a top-left coordinate match only if the id is unknown.
+            (let ((unmatched nil))
+              (dolist (leaf leaves)
+                (let ((hit (or (assoc (concat "%" (plist-get leaf :id)) geometry)
+                               (cl-find-if
+                                (lambda (g)
+                                  (and (= (plist-get (cdr g) :left)
+                                          (plist-get leaf :x))
+                                       (= (plist-get (cdr g) :top)
+                                          (plist-get leaf :y))))
+                                geometry))))
+                  (if hit
+                      (progn (plist-put leaf :pane (car hit))
+                             (plist-put leaf :info (cdr hit)))
+                    (setq unmatched t))))
+              ;; A leaf with no pane match means the layout and pane list we
+              ;; read disagree (a rare transient).  Rather than tile a partial
+              ;; mapping that leaves a pane blank, try again shortly -- but only
+              ;; a few times, so a persistent mismatch can't reschedule forever.
+              (if unmatched
+                  (when (< (cl-incf tmux-control--unmatched-retries) 5)
+                    (tmux-control--schedule-retile controller))
+                (setq tmux-control--unmatched-retries 0)
+                (let* ((old-panes tmux-control--panes)
+                   (meta (list :host tmux-control--host
+                               :socket tmux-control--socket-name
+                               :session tmux-control--session
+                               :trailing tmux-control--capture-trailing-p
+                               :process tmux-control--process
+                               :fallback tmux-control--fallback-target))
+                   (focus-pane (tmux-control--selected-pane-id old-panes))
+                   (new-panes '())
+                   ;; Only newly created or resized panes need a (synchronous,
+                   ;; possibly remote) reseed; reused same-size panes keep
+                   ;; streaming live, which cuts round-trips and flicker.
+                   (to-seed '()))
+              (dolist (leaf leaves)
+                (let ((pane (plist-get leaf :pane)))
+                  (when pane
+                    (let* ((existing (cdr (assoc pane old-panes)))
+                           (reuse (buffer-live-p existing))
+                           (buf (if reuse existing
+                                  (tmux-control--make-pane-buffer
+                                   pane leaf controller meta)))
+                           (w (max 1 (plist-get leaf :w)))
+                           (h (max 1 (plist-get leaf :h)))
+                           (seed (not reuse)))
+                      (with-current-buffer buf
+                        (setq tmux-control--pane-info (plist-get leaf :info))
+                        (when (and tmux-control--terminal
+                                   (eat-term-live-p tmux-control--terminal))
+                          (let ((sz (eat-term-size tmux-control--terminal)))
+                            (unless (and sz (= (car sz) w) (= (cdr sz) h))
+                              (setq seed t)
+                              (eat-term-resize tmux-control--terminal w h)))))
+                      (push (cons pane buf) new-panes)
+                      (when seed (push buf to-seed))))))
+              (setq new-panes (nreverse new-panes))
+              ;; Kill render buffers for panes that no longer exist.
+              (dolist (op old-panes)
+                (unless (assoc (car op) new-panes)
+                  (when (buffer-live-p (cdr op))
+                    (let ((kill-buffer-query-functions nil)
+                          (tmux-control--killing-pane t))
+                      (kill-buffer (cdr op))))))
+              (setq tmux-control--panes new-panes
+                    tmux-control--tiled t
+                    tmux-control--tiled-layout layout)
+              (let ((pane-windows
+                     (tmux-control--tile-arrange controller tree new-panes)))
+                (if (null pane-windows)
+                    ;; Arrangement failed; abandon tiling cleanly.
+                    (tmux-control--teardown-tiling controller)
+                  ;; Each grid is already sized to its tmux pane (the source
+                  ;; of truth for what the app draws); fringe/scroll-bar
+                  ;; removal makes the body span the full pane width, so it
+                  ;; fits without shrinking the grid (which would drop a row).
+                  (dolist (buf to-seed)
+                    (tmux-control--seed-pane-buffer-sync buf))
+                  ;; Point every pane window at its terminal cursor, so a
+                  ;; non-selected pane draws its hollow cursor where tmux has
+                  ;; it (like iTerm) instead of at point-min.  A freshly
+                  ;; arranged window starts at the buffer's point, and Eat's
+                  ;; scroll-follow sync only catches a window whose point
+                  ;; already sits on the cursor -- which a just-built or
+                  ;; just-reseeded pane window does not -- so do it explicitly.
+                  (dolist (pw pane-windows)
+                    (let ((win (cdr pw))
+                          (buf (cdr (assoc (car pw) new-panes))))
+                      (when (and (window-live-p win) (buffer-live-p buf))
+                        (let ((term (buffer-local-value
+                                     'tmux-control--terminal buf)))
+                          (when (and term (eat-term-live-p term))
+                            (set-window-point
+                             win (eat-term-display-cursor term)))))))
+                  (let ((fw (and focus-pane
+                                 (cdr (assoc focus-pane pane-windows)))))
+                    (when (window-live-p fw) (select-window fw)))
+                  ;; The new window is shown; let focus drive tmux again so
+                  ;; the focused pane becomes active in the switched-to window.
+                  (setq tmux-control--suppress-focus-follow nil)))))))))))))
+
+(defun tmux-control--teardown-tiling (controller &optional keep-windows)
+  "Tear down CONTROLLER's tiling: clear state and kill pane render buffers.
+Unless KEEP-WINDOWS, restore the controller into a single full-frame
+window.  Does not reseed; callers that resume single-pane do that."
+  (when (buffer-live-p controller)
+    (with-current-buffer controller
+      (when (timerp tmux-control--retile-timer)
+        (cancel-timer tmux-control--retile-timer)
+        (setq tmux-control--retile-timer nil))
+      (let ((panes tmux-control--panes))
+        (setq tmux-control--tiled nil
+              tmux-control--panes nil
+              tmux-control--tiled-layout nil
+              tmux-control--retile-pending nil
+              tmux-control--suppress-focus-follow nil)
+        (unless keep-windows
+          (let ((win (or (cl-some (lambda (np) (get-buffer-window (cdr np) t))
+                                  panes)
+                         (get-buffer-window controller t)
+                         (selected-window))))
+            (when (window-live-p win)
+              (select-window win)
+              (set-window-buffer win controller)
+              (delete-other-windows win))))
+        (dolist (np panes)
+          (when (buffer-live-p (cdr np))
+            (let ((kill-buffer-query-functions nil)
+                  (tmux-control--killing-pane t))
+              (kill-buffer (cdr np)))))))))
+
+;;; Interactive entry points.
+
+(defun tmux-control--tiling-frame-size (frame)
+  "Return a (W . H) char size for the tiling area of FRAME.
+Tiling devotes the whole frame, so this is the frame's text area minus the
+minibuffer row -- the size tmux is asked to lay the window's panes out in."
+  (cons (max 1 (frame-text-cols frame))
+        (max 1 (- (frame-text-lines frame) 1))))
+
+(defun tmux-control-tile ()
+  "Tile every pane of the current tmux window into Emacs windows.
+Each pane is rendered live in its own buffer, arranged to match tmux's
+own layout -- the iTerm \"show every pane\" view -- which is handy for a
+split-pane window such as a Claude Code agent team.  Devotes the whole
+frame to the session.  `tmux-control-untile' (or \\`C-c C-t') returns to
+the single-pane view."
+  (interactive)
+  (tmux-control--ensure-live)
+  (when tmux-control--controller
+    (user-error "This is a tiled pane; use C-c C-t to untile"))
+  (when tmux-control--tiled
+    (user-error "Already tiling this session"))
+  (let ((size (tmux-control--tiling-frame-size (selected-frame))))
+    ;; Ask tmux to size the window to the Emacs area we tile into; the
+    ;; resulting %layout-change re-tiles to the exact pane sizes.
+    (setq tmux-control--tiled-client-size size)
+    (tmux-control--send-command
+     (format "refresh-client -C %dx%d" (car size) (cdr size)))
+    (tmux-control--build-tiling (current-buffer))))
+
+(defun tmux-control--reassert-tiling-size (controller frame)
+  "Ask tmux to match CONTROLLER's tiling area on FRAME when it has resized.
+Only acts when the frame's tiling area actually changed, so it ignores the
+internal window splits a re-tile makes (those keep the frame size)."
+  (when (and (buffer-live-p controller)
+             (buffer-local-value 'tmux-control--tiled controller)
+             (process-live-p
+              (buffer-local-value 'tmux-control--process controller)))
+    (with-current-buffer controller
+      (let ((size (tmux-control--tiling-frame-size frame)))
+        (unless (equal size tmux-control--tiled-client-size)
+          (setq tmux-control--tiled-client-size size)
+          (tmux-control--send-command
+           (format "refresh-client -C %dx%d" (car size) (cdr size)))
+          ;; tmux's %layout-change will also schedule a re-tile, but schedule
+          ;; one regardless so the grids are refit even if the size is clamped.
+          (tmux-control--schedule-retile controller))))))
+
+(defun tmux-control--on-frame-size-change (frame)
+  "Re-assert tmux size for any tiled controller showing panes on FRAME.
+Installed on `window-size-change-functions' so resizing the Emacs frame
+while tiled re-divides the tmux window to match instead of clipping the
+panes against a now-smaller Emacs window."
+  (dolist (buf (buffer-list))
+    (and (buffer-local-value 'tmux-control--tiled buf)
+         (cl-some (lambda (np)
+                    (let ((w (and (buffer-live-p (cdr np))
+                                  (get-buffer-window (cdr np) t))))
+                      (and w (eq (window-frame w) frame))))
+                  (buffer-local-value 'tmux-control--panes buf))
+         (tmux-control--reassert-tiling-size buf frame))))
+
+(add-hook 'window-size-change-functions #'tmux-control--on-frame-size-change)
+
+(defun tmux-control-untile ()
+  "Return from the tiled multi-pane view to the single-pane live view."
+  (interactive)
+  (let ((controller (or tmux-control--controller
+                        (and tmux-control--tiled (current-buffer)))))
+    (unless (and controller (buffer-live-p controller)
+                 (buffer-local-value 'tmux-control--tiled controller))
+      (user-error "Not tiling"))
+    (tmux-control--teardown-tiling controller)
+    (with-current-buffer controller
+      ;; Re-query the session's real active pane synchronously (the cached
+      ;; one can be stale after window switches) BEFORE anything repaints, so
+      ;; every subsequent seed and any live %output route to the right pane.
+      (let ((pane (ignore-errors
+                    (string-trim
+                     (tmux-control--run-tmux
+                      (list "display-message" "-p" "#{pane_id}"))))))
+        (when (and pane (string-match-p "\\`%[0-9]+\\'" pane))
+          (setq tmux-control--active-pane pane)))
+      (tmux-control--resize-to-window)
+      ;; Hard-clear the terminal (it still holds the frozen pre-tiling
+      ;; screen) and paint the active pane synchronously, so the single-pane
+      ;; view is exactly one clean screen rather than old content plus new.
+      (tmux-control--write-terminal "\e[3J\e[H\e[2J")
+      (tmux-control--seed-pane-buffer-sync controller))))
+
+(defun tmux-control-toggle-tiling ()
+  "Toggle between the tiled multi-pane view and the single-pane view.
+Bound to \\`C-c C-t'."
+  (interactive)
+  (if (or tmux-control--controller tmux-control--tiled)
+      (tmux-control-untile)
+    (tmux-control-tile)))
 
 (provide 'tmux-control)
 
