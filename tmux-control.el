@@ -236,6 +236,11 @@ inline on every %layout-change.")
   "(W . H) char size last requested from tmux for the tiled frame area.
 Compared on frame resize so tmux is only re-sized (and the panes re-tiled)
 when the area devoted to tiling actually changed.")
+(defvar-local tmux-control--suppress-focus-follow nil
+  "When non-nil on a controller, pane focus does not drive tmux's select-pane.
+Set while a window switch is in flight so the still-selected old window's
+focus-follow does not `select-pane' a pane in the old window and yank the
+active window back before the re-tile lands.  Cleared when the build finishes.")
 
 (defvar tmux-control--override-map
   (let ((map (make-sparse-keymap)))
@@ -567,10 +572,17 @@ When INDEX is given non-interactively, switch to it directly."
 When part of a tiling, the %session-window-changed notification re-tiles
 to the new window's panes, so only the single-pane view reseeds here."
   (tmux-control--ensure-live)
-  (tmux-control--send-command
-   (format "select-window -t %s:%s" tmux-control--session index))
-  (unless (tmux-control--tiling-controller)
-    (tmux-control--refresh-active-pane)))
+  (let ((ctrl (tmux-control--tiling-controller)))
+    ;; Suppress focus-follow across the switch: until the re-tile rebuilds,
+    ;; the old window's pane stays selected, and its focus-follow would
+    ;; `select-pane' it -- pulling the active window back to the old one.
+    (when ctrl
+      (with-current-buffer ctrl
+        (setq tmux-control--suppress-focus-follow t)))
+    (tmux-control--send-command
+     (format "select-window -t %s:%s" tmux-control--session index))
+    (unless ctrl
+      (tmux-control--refresh-active-pane))))
 
 (defun tmux-control-new-window (&optional name)
   "Create a new window in the current tmux-control session and switch to it.
@@ -2524,6 +2536,8 @@ so there is no reseed or flicker."
                        tmux-control--active-pane
                        (buffer-live-p tmux-control--controller)
                        (process-live-p tmux-control--process)
+                       (not (buffer-local-value 'tmux-control--suppress-focus-follow
+                                                 tmux-control--controller))
                        ;; Skip when this pane is already tmux's active pane
                        ;; (e.g. a re-tile re-selected the same window), so a
                        ;; rebuild does not re-assert select-pane and tug a
@@ -2757,7 +2771,10 @@ screen.  Safe to call repeatedly; a %layout-change routes here."
                     (tmux-control--seed-pane-buffer-sync buf))
                   (let ((fw (and focus-pane
                                  (cdr (assoc focus-pane pane-windows)))))
-                    (when (window-live-p fw) (select-window fw)))))))))))))))
+                    (when (window-live-p fw) (select-window fw)))
+                  ;; The new window is shown; let focus drive tmux again so
+                  ;; the focused pane becomes active in the switched-to window.
+                  (setq tmux-control--suppress-focus-follow nil)))))))))))))
 
 (defun tmux-control--teardown-tiling (controller &optional keep-windows)
   "Tear down CONTROLLER's tiling: clear state and kill pane render buffers.
@@ -2772,7 +2789,8 @@ window.  Does not reseed; callers that resume single-pane do that."
         (setq tmux-control--tiled nil
               tmux-control--panes nil
               tmux-control--tiled-layout nil
-              tmux-control--retile-pending nil)
+              tmux-control--retile-pending nil
+              tmux-control--suppress-focus-follow nil)
         (unless keep-windows
           (let ((win (or (cl-some (lambda (np) (get-buffer-window (cdr np) t))
                                   panes)
