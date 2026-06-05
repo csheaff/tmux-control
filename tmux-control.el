@@ -273,6 +273,8 @@ kills, which are deliberate.")
     (define-key map (kbd "C-c C-l") #'tmux-control-clear-and-repaint)
     (define-key map (kbd "C-c C-o") #'tmux-control-other-pane)
     (define-key map (kbd "C-c C-t") #'tmux-control-toggle-tiling)
+    (define-key map (kbd "C-c C-n") #'tmux-control-next-window)
+    (define-key map (kbd "C-c C-p") #'tmux-control-previous-window)
     map)
   "Keymap for `tmux-control-mode'.")
 
@@ -598,6 +600,52 @@ to the new window's panes, so only the single-pane view reseeds here."
      (format "select-window -t %s:%s" tmux-control--session index))
     (unless ctrl
       (tmux-control--refresh-active-pane))))
+
+(defun tmux-control--switch-window (verb)
+  "Switch the live view to another window via tmux command VERB.
+VERB is a session-relative selector command -- \"next-window\",
+\"previous-window\", or \"last-window\" -- which tmux resolves against the
+session's own window order and current/last pointers, so cycling wraps and
+\"last\" toggles exactly as tmux itself does.  Mirrors
+`tmux-control--do-select-window': the single-pane view reseeds in place on the
+new window's active pane, while a tiled view re-tiles from the
+%session-window-changed notification.  Switching changes the session's current
+window, so any other client attached to the session follows along."
+  (tmux-control--ensure-live)
+  (let ((ctrl (tmux-control--tiling-controller)))
+    ;; Suppress focus-follow across the switch (see `tmux-control--do-select-window').
+    (when ctrl
+      (with-current-buffer ctrl
+        (setq tmux-control--suppress-focus-follow t)))
+    (tmux-control--send-command
+     (format "%s -t %s" verb tmux-control--session))
+    (unless ctrl
+      (tmux-control--refresh-active-pane))))
+
+;;;###autoload
+(defun tmux-control-next-window ()
+  "Switch the live view to the next window in the session, wrapping around.
+Like flipping to the next tab.  Other clients follow along.  Bound to
+\\`C-c C-n'.  See also `tmux-control-previous-window' and
+`tmux-control-last-window'."
+  (interactive)
+  (tmux-control--switch-window "next-window"))
+
+;;;###autoload
+(defun tmux-control-previous-window ()
+  "Switch the live view to the previous window in the session, wrapping around.
+Like flipping to the previous tab.  Other clients follow along.  Bound to
+\\`C-c C-p'."
+  (interactive)
+  (tmux-control--switch-window "previous-window"))
+
+;;;###autoload
+(defun tmux-control-last-window ()
+  "Switch the live view to the most recently selected window.
+Toggles back and forth between the two most recent windows, like tmux's own
+`last-window'.  Other clients follow along."
+  (interactive)
+  (tmux-control--switch-window "last-window"))
 
 (defun tmux-control-new-window (&optional name)
   "Create a new window in the current tmux-control session and switch to it.
