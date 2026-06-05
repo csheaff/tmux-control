@@ -167,6 +167,77 @@ test server afterward."
     (should (equal (tmux-control-it--render-seed pane width height)
                    (tmux-control-it--capture-lines pane)))))
 
+;;; Live %output streaming: the full async pipeline, not just the seed.
+
+(defun tmux-control-it--pump (secs)
+  "Run the event loop for SECS seconds so subprocess output is processed."
+  (let ((deadline (+ (float-time) secs)))
+    (while (< (float-time) deadline)
+      (accept-process-output nil 0.05))))
+
+(defun tmux-control-it--pump-until (secs pred)
+  "Pump the event loop until PRED returns non-nil, or SECS elapse.
+Return what PRED last returned (non-nil on success)."
+  (let ((deadline (+ (float-time) secs)) (ok nil))
+    (while (and (< (float-time) deadline)
+                (not (setq ok (funcall pred))))
+      (accept-process-output nil 0.05))
+    ok))
+
+(defun tmux-control-it--buffer-text (buf)
+  "Return BUF's whole text without properties."
+  (with-current-buffer buf
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(defun tmux-control-it--buffer-visible (buf height)
+  "Return the last HEIGHT rendered rows of BUF, normalized like a capture."
+  (with-current-buffer buf
+    (save-excursion
+      (goto-char (point-max))
+      (forward-line (- (1- height)))
+      (tmux-control-it--rtrim
+       (split-string (buffer-substring-no-properties
+                      (line-beginning-position) (point-max))
+                     "\n")))))
+
+(ert-deftest tmux-control-it-live-stream ()
+  "Output produced AFTER connecting arrives via the live %output stream and
+the rendered Eat buffer converges to exactly tmux's own screen -- exercising
+the full async pipeline (process filter -> batch -> Eat), not just the seed."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-x" "80" "-y" "24")
+  (let ((buf (tmux-control-connect nil tmux-control-it--socket "t"))
+        (pane (string-trim
+               (tmux-control-it--tmux "display-message" "-p" "-t" "t"
+                                      "#{pane_id}"))))
+    (unwind-protect
+        (progn
+          (tmux-control-it--pump 1.5)       ; let the initial seed land
+          ;; Produce NEW output; it must reach the buffer via streaming, not
+          ;; the connect-time capture.
+          (tmux-control-it--tmux "send-keys" "-t" "t"
+                                 "printf 'STREAM_ONE\\nSTREAM_TWO\\n'" "Enter")
+          (should (tmux-control-it--pump-until
+                   6 (lambda ()
+                       (let ((s (tmux-control-it--buffer-text buf)))
+                         (and (string-match-p "STREAM_ONE" s)
+                              (string-match-p "STREAM_TWO" s))))))
+          ;; The render converges to tmux's screen (retry absorbs frame lag
+          ;; and any async prompt redraw).
+          (let ((h (string-to-number
+                    (string-trim
+                     (tmux-control-it--tmux "display-message" "-p" "-t" pane
+                                            "#{pane_height}")))))
+            (should (tmux-control-it--pump-until
+                     3 (lambda ()
+                         (equal (tmux-control-it--buffer-visible buf h)
+                                (tmux-control-it--capture-lines pane)))))))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf (ignore-errors (tmux-control-disconnect)))
+        (kill-buffer buf))
+      (tmux-control-it--tmux-ok "kill-server"))))
+
 ;;; Per-pane isolation: each pane renders its own content, not a neighbor's.
 
 (ert-deftest tmux-control-it-two-panes-isolated ()

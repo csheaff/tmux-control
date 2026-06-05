@@ -249,6 +249,27 @@ elsewhere:
 make test EAT_DIR=/path/to/eat
 ```
 
+There is also a **live integration suite** that asserts render fidelity —
+that the text tmux-control paints into an Eat buffer matches tmux's own
+`capture-pane` for the same screen, for the connect-time seed and the live
+`%output` stream, across plain text, colors, UTF-8 box-drawing, and wide
+lines.  It needs a real tmux on `PATH` (it uses a dedicated `tc-ert-test`
+socket and never touches other servers; tests skip where tmux is absent):
+
+```sh
+make test-integration
+```
+
+For the GUI multi-pane tiling — which needs a real frame and can't be
+checked in batch — `test/tmux-control-live-oracle.el` exposes the same
+render-vs-`capture-pane` comparison as commands to run against a live GUI
+Emacs while exercising tiling by hand:
+
+```elisp
+(load-file "test/tmux-control-live-oracle.el")
+(tmux-control-live-compare-all "main")  ;; MATCH/DIFF per tiled pane
+```
+
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
