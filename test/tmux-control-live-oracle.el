@@ -40,6 +40,19 @@
       (setq ls (butlast ls)))
     ls))
 
+(defun tmux-control-live--visible-text (beg end)
+  "Return buffer text BEG..END with Eat's invisible padding cells removed.
+Eat models a double-width glyph (CJK, emoji, wide box-drawing) as the glyph
+followed by an `invisible' padding cell for its second column, while
+`capture-pane' emits only the glyph; drop the padding so wide characters do
+not read as spurious trailing spaces against the ground truth."
+  (let ((out nil) (i beg))
+    (while (< i end)
+      (unless (get-text-property i 'invisible)
+        (push (char-after i) out))
+      (setq i (1+ i)))
+    (apply #'string (nreverse out))))
+
 (defun tmux-control-live--pane-visible (buf)
   "Return BUF's Eat visible screen (last `height' rows) as normalized lines."
   (when (buffer-live-p buf)
@@ -49,7 +62,7 @@
           (goto-char (point-max))
           (forward-line (- (1- h)))
           (tmux-control-live--rtrim
-           (split-string (buffer-substring-no-properties
+           (split-string (tmux-control-live--visible-text
                           (line-beginning-position) (point-max))
                          "\n")))))))
 

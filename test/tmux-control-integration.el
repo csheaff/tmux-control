@@ -5,7 +5,8 @@
 ;; Integration tests that need a real tmux server and a live Eat terminal.
 ;; They assert that tmux-control's render of a pane is *faithful* -- that the
 ;; text it paints into an Eat buffer matches tmux's own `capture-pane' for the
-;; same screen -- across plain text, colors, box-drawing/UTF-8, and wide lines.
+;; same screen -- across plain text, colors, box-drawing/UTF-8, wide lines, and
+;; double-width CJK/emoji glyphs.
 ;;
 ;; These are kept separate from the pure-logic suite (test/tmux-control-test.el,
 ;; `make test') because they spin up a tmux server and are therefore slower and
@@ -58,6 +59,19 @@
       (setq ls (butlast ls)))
     ls))
 
+(defun tmux-control-it--visible-text (beg end)
+  "Return buffer text BEG..END with Eat's invisible padding cells removed.
+Eat models a double-width glyph (CJK, emoji, wide box-drawing) as the glyph
+followed by an `invisible' padding cell standing in for its second column.
+`capture-pane' emits only the glyph, so the padding must be dropped before
+comparing or every wide character reads as a spurious trailing space."
+  (let ((out nil) (i beg))
+    (while (< i end)
+      (unless (get-text-property i 'invisible)
+        (push (char-after i) out))
+      (setq i (1+ i)))
+    (apply #'string (nreverse out))))
+
 (defun tmux-control-it--capture-lines (pane)
   "Return tmux PANE's visible screen as normalized plain lines (ground truth)."
   (tmux-control-it--rtrim
@@ -96,7 +110,7 @@ fidelity end to end."
                 (goto-char (point-max))
                 (forward-line (- (1- height)))
                 (tmux-control-it--rtrim
-                 (split-string (buffer-substring-no-properties
+                 (split-string (tmux-control-it--visible-text
                                 (line-beginning-position) (point-max))
                                "\n"))))))
       (when (buffer-live-p buf) (kill-buffer buf)))))
@@ -110,9 +124,15 @@ test server afterward."
   (declare (indent 3))
   `(progn
      (skip-unless (tmux-control-it--available-p))
+     ;; Pin UTF-8 for the content file write and every tmux subprocess I/O so
+     ;; double-width content survives a bare `emacs -Q --batch', which sets up
+     ;; no locale and would otherwise mangle multibyte output (or prompt for a
+     ;; coding system on write and hang the run).
      (let ((file (make-temp-file "tc-ert-content"))
            (width ,width)
-           (height ,height))
+           (height ,height)
+           (coding-system-for-read 'utf-8-unix)
+           (coding-system-for-write 'utf-8-unix))
        (unwind-protect
            (progn
              (with-temp-file file (insert ,content))
@@ -159,6 +179,20 @@ test server afterward."
     (should (equal (tmux-control-it--render-seed pane width height)
                    (tmux-control-it--capture-lines pane)))))
 
+(ert-deftest tmux-control-it-seed-wide-chars ()
+  ;; Double-width glyphs -- CJK across Han/Hiragana/Hangul, interleaved with
+  ;; ASCII, and a standalone emoji -- must render faithfully.  Eat stores each
+  ;; as the glyph plus an invisible padding cell for its second column; the
+  ;; extraction drops that padding so the comparison is against the same single
+  ;; glyph-per-column that capture-pane reports.  (Zero-width combining marks
+  ;; and ZWJ emoji are a separate matter -- Eat does not retain them -- so they
+  ;; are deliberately not exercised here.)
+  (tmux-control-it--with-pane
+      "ABC 你好世界 こんにちは 안녕 DEF\nmix 日本語ABC混在123 end\n10 \xf0\x9f\x8e\x89 done\n"
+      80 24
+    (should (equal (tmux-control-it--render-seed pane width height)
+                   (tmux-control-it--capture-lines pane)))))
+
 (ert-deftest tmux-control-it-seed-many-lines ()
   ;; More content lines than fit: only the last `height' rows are the screen.
   (tmux-control-it--with-pane
@@ -196,7 +230,7 @@ Return what PRED last returned (non-nil on success)."
       (goto-char (point-max))
       (forward-line (- (1- height)))
       (tmux-control-it--rtrim
-       (split-string (buffer-substring-no-properties
+       (split-string (tmux-control-it--visible-text
                       (line-beginning-position) (point-max))
                      "\n")))))
 

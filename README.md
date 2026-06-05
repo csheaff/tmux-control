@@ -263,8 +263,8 @@ make test EAT_DIR=/path/to/eat
 There is also a **live integration suite** that asserts render fidelity —
 that the text tmux-control paints into an Eat buffer matches tmux's own
 `capture-pane` for the same screen, for the connect-time seed and the live
-`%output` stream, across plain text, colors, UTF-8 box-drawing, and wide
-lines.  It needs a real tmux on `PATH` (it uses a dedicated `tc-ert-test`
+`%output` stream, across plain text, colors, UTF-8 box-drawing, wide lines,
+and double-width CJK/emoji glyphs.  It needs a real tmux on `PATH` (it uses a dedicated `tc-ert-test`
 socket and never touches other servers; tests skip where tmux is absent):
 
 ```sh
