@@ -219,10 +219,13 @@ For an upper bound on that, enable tmux's control-mode flow control:
 When the output buffered for this client falls more than that many seconds
 behind, tmux pauses the pane and notifies the client, which reseeds from the
 pane's current screen and resumes — so the view jumps to the latest state
-instead of replaying the whole backlog.  It engages only when the client is
-genuinely behind, which is most likely over a higher-latency (e.g. remote SSH)
-connection; a fast local client often keeps up and never triggers it.  Off by
-default; requires tmux 3.2 or newer.
+instead of replaying the whole backlog.  It engages only when the client
+genuinely can't keep up with the stream, which in practice means a
+**low-bandwidth** link — Emacs reads the control socket eagerly, so a client
+with enough throughput keeps up and never triggers it.  That includes a fast
+local client and, in testing, even a high-latency remote SSH connection with
+ample bandwidth: latency alone does not trigger pause mode, only a starved
+pipe does.  Off by default; requires tmux 3.2 or newer.
 
 ## Status
 
