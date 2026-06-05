@@ -241,6 +241,11 @@ when the area devoted to tiling actually changed.")
 Set while a window switch is in flight so the still-selected old window's
 focus-follow does not `select-pane' a pane in the old window and yank the
 active window back before the re-tile lands.  Cleared when the build finishes.")
+(defvar tmux-control--killing-pane nil
+  "Bound non-nil while tiling intentionally kills its own pane buffers.
+A pane buffer's `kill-buffer-hook' re-tiles to recover a pane killed out
+from under the tiling, but must not fire during teardown/reconciliation
+kills, which are deliberate.")
 
 (defvar tmux-control--override-map
   (let ((map (make-sparse-keymap)))
@@ -2516,9 +2521,20 @@ its own and routes commands through CONTROLLER."
       ;; Focusing this pane in Emacs makes it tmux's active pane too.
       (add-hook 'window-selection-change-functions
                 #'tmux-control--pane-window-selected nil t)
+      ;; If this buffer is killed out from under the tiling (e.g. C-x k),
+      ;; re-tile to recreate it -- the pane still exists in tmux.
+      (add-hook 'kill-buffer-hook #'tmux-control--pane-buffer-killed nil t)
       (tmux-control--disable-line-numbers)
       (tmux-control--disable-margins))
     buffer))
+
+(defun tmux-control--pane-buffer-killed ()
+  "Recover a tiled pane buffer killed by the user, by scheduling a re-tile."
+  (unless tmux-control--killing-pane
+    (let ((ctrl tmux-control--controller))
+      (when (and (buffer-live-p ctrl)
+                 (buffer-local-value 'tmux-control--tiled ctrl))
+        (tmux-control--schedule-retile ctrl)))))
 
 (defun tmux-control--pane-window-selected (frame)
   "Tell tmux to select the pane of FRAME's newly selected tiled window.
@@ -2753,7 +2769,8 @@ screen.  Safe to call repeatedly; a %layout-change routes here."
               (dolist (op old-panes)
                 (unless (assoc (car op) new-panes)
                   (when (buffer-live-p (cdr op))
-                    (let ((kill-buffer-query-functions nil))
+                    (let ((kill-buffer-query-functions nil)
+                          (tmux-control--killing-pane t))
                       (kill-buffer (cdr op))))))
               (setq tmux-control--panes new-panes
                     tmux-control--tiled t
@@ -2802,7 +2819,8 @@ window.  Does not reseed; callers that resume single-pane do that."
               (delete-other-windows win))))
         (dolist (np panes)
           (when (buffer-live-p (cdr np))
-            (let ((kill-buffer-query-functions nil))
+            (let ((kill-buffer-query-functions nil)
+                  (tmux-control--killing-pane t))
               (kill-buffer (cdr np)))))))))
 
 ;;; Interactive entry points.
