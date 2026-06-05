@@ -824,9 +824,11 @@ the window is deliberately generous."
 
 (defun tmux-control--note-pane-activity (pane)
   "Flag PANE's window as having unseen output when it is not the current one.
-Suppressed during the quiet period after a full repaint (see
-`tmux-control--quiet-activity')."
-  (when (and (not tmux-control--tiled)
+A no-op when the tab bar is disabled (its only consumer), so the hot %output
+path costs nothing then, and during the quiet period after a full repaint
+\(see `tmux-control--quiet-activity')."
+  (when (and tmux-control-window-tab-bar
+             (not tmux-control--tiled)
              tmux-control--current-window
              (> (float-time) tmux-control--activity-quiet-until)
              (hash-table-p tmux-control--pane-window))
