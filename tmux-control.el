@@ -2807,6 +2807,22 @@ screen.  Safe to call repeatedly; a %layout-change routes here."
                   ;; fits without shrinking the grid (which would drop a row).
                   (dolist (buf to-seed)
                     (tmux-control--seed-pane-buffer-sync buf))
+                  ;; Point every pane window at its terminal cursor, so a
+                  ;; non-selected pane draws its hollow cursor where tmux has
+                  ;; it (like iTerm) instead of at point-min.  A freshly
+                  ;; arranged window starts at the buffer's point, and Eat's
+                  ;; scroll-follow sync only catches a window whose point
+                  ;; already sits on the cursor -- which a just-built or
+                  ;; just-reseeded pane window does not -- so do it explicitly.
+                  (dolist (pw pane-windows)
+                    (let ((win (cdr pw))
+                          (buf (cdr (assoc (car pw) new-panes))))
+                      (when (and (window-live-p win) (buffer-live-p buf))
+                        (let ((term (buffer-local-value
+                                     'tmux-control--terminal buf)))
+                          (when (and term (eat-term-live-p term))
+                            (set-window-point
+                             win (eat-term-display-cursor term)))))))
                   (let ((fw (and focus-pane
                                  (cdr (assoc focus-pane pane-windows)))))
                     (when (window-live-p fw) (select-window fw)))
