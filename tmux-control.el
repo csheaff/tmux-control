@@ -232,6 +232,10 @@ the controller buffer itself and in an ordinary single-pane client.")
 Re-tiling issues synchronous tmux queries (a blocking SSH round-trip when
 remote), so it is debounced off the process filter instead of running
 inline on every %layout-change.")
+(defvar-local tmux-control--tiled-client-size nil
+  "(W . H) char size last requested from tmux for the tiled frame area.
+Compared on frame resize so tmux is only re-sized (and the panes re-tiled)
+when the area devoted to tiling actually changed.")
 
 (defvar tmux-control--override-map
   (let ((map (make-sparse-keymap)))
@@ -2545,8 +2549,13 @@ so only the screen capture costs a round-trip here."
                (text (ignore-errors (tmux-control--capture-pane-screen pane))))
           (when text
             (setq tmux-control--seed-cursor cursor)
+            ;; Clear the scrollback (\e[3J) before painting, not just the
+            ;; screen, so a reseed (e.g. after a resize) does not leave the
+            ;; previous, now-reflowed frame stacked above the fresh one -- an
+            ;; app on a tmux with `alternate-screen off' repaints by appending.
             (tmux-control--write-terminal
-             (tmux-control--screen-seed-sequence text cursor))))))))
+             (concat "\e[3J"
+                     (tmux-control--screen-seed-sequence text cursor)))))))))
 
 ;;; Window arrangement from the parsed layout tree.
 
@@ -2780,6 +2789,13 @@ window.  Does not reseed; callers that resume single-pane do that."
 
 ;;; Interactive entry points.
 
+(defun tmux-control--tiling-frame-size (frame)
+  "Return a (W . H) char size for the tiling area of FRAME.
+Tiling devotes the whole frame, so this is the frame's text area minus the
+minibuffer row -- the size tmux is asked to lay the window's panes out in."
+  (cons (max 1 (frame-text-cols frame))
+        (max 1 (- (frame-text-lines frame) 1))))
+
 (defun tmux-control-tile ()
   "Tile every pane of the current tmux window into Emacs windows.
 Each pane is rendered live in its own buffer, arranged to match tmux's
@@ -2793,14 +2809,47 @@ the single-pane view."
     (user-error "This is a tiled pane; use C-c C-t to untile"))
   (when tmux-control--tiled
     (user-error "Already tiling this session"))
-  (let* ((win (selected-window))
-         (aggw (max 1 (window-max-chars-per-line win)))
-         (aggh (max 1 (with-selected-window win
-                        (floor (window-screen-lines))))))
+  (let ((size (tmux-control--tiling-frame-size (selected-frame))))
     ;; Ask tmux to size the window to the Emacs area we tile into; the
     ;; resulting %layout-change re-tiles to the exact pane sizes.
-    (tmux-control--send-command (format "refresh-client -C %dx%d" aggw aggh))
+    (setq tmux-control--tiled-client-size size)
+    (tmux-control--send-command
+     (format "refresh-client -C %dx%d" (car size) (cdr size)))
     (tmux-control--build-tiling (current-buffer))))
+
+(defun tmux-control--reassert-tiling-size (controller frame)
+  "Ask tmux to match CONTROLLER's tiling area on FRAME when it has resized.
+Only acts when the frame's tiling area actually changed, so it ignores the
+internal window splits a re-tile makes (those keep the frame size)."
+  (when (and (buffer-live-p controller)
+             (buffer-local-value 'tmux-control--tiled controller)
+             (process-live-p
+              (buffer-local-value 'tmux-control--process controller)))
+    (with-current-buffer controller
+      (let ((size (tmux-control--tiling-frame-size frame)))
+        (unless (equal size tmux-control--tiled-client-size)
+          (setq tmux-control--tiled-client-size size)
+          (tmux-control--send-command
+           (format "refresh-client -C %dx%d" (car size) (cdr size)))
+          ;; tmux's %layout-change will also schedule a re-tile, but schedule
+          ;; one regardless so the grids are refit even if the size is clamped.
+          (tmux-control--schedule-retile controller))))))
+
+(defun tmux-control--on-frame-size-change (frame)
+  "Re-assert tmux size for any tiled controller showing panes on FRAME.
+Installed on `window-size-change-functions' so resizing the Emacs frame
+while tiled re-divides the tmux window to match instead of clipping the
+panes against a now-smaller Emacs window."
+  (dolist (buf (buffer-list))
+    (and (buffer-local-value 'tmux-control--tiled buf)
+         (cl-some (lambda (np)
+                    (let ((w (and (buffer-live-p (cdr np))
+                                  (get-buffer-window (cdr np) t))))
+                      (and w (eq (window-frame w) frame))))
+                  (buffer-local-value 'tmux-control--panes buf))
+         (tmux-control--reassert-tiling-size buf frame))))
+
+(add-hook 'window-size-change-functions #'tmux-control--on-frame-size-change)
 
 (defun tmux-control-untile ()
   "Return from the tiled multi-pane view to the single-pane live view."
