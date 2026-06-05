@@ -102,6 +102,29 @@
     (tmux-control--batch-pane-output "%1" "more\\012")
     (should (equal tmux-control--output-batch '("more\n" "from-one\n")))))
 
+(ert-deftest tmux-control-test-batch-pane-output-tiled-routes ()
+  ;; In tiling mode each pane's output is fanned into that pane's own render
+  ;; buffer -- never interleaved -- and output for an unknown pane is dropped.
+  (let ((buf1 (generate-new-buffer " *tc-test-pane1*"))
+        (buf2 (generate-new-buffer " *tc-test-pane2*")))
+    (unwind-protect
+        (let ((tmux-control--tiled t)
+              (tmux-control--panes (list (cons "%1" buf1) (cons "%2" buf2))))
+          (with-current-buffer buf1 (setq-local tmux-control--output-batch nil))
+          (with-current-buffer buf2 (setq-local tmux-control--output-batch nil))
+          (tmux-control--batch-pane-output "%1" "one\\012")
+          (tmux-control--batch-pane-output "%2" "two\\012")
+          (tmux-control--batch-pane-output "%1" "more\\012")
+          ;; Output for a pane with no render buffer is dropped, not an error.
+          (tmux-control--batch-pane-output "%9" "ghost\\012")
+          ;; Each buffer holds only its own output (reverse order in the batch).
+          (should (equal (buffer-local-value 'tmux-control--output-batch buf1)
+                         '("more\n" "one\n")))
+          (should (equal (buffer-local-value 'tmux-control--output-batch buf2)
+                         '("two\n"))))
+      (kill-buffer buf1)
+      (kill-buffer buf2))))
+
 (ert-deftest tmux-control-test-handle-pause-resumes ()
   ;; A %pause reseeds the active pane and asks tmux to continue streaming.
   (let ((sent '())
