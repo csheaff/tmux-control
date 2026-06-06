@@ -1216,5 +1216,67 @@ each wrapped in an evolving prompt line and a status bar.")
         (tmux-control--connect-all-sessions)
         (should (equal (sort connected #'string<) '("b" "c")))))))
 
+(ert-deftest tmux-control-test-note-session-activity-flags-offscreen ()
+  ;; Output to an off-screen session past its quiet period flags it.
+  (with-temp-buffer
+    (setq-local tmux-control--session "s")
+    (setq-local tmux-control--activity-quiet-until 0)
+    (setq-local tmux-control--session-activity nil)
+    (let ((tmux-control-session-activity t))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) nil))
+                ((symbol-function 'force-mode-line-update) #'ignore))
+        (tmux-control--note-session-activity)
+        (should tmux-control--session-activity)))))
+
+(ert-deftest tmux-control-test-note-session-activity-visible-and-quiet-noop ()
+  ;; A visible session, or one inside its quiet period, is never flagged.
+  (let ((tmux-control-session-activity t))
+    (with-temp-buffer
+      (setq-local tmux-control--activity-quiet-until 0)
+      (setq-local tmux-control--session-activity nil)
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'win))
+                ((symbol-function 'force-mode-line-update) #'ignore))
+        (tmux-control--note-session-activity)
+        (should-not tmux-control--session-activity)))      ; visible → no flag
+    (with-temp-buffer
+      (setq-local tmux-control--activity-quiet-until (+ (float-time) 100))
+      (setq-local tmux-control--session-activity nil)
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) nil))
+                ((symbol-function 'force-mode-line-update) #'ignore))
+        (tmux-control--note-session-activity)
+        (should-not tmux-control--session-activity)))))    ; quiet → no flag
+
+(ert-deftest tmux-control-test-session-strip-lists-others-and-clears-self ()
+  ;; The strip names other flagged sessions (not unflagged ones, not self) and
+  ;; clears the current session's own flag (you are looking at it).
+  (let ((self (generate-new-buffer "*tmux-control:local:self*"))
+        (other (generate-new-buffer "*tmux-control:local:other*"))
+        (quiet (generate-new-buffer "*tmux-control:local:quiet*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer self
+            (setq-local tmux-control--session "self")
+            (setq-local tmux-control--tiled nil)
+            (setq-local tmux-control--process 'live)
+            (setq-local tmux-control--session-activity t))
+          (with-current-buffer other
+            (setq-local tmux-control--session "other")
+            (setq-local tmux-control--process 'live)
+            (setq-local tmux-control--session-activity t))
+          (with-current-buffer quiet
+            (setq-local tmux-control--session "quiet")
+            (setq-local tmux-control--process 'live)
+            (setq-local tmux-control--session-activity nil))
+          ;; Exercise the real flagged-buffer scan (process-live-p mocked).
+          (cl-letf (((symbol-function 'process-live-p) (lambda (p) (eq p 'live))))
+            (with-current-buffer self
+              (let* ((tmux-control-session-activity t)
+                     (strip (tmux-control--session-strip)))
+                (should (string-match-p "other" strip))   ; flagged other listed
+                (should-not (string-match-p "quiet" strip)) ; unflagged omitted
+                (should-not (string-match-p "self" strip))  ; self omitted
+                (should-not tmux-control--session-activity)))))   ; self-cleared
+      (kill-buffer self) (kill-buffer other) (kill-buffer quiet))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

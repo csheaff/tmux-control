@@ -182,6 +182,16 @@ a tmux session, and the natural companion to `tmux-control-next-window' and
 friends.  Set to nil to hide it."
   :type 'boolean)
 
+(defcustom tmux-control-session-activity t
+  "Non-nil flags other connected sessions that have unseen output.
+When you are looking at one session and another connected session produces
+output, its name appears with a dot at the left of the header line -- the
+session-level \"which one wants me?\" signal, the companion to the window
+tab bar's per-window dot.  The strip is empty when no other session has
+unseen output, so an idle setup shows no extra chrome; click a name to
+switch to it.  Set to nil to disable."
+  :type 'boolean)
+
 (defface tmux-control-tab-active
   '((t :inherit highlight :weight bold))
   "Face for the current window's tab in the `tmux-control' tab bar.")
@@ -344,6 +354,11 @@ Lets streamed %output be attributed to a window for the activity marker.")
   "Float-time before which background-activity flagging is suppressed.
 Set around client-driven full repaints (connect, switch, resize) so the
 resulting prompt/redraw burst in every pane does not flag every window.")
+(defvar-local tmux-control--session-activity nil
+  "Non-nil when this session produced output while it was off screen.
+The session-level analog of `tmux-control--activity': set on the hot output
+path when the session is not visible, cleared when it is shown again.  Drives
+the cross-session activity strip (see `tmux-control-session-activity').")
 
 (defvar tmux-control-mode-map
   (let ((map (make-sparse-keymap)))
@@ -507,11 +522,15 @@ session (tmux attaches if it exists, otherwise creates it)."
       (tmux-control--send-command "display-message -p '#{pane_id}'" :pane-id)
       ;; Tab bar: track the session's windows and which window holds each pane,
       ;; so the header line can show tabs and flag background activity.
+      ;; Header line: the window tab bar and/or the cross-session activity
+      ;; strip (independent features sharing one row).  Both must ignore the
+      ;; connect seed's repaint burst, so quiet activity for either.
+      (when (or tmux-control-window-tab-bar tmux-control-session-activity)
+        (setq-local header-line-format '(:eval (tmux-control--header-line)))
+        ;; The connect seed repaints every pane; don't let that flag everything.
+        (tmux-control--quiet-activity 1.5))
       (when tmux-control-window-tab-bar
         (setq tmux-control--activity (make-hash-table :test 'equal))
-        (setq-local header-line-format '(:eval (tmux-control--window-tab-bar)))
-        ;; The connect seed repaints every pane; don't let that flag everything.
-        (tmux-control--quiet-activity 1.5)
         (tmux-control--refresh-windows)
         (tmux-control--refresh-pane-window-map))
       (when (and (integerp tmux-control-pause-after)
@@ -1096,6 +1115,67 @@ path costs nothing then, and during the quiet period after a full repaint
           (puthash win t tmux-control--activity)
           (force-mode-line-update))))))
 
+(defun tmux-control--note-session-activity ()
+  "Flag the current session as having unseen output when it is off screen.
+The session-level analog of `tmux-control--note-pane-activity': a cheap no-op
+when the feature is off, during the post-repaint quiet period, when the flag
+is already set, or when the session is visible (you can already see it).
+Refreshes every header line so the session you *are* looking at shows the
+flagged one in its strip."
+  (when (and tmux-control-session-activity
+             (not tmux-control--session-activity)
+             (> (float-time) tmux-control--activity-quiet-until)
+             (not (get-buffer-window (current-buffer) 'visible)))
+    (setq tmux-control--session-activity t)
+    (force-mode-line-update t)))
+
+(defun tmux-control--session-strip-tab (buffer)
+  "Return a clickable header-line tab for the flagged session in BUFFER."
+  (let* ((name (buffer-local-value 'tmux-control--session buffer))
+         (tab (propertize (format " ●%s" name)
+                          'face 'tmux-control-tab-activity
+                          'mouse-face 'highlight
+                          'help-echo (format "Switch to session %s (unseen output)"
+                                             name)))
+         (map (make-sparse-keymap)))
+    (define-key map [header-line mouse-1]
+      (lambda (_event)
+        (interactive "e")
+        (let ((display-buffer-overriding-action '((display-buffer-same-window))))
+          (pop-to-buffer buffer))))
+    (put-text-property 0 (length tab) 'keymap map tab)
+    tab))
+
+(defun tmux-control--flagged-other-session-buffers ()
+  "Live session buffers other than the current one that have unseen output.
+Tests the activity flag first so most buffers are rejected by one cheap
+check, and sorts only the (usually few) flagged buffers -- not the whole
+buffer list -- so it is cheap to call from the header-line :eval on every
+redisplay."
+  (let ((self (current-buffer))
+        flagged)
+    (dolist (b (buffer-list))
+      (when (and (not (eq b self))
+                 (buffer-local-value 'tmux-control--session-activity b)
+                 (buffer-local-value 'tmux-control--session b)
+                 (not (buffer-local-value 'tmux-control--controller b))
+                 (not (buffer-local-value 'tmux-control--tiled b))
+                 (process-live-p (buffer-local-value 'tmux-control--process b)))
+        (push b flagged)))
+    (sort flagged (lambda (a b) (string< (buffer-name a) (buffer-name b))))))
+
+(defun tmux-control--session-strip ()
+  "Header-line segment naming other connected sessions with unseen output.
+Empty when none (so an idle setup shows no extra chrome) and in the tiled
+view.  Rendered in the visible session's header line; clears this session's
+own flag as a side effect, since you are looking at it."
+  (if (or (not tmux-control-session-activity) tmux-control--tiled)
+      ""
+    (when tmux-control--session-activity
+      (setq tmux-control--session-activity nil))
+    (mapconcat #'tmux-control--session-strip-tab
+               (tmux-control--flagged-other-session-buffers) "")))
+
 (defun tmux-control--tab-keymap (index)
   "Return a header-line keymap that switches to window INDEX on a click."
   (let ((map (make-sparse-keymap)))
@@ -1138,6 +1218,18 @@ buffer's tabs purely for orientation."
          tab))
      tmux-control--windows
      "")))
+
+(defun tmux-control--header-line ()
+  "Compose the live buffer's header line.
+The cross-session activity strip (other sessions wanting attention) sits to
+the left of the window tab bar, with a separator only between the two when
+both are non-empty; each self-gates on its option, so the row is empty when
+neither has anything to show."
+  (let ((strip (tmux-control--session-strip))
+        (tabs (if tmux-control-window-tab-bar (tmux-control--window-tab-bar) "")))
+    (if (and (> (length strip) 0) (> (length tabs) 0))
+        (concat strip (propertize " │" 'face 'tmux-control-tab-inactive) tabs)
+      (concat strip tabs))))
 
 (defun tmux-control--scrollback-header ()
   "Header line for the scrollback view.
@@ -2236,6 +2328,7 @@ the matching pane's render buffer instead, so every pane updates at once."
             (with-current-buffer buf
               (push decoded tmux-control--output-batch)))))
     (tmux-control--note-pane-activity pane)
+    (tmux-control--note-session-activity)
     (unless tmux-control--active-pane
       (setq tmux-control--active-pane pane))
     (when (equal pane tmux-control--active-pane)
