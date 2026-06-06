@@ -2911,12 +2911,15 @@ that previously ran for every re-tile."
 (defvar-local tmux-control--pane-fed-live nil
   "Non-nil in a tiled render buffer that was created the moment its pane
 appeared (a split), so its `%output' has streamed in from the pane's very
-first byte.  Such a pane is never seeded from `capture-pane': the live stream
-already holds its whole content, and a capture seed would paint a second copy
-of the screenful a freshly-split pane often prints at once (a `cat', an
-agent's start-up banner).  Set by `tmux-control--eager-register-new-panes';
-honored by `tmux-control--build-tiling', which resizes such a pane (Eat
-reflows) but does not reseed it.")
+first byte.  Set by `tmux-control--eager-register-new-panes' and honored by
+`tmux-control--build-tiling' to skip seeding such a pane from `capture-pane'
+on its INITIAL placement: the live stream already holds its whole content, so
+a capture seed would paint a second copy of the screenful a freshly-split
+pane often prints at once (a `cat', an agent's start-up banner).  The pane is
+still resized (Eat reflows) on that first placement.  build-tiling then clears
+this flag, so a LATER resize reseeds the pane normally -- by then it is
+quiescent, so the seed cannot race output, and a reseed keeps it cell-exact
+where Eat's own reflow could have drifted from tmux's grid.")
 
 (defun tmux-control--pane-mode-line ()
   "Return a concise mode-line string for a tiled pane render buffer.
