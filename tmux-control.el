@@ -738,7 +738,8 @@ before flocking (see `tmux-control-flock')."
     (tmux-control-flock connect-all)))
 
 (defun tmux-control--sessions-frame ()
-  "Return the dedicated sessions frame, creating and raising it if needed."
+  "Return the dedicated sessions frame, creating it if there isn't one.
+The caller raises and focuses it (see `tmux-control-flock-other-frame')."
   (let ((frame (seq-find (lambda (fr) (frame-parameter fr 'tmux-control-sessions-frame))
                          (frame-list))))
     (if (frame-live-p frame)
