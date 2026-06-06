@@ -1257,21 +1257,25 @@ each wrapped in an evolving prompt line and a status bar.")
           (with-current-buffer self
             (setq-local tmux-control--session "self")
             (setq-local tmux-control--tiled nil)
+            (setq-local tmux-control--process 'live)
             (setq-local tmux-control--session-activity t))
           (with-current-buffer other
             (setq-local tmux-control--session "other")
+            (setq-local tmux-control--process 'live)
             (setq-local tmux-control--session-activity t))
           (with-current-buffer quiet
             (setq-local tmux-control--session "quiet")
+            (setq-local tmux-control--process 'live)
             (setq-local tmux-control--session-activity nil))
-          (cl-letf (((symbol-function 'tmux-control--live-session-buffers)
-                     (lambda () (list self other quiet))))
+          ;; Exercise the real flagged-buffer scan (process-live-p mocked).
+          (cl-letf (((symbol-function 'process-live-p) (lambda (p) (eq p 'live))))
             (with-current-buffer self
               (let* ((tmux-control-session-activity t)
                      (strip (tmux-control--session-strip)))
-                (should (string-match-p "other" strip))
-                (should-not (string-match-p "quiet" strip))
-                (should-not tmux-control--session-activity)))))
+                (should (string-match-p "other" strip))   ; flagged other listed
+                (should-not (string-match-p "quiet" strip)) ; unflagged omitted
+                (should-not (string-match-p "self" strip))  ; self omitted
+                (should-not tmux-control--session-activity)))))   ; self-cleared
       (kill-buffer self) (kill-buffer other) (kill-buffer quiet))))
 
 (provide 'tmux-control-test)

@@ -1146,6 +1146,24 @@ flagged one in its strip."
     (put-text-property 0 (length tab) 'keymap map tab)
     tab))
 
+(defun tmux-control--flagged-other-session-buffers ()
+  "Live session buffers other than the current one that have unseen output.
+Tests the activity flag first so most buffers are rejected by one cheap
+check, and sorts only the (usually few) flagged buffers -- not the whole
+buffer list -- so it is cheap to call from the header-line :eval on every
+redisplay."
+  (let ((self (current-buffer))
+        flagged)
+    (dolist (b (buffer-list))
+      (when (and (not (eq b self))
+                 (buffer-local-value 'tmux-control--session-activity b)
+                 (buffer-local-value 'tmux-control--session b)
+                 (not (buffer-local-value 'tmux-control--controller b))
+                 (not (buffer-local-value 'tmux-control--tiled b))
+                 (process-live-p (buffer-local-value 'tmux-control--process b)))
+        (push b flagged)))
+    (sort flagged (lambda (a b) (string< (buffer-name a) (buffer-name b))))))
+
 (defun tmux-control--session-strip ()
   "Header-line segment naming other connected sessions with unseen output.
 Empty when none (so an idle setup shows no extra chrome) and in the tiled
@@ -1155,15 +1173,8 @@ own flag as a side effect, since you are looking at it."
       ""
     (when tmux-control--session-activity
       (setq tmux-control--session-activity nil))
-    (let ((others (seq-filter
-                   (lambda (b)
-                     (and (not (eq b (current-buffer)))
-                          (buffer-local-value 'tmux-control--session-activity b)))
-                   (tmux-control--live-session-buffers))))
-      (if (null others)
-          ""
-        (concat (mapconcat #'tmux-control--session-strip-tab others "")
-                (propertize " │" 'face 'tmux-control-tab-inactive))))))
+    (mapconcat #'tmux-control--session-strip-tab
+               (tmux-control--flagged-other-session-buffers) "")))
 
 (defun tmux-control--tab-keymap (index)
   "Return a header-line keymap that switches to window INDEX on a click."
@@ -1211,10 +1222,14 @@ buffer's tabs purely for orientation."
 (defun tmux-control--header-line ()
   "Compose the live buffer's header line.
 The cross-session activity strip (other sessions wanting attention) sits to
-the left of the window tab bar; each self-gates on its option, so the row is
-empty when neither has anything to show."
-  (concat (tmux-control--session-strip)
-          (if tmux-control-window-tab-bar (tmux-control--window-tab-bar) "")))
+the left of the window tab bar, with a separator only between the two when
+both are non-empty; each self-gates on its option, so the row is empty when
+neither has anything to show."
+  (let ((strip (tmux-control--session-strip))
+        (tabs (if tmux-control-window-tab-bar (tmux-control--window-tab-bar) "")))
+    (if (and (> (length strip) 0) (> (length tabs) 0))
+        (concat strip (propertize " │" 'face 'tmux-control-tab-inactive) tabs)
+      (concat strip tabs))))
 
 (defun tmux-control--scrollback-header ()
   "Header line for the scrollback view.
