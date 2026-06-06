@@ -449,6 +449,71 @@ each wrapped in an evolving prompt line and a status bar.")
       (unless (string-empty-p (string-trim line))
         (should (member line in-lines))))))
 
+;;; Generic (auto-detected) frame start -- compaction without a per-app regexp.
+
+(ert-deftest tmux-control-test-auto-frame-start-line-detects ()
+  ;; With NO frame-start regexp configured, the repeated screen-top line is
+  ;; found automatically: among lines that recur once per frame, the earliest
+  ;; (the actual top) wins the tie.
+  (let ((tmux-control-scrollback-frame-start-regexp nil)
+        (tmux-control-compact-scrollback-window 300))
+    (should (equal (tmux-control--auto-frame-start-line
+                    (mapcar #'string-trim-right
+                            (split-string tmux-control-test--copilot-redraw "\n")))
+                   "[Session]"))))
+
+(ert-deftest tmux-control-test-auto-frame-start-line-nil-on-plain ()
+  ;; Ordinary scrollback (no repeating frame) yields no marker, so auto
+  ;; compaction is a no-op and never mangles plain output.
+  (let ((tmux-control-scrollback-frame-start-regexp nil)
+        (tmux-control-compact-scrollback-window 300))
+    ;; All-distinct lines: nothing recurs.
+    (should-not (tmux-control--auto-frame-start-line
+                 '("ls -la" "total 5" "drwxr-xr-x a" "drwxr-xr-x b"
+                   "-rw-r--r-- c" "echo hi" "hi there" "make all" "done now")))
+    ;; A block repeated only twice is below the recurrence threshold.
+    (should-not (tmux-control--auto-frame-start-line
+                 '("HEAD" "aa" "bb" "cc" "dd" "HEAD" "aa" "bb" "cc" "dd")))))
+
+(ert-deftest tmux-control-test-auto-compaction-collapses-without-regexp ()
+  ;; The whole pipeline collapses a repainted panel using ONLY auto-detection
+  ;; (no frame-start regexp, no chrome regexps): the panel body survives once.
+  (let* ((tmux-control-compact-scrollback-window 300)
+         (tmux-control-scrollback-frame-start-regexp nil)
+         (tmux-control-scrollback-chrome-regexps nil)
+         (auto (tmux-control--auto-frame-start-line
+                (mapcar #'string-trim-right
+                        (split-string tmux-control-test--copilot-redraw "\n")))))
+    (should (equal auto "[Session]"))
+    (let* ((tmux-control--auto-frame-start auto)
+           (out (tmux-control--compact-repeated-redraw-lines
+                 tmux-control-test--copilot-redraw)))
+      (should-not (tmux-control-test--window-repeats-p out 6))
+      (should (= 1 (length (seq-filter (lambda (l) (equal l "  | file_eta.py"))
+                                       (split-string out "\n"))))))))
+
+(ert-deftest tmux-control-test-auto-compaction-keeps-surrounding-plain ()
+  ;; Real scrollback is mixed: plain command output before and after a
+  ;; repainting block must survive; only the repeated frames collapse.
+  (let* ((tmux-control-compact-scrollback-window 300)
+         (tmux-control-scrollback-frame-start-regexp nil)
+         (tmux-control-scrollback-chrome-regexps nil)
+         (text (concat "$ ls -la\ntotal 9\nfile-one.txt\nfile-two.txt\n"
+                       tmux-control-test--copilot-redraw
+                       "\n$ git status\nclean tree\n"))
+         (auto (tmux-control--auto-frame-start-line
+                (mapcar #'string-trim-right (split-string text "\n"))))
+         (tmux-control--auto-frame-start auto)
+         (out (tmux-control--compact-repeated-redraw-lines text)))
+    (should (equal auto "[Session]"))
+    ;; Surrounding plain lines survive.
+    (should (string-match-p "ls -la" out))
+    (should (string-match-p "file-two.txt" out))
+    (should (string-match-p "git status" out))
+    (should (string-match-p "clean tree" out))
+    ;; The repeated panel collapsed.
+    (should-not (tmux-control-test--window-repeats-p out 6))))
+
 ;;; Live-state decision logic (pure predicates extracted from the
 ;;; side-effecting wheel/alt-screen code, so the truth tables can be
 ;;; exhaustively tested without a live tmux server or Eat terminal).

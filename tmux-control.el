@@ -91,10 +91,20 @@ error) and never pause."
   :type 'boolean)
 
 (defcustom tmux-control-compact-scrollback t
-  "Non-nil means compact repeated full-screen redraws in scrollback view.
+  "Non-nil means compact repeated full-screen redraws in the scrollback view.
 
-This is useful for TUIs running with tmux `alternate-screen' disabled, where
-pane history can contain many repeated copies of the visible screen."
+A TUI that repaints by reprinting its whole screen -- common under tmux with
+`alternate-screen' disabled -- leaves many near-identical copies of its screen
+in pane history.  When enabled (the default), tmux-control auto-detects the
+repeated frame and collapses it to a single copy plus whatever changed between
+repaints, so scrolling back shows the progression instead of dozens of copies.
+The collapse is conservative: with no repeating frame it changes nothing, so a
+session without a repainting TUI is shown verbatim.  Collapsing a repeat does
+trim trailing whitespace from the surrounding lines.
+
+For a specific TUI you can override the auto-detected frame boundary and drop
+volatile per-frame lines with `tmux-control-scrollback-frame-start-regexp' and
+`tmux-control-scrollback-chrome-regexps'."
   :type 'boolean)
 
 (defcustom tmux-control-compact-scrollback-window 300
@@ -104,20 +114,18 @@ pane history can contain many repeated copies of the visible screen."
 (defcustom tmux-control-scrollback-frame-start-regexp nil
   "Regexp matching the top line of a repeated full-screen redraw, or nil.
 
-Scrollback compaction (`tmux-control-compact-scrollback') splits captured
-pane history into redraw \"frames\" at lines matching this regexp and then
-collapses frames that repeat.  This only helps for TUIs that repaint by
-reprinting their whole screen under a tmux running with `alternate-screen'
-off, so each repaint is appended to history; the marker that delimits one
-repaint is necessarily application-specific.  When nil (the default) no
-frame splitting is done, so compaction makes no change and scrollback is
-shown verbatim.
+Scrollback compaction (`tmux-control-compact-scrollback') splits captured pane
+history into redraw \"frames\" and collapses frames that repeat.  When this is
+nil (the default) the frame top is auto-detected from repeated content, which
+handles most repainting TUIs with no configuration.  Set this to pin the frame
+boundary for a particular TUI when auto-detection picks a poor line (for
+example a busy app whose very top line changes every frame).
 
-For example, the Claude Code TUI repaints a block whose top line begins
-with \"[Session]\":
+For example, to force the Claude Code TUI's frames to split on a top line
+beginning with \"[Session]\":
 
     (setq tmux-control-scrollback-frame-start-regexp \"\\\\`\\\\s-*\\\\[Session\\\\]\")"
-  :type '(choice (const :tag "Disabled (verbatim scrollback)" nil) regexp))
+  :type '(choice (const :tag "Auto-detect the frame top" nil) regexp))
 
 (defcustom tmux-control-scrollback-chrome-regexps nil
   "Regexps matching volatile \"chrome\" lines to drop during compaction.
@@ -1310,19 +1318,37 @@ ignore text properties -- keep working unchanged."
    (let ((ansi-color-context nil))
      (ansi-color-apply text))))
 
+(defvar tmux-control--auto-frame-start nil
+  "Auto-detected redraw frame-top marker (a trimmed line string), or nil.
+Bound dynamically during compaction when no
+`tmux-control-scrollback-frame-start-regexp' is configured, so
+`tmux-control--scrollback-frame-start-line-p' can split frames generically.")
+
+(defconst tmux-control--auto-frame-scan-lines 4000
+  "Auto frame-top detection scans only the last this-many captured lines.
+A repainting TUI's frames are recent and recur every frame-height, so a bounded
+tail is enough to find the marker -- and it caps the cost of deciding \"no
+repeating frame\" on a long (up to `tmux-control-scrollback-lines') history.")
+
 (defun tmux-control--prepare-scrollback-text (text)
   "Prepare captured pane TEXT for the scrollback buffer.
-Compaction runs only when it is both enabled and given a frame marker to
-work with: without `tmux-control-scrollback-frame-start-regexp' it can
-de-duplicate nothing, and its line trimming would needlessly strip the
-trailing background cells `capture-pane -N' preserves for full-width
-fills.  So a default (unconfigured) scrollback is shown verbatim, colors
-and trailing backgrounds intact."
-  (let ((text (tmux-control--colorize-scrollback text)))
+Compaction runs when enabled and a frame marker is available -- either a
+configured `tmux-control-scrollback-frame-start-regexp' or, failing that, one
+auto-detected from repeated content (`tmux-control--auto-frame-start-line').
+When no marker is found -- ordinary, non-repainting scrollback -- the text is
+shown verbatim, colors and trailing backgrounds intact."
+  (let* ((text (tmux-control--colorize-scrollback text))
+         (auto (and tmux-control-compact-scrollback
+                    (not tmux-control-scrollback-frame-start-regexp)
+                    (tmux-control--auto-frame-start-line
+                     (mapcar #'string-trim-right
+                             (last (split-string text "\n")
+                                   tmux-control--auto-frame-scan-lines))))))
     (tmux-control--trim-trailing-blank-lines
      (if (and tmux-control-compact-scrollback
-              tmux-control-scrollback-frame-start-regexp)
-         (tmux-control--compact-repeated-redraw-lines text)
+              (or tmux-control-scrollback-frame-start-regexp auto))
+         (let ((tmux-control--auto-frame-start auto))
+           (tmux-control--compact-repeated-redraw-lines text))
        text))))
 
 
@@ -1640,11 +1666,77 @@ completion so the user is never stranded in a half-built chooser."
 
 (defun tmux-control--scrollback-frame-start-line-p (line)
   "Return non-nil when LINE looks like the start of a TUI redraw frame.
-Matches against `tmux-control-scrollback-frame-start-regexp'; always nil
-when that option is unset, so compaction does nothing without a configured
-frame marker."
-  (and tmux-control-scrollback-frame-start-regexp
-       (string-match-p tmux-control-scrollback-frame-start-regexp line)))
+Matches `tmux-control-scrollback-frame-start-regexp' when configured, else the
+auto-detected `tmux-control--auto-frame-start' marker bound during compaction.
+Nil when neither is available, so compaction does nothing without a frame
+marker."
+  (cond
+   (tmux-control-scrollback-frame-start-regexp
+    (string-match-p tmux-control-scrollback-frame-start-regexp line))
+   (tmux-control--auto-frame-start
+    (string= (string-trim line) tmux-control--auto-frame-start))))
+
+(defconst tmux-control--auto-frame-min-occurrences 3
+  "A line must recur at least this many times to anchor auto-detected frames.")
+
+(defconst tmux-control--auto-frame-min-gap 4
+  "Auto-detected frame-top occurrences must be at least this many lines apart,
+so a run of identical filler lines is not taken for frame boundaries.")
+
+(defun tmux-control--auto-frame-evenly-spread-p (indices)
+  "Return non-nil when sorted INDICES are each at least the min frame gap apart."
+  (let ((ok t) (prev nil))
+    (dolist (i indices ok)
+      (when (and prev (< (- i prev) tmux-control--auto-frame-min-gap))
+        (setq ok nil))
+      (setq prev i))))
+
+(defun tmux-control--frames-share-redraw-body-p (lines marker)
+  "Return non-nil when splitting LINES at MARKER yields adjacent frames that
+share a distinctive run -- evidence of a genuine repainting TUI rather than a
+coincidentally repeated line."
+  (let* ((tmux-control--auto-frame-start marker)
+         (tmux-control-scrollback-frame-start-regexp nil)
+         (chunks (tmux-control--scrollback-chunks (string-join lines "\n")))
+         (shared nil))
+    (while (and (cdr chunks) (not shared))
+      (let ((a (tmux-control--trim-blank-line-list (car chunks)))
+            (b (tmux-control--trim-blank-line-list (cadr chunks))))
+        (when (and a b (tmux-control--seen-run-length a b 0 (length b)))
+          (setq shared t)))
+      (setq chunks (cdr chunks)))
+    shared))
+
+(defun tmux-control--auto-frame-start-line (lines)
+  "Return the trimmed line that best marks repeated redraw frame tops in LINES.
+Return nil when no convincing repeat is found, so compaction stays a no-op on
+ordinary (non-repainting) scrollback.  A generic stand-in for a hand-written
+`tmux-control-scrollback-frame-start-regexp': pick the distinctive line that
+recurs like a screen top -- at least `tmux-control--auto-frame-min-occurrences'
+times, spread out, the earliest among equally frequent lines -- then confirm
+the frames it delimits actually share a redrawn body."
+  (let ((indices (make-hash-table :test 'equal))
+        (i 0))
+    (dolist (line lines)
+      (let ((key (string-trim line)))
+        (unless (string-empty-p key)
+          (push i (gethash key indices))))
+      (setq i (1+ i)))
+    (let ((best nil) (best-count 0) (best-first most-positive-fixnum))
+      (maphash
+       (lambda (key idxs)
+         (let* ((idxs (nreverse idxs))
+                (count (length idxs))
+                (first (car idxs)))
+           (when (and (>= count tmux-control--auto-frame-min-occurrences)
+                      (>= (length key) 3)
+                      (tmux-control--auto-frame-evenly-spread-p idxs)
+                      (or (> count best-count)
+                          (and (= count best-count) (< first best-first))))
+             (setq best key best-count count best-first first))))
+       indices)
+      (when (and best (tmux-control--frames-share-redraw-body-p lines best))
+        best))))
 
 (defun tmux-control--strip-scrollback-chrome (lines)
   "Remove obvious TUI chrome from captured LINES."
