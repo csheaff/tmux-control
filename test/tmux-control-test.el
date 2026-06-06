@@ -514,6 +514,70 @@ each wrapped in an evolving prompt line and a status bar.")
     ;; The repeated panel collapsed.
     (should-not (tmux-control-test--window-repeats-p out 6))))
 
+(ert-deftest tmux-control-test-auto-compaction-marker-above-volatile-line ()
+  ;; A capture that begins mid-frame leaves the tie-winning frame edge sitting
+  ;; just above a volatile line (a token counter).  The shared redraw body is
+  ;; then one line BELOW the marker, not at it; compaction must still detect
+  ;; the frame and collapse it while keeping every volatile line.  (Regression:
+  ;; the share-body check used to require the run to start at the marker, so it
+  ;; vetoed this marker and disabled compaction entirely.)
+  (let* ((tmux-control-compact-scrollback-window 300)
+         (tmux-control-scrollback-frame-start-regexp nil)
+         (tmux-control-scrollback-chrome-regexps nil)
+         (frame (concat "==== panel bottom ====\n"
+                        "  tokens: %d\n"
+                        "---- panel top ----\n"
+                        "  Claude Code\n"
+                        "  > Try edit a file\n"
+                        "  Ask me to build code\n"
+                        "  explain this code\n"
+                        "  ? for shortcuts\n"
+                        "  ready.\n"))
+         (text (concat (format frame 100) (format frame 200)
+                       (format frame 300) (format frame 400)))
+         (auto (tmux-control--auto-frame-start-line
+                (mapcar #'string-trim-right (split-string text "\n"))))
+         (tmux-control--auto-frame-start auto)
+         (out (tmux-control--compact-repeated-redraw-lines text))
+         (lines (split-string out "\n")))
+    ;; A marker is found despite the volatile line right after it.
+    (should auto)
+    ;; The repeated panel body survives exactly once...
+    (should (= 1 (length (seq-filter (lambda (l) (equal l "  Claude Code")) lines))))
+    ;; ...while every per-frame token line is preserved.
+    (dolist (n '(100 200 300 400))
+      (should (member (format "  tokens: %d" n) lines)))))
+
+(ert-deftest tmux-control-test-auto-compaction-skips-subthreshold-frequent-line ()
+  ;; The most frequent candidate is not blindly accepted.  A small panel whose
+  ;; shared body is below the redraw-run threshold recurs more often than a
+  ;; larger one, but cannot anchor compaction; the detector must fall through
+  ;; to the larger panel that genuinely repaints.  (Regression: detection used
+  ;; to commit to the single most frequent line and give up if it failed.)
+  (let* ((tmux-control-compact-scrollback-window 300)
+         (tmux-control-scrollback-frame-start-regexp nil)
+         (tmux-control-scrollback-chrome-regexps nil)
+         (small (concat "== small ==\n  s-a\n  s-b\n  uniq-%d\n"))      ; shared body 3 lines (< 6)
+         (big (concat "[ big panel ]\n  b-1\n  b-2\n  b-3\n  b-4\n"
+                      "  b-5\n  b-6\n  count %d\n"))                     ; shared body 7 lines
+         (text (concat (format small 1) (format small 2) (format small 3)
+                       (format small 4) (format small 5)
+                       (format big 1) (format big 2) (format big 3) (format big 4)))
+         (auto (tmux-control--auto-frame-start-line
+                (mapcar #'string-trim-right (split-string text "\n"))))
+         (tmux-control--auto-frame-start auto)
+         (out (tmux-control--compact-repeated-redraw-lines text))
+         (lines (split-string out "\n")))
+    (should auto)
+    ;; The big panel body collapsed to a single copy...
+    (should (= 1 (length (seq-filter (lambda (l) (equal l "  b-3")) lines))))
+    ;; ...its per-frame counts are kept...
+    (dolist (n '(1 2 3 4))
+      (should (member (format "  count %d" n) lines)))
+    ;; ...and the sub-threshold small panel is left intact (all 5 uniq lines).
+    (dolist (n '(1 2 3 4 5))
+      (should (member (format "  uniq-%d" n) lines)))))
+
 ;;; Live-state decision logic (pure predicates extracted from the
 ;;; side-effecting wheel/alt-screen code, so the truth tables can be
 ;;; exhaustively tested without a live tmux server or Eat terminal).
