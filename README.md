@@ -12,18 +12,20 @@ agent team in split panes — rendered by iTerm2's native tmux integration
 [experimental](#tiling-every-pane-at-once-experimental); the shipped client
 mirrors one pane at a time.*
 
-Unlike running tmux inside a terminal buffer (`vterm`, `eat`, `ansi-term`),
-where the session dies with the Emacs frame, `tmux-control` speaks tmux
-control mode (`tmux -C`) to a **persistent, possibly remote** tmux server
-over SSH and renders the live pane through [Eat](https://codeberg.org/akib/emacs-eat).
-The tmux session outlives Emacs: detach, restart, or reconnect from another
-machine and the pane is still there. Eat handles rendering, input,
-scrollback, search, and copy.
+Other ways to drive tmux from Emacs either **send it commands**
+([`emamux`](https://github.com/emacsorphanage/emamux)) or run tmux **inside a
+terminal buffer** (`vterm`, `eat`, `ansi-term`) — a terminal in a terminal,
+with tmux's own status bar and prefix keys.  `tmux-control` instead speaks
+tmux's **control-mode protocol** (`tmux -C`, the same one iTerm2's native
+integration uses): each live pane becomes its own Emacs buffer, rendered
+through [Eat](https://codeberg.org/akib/emacs-eat) — no nested terminal, no
+tmux chrome, just a buffer you navigate, search, and copy from.  The session
+lives on a **persistent, possibly remote** server and outlives Emacs: detach,
+restart, or reconnect from another machine and the pane is still there.
 
-The single-pane client is stable and in daily use; the multi-pane **tiling**
-view (rendering every pane at once) is still
-[experimental](#tiling-every-pane-at-once-experimental).  See
-[Status](#status) for details.
+The single-pane client is stable and in daily use; multi-pane **tiling** is
+still [experimental](#tiling-every-pane-at-once-experimental) (see
+[Status](#status)).
 
 ## Usage
 
@@ -50,27 +52,12 @@ creates that session (tmux attaches if it exists, otherwise creates it).
 
 These commands act on the connected session (no key bindings by default):
 
-- `M-x tmux-control-select-window` switches the live view to another window
-  in the session.  By default it opens a two-pane chooser with a live
-  preview of the highlighted window's screen (like tmux's `choose-tree`
-  menu): move with the arrow keys, `n`/`p`, or the mouse; press `RET` (or
-  click) to select; and `q` or `C-g` to cancel.  The chooser opens on the
-  session's currently active window, so the preview immediately shows where
-  you are.  The preview is captured on
-  demand with a short idle debounce and cached per window for the chooser's
-  lifetime.  The chooser's own keys take precedence over modal-editing
-  packages such as `xah-fly-keys` or `evil`.  Disable the chooser to fall
-  back to plain completion with:
-
-  ```elisp
-  (setq tmux-control-window-preview nil)
-  ```
-
-  Tune the preview debounce (seconds of idle before capturing) with:
-
-  ```elisp
-  (setq tmux-control-window-preview-delay 0.15)
-  ```
+- `M-x tmux-control-select-window` switches the live view to another window.
+  By default it opens a two-pane chooser with a live preview of the
+  highlighted window (like tmux's `choose-tree`): move with the arrow keys,
+  `n`/`p`, or the mouse, `RET` or click to select, `q`/`C-g` to cancel.  Its
+  keys take precedence over modal packages (`xah-fly-keys`, `evil`).  Fall back
+  to plain completion with `(setq tmux-control-window-preview nil)`.
 - `C-c C-n` (`tmux-control-next-window`) and `C-c C-p`
   (`tmux-control-previous-window`) flip to the next or previous window in the
   session, wrapping around — like a terminal's next/previous-tab keys, with no
@@ -179,28 +166,16 @@ Useful bindings:
 - `C-c C-k` disconnects the Emacs control client.
 - `C-c C-l` refreshes the live view from tmux's current visible screen without
   sending input to the pane.
-- `C-c C-e` switches the current buffer into a normal Emacs scrollback view
-  captured from tmux.  In that view, use normal Emacs movement/search/copy,
-  `g` to refresh, and `q`, `RET`, `C-c C-e`, or
-  `M-x eat-semi-char-mode` to return to the live pane.
-- In the scrollback view, simply typing an ordinary character also returns to
-  the live pane and forwards that keystroke to it, so you can start your next
-  command without an explicit exit step.  (Modal-editing users, e.g.
-  `xah-fly-keys`: this only fires for self-inserting keys, so command-mode
-  navigation in the read-only scrollback buffer is preserved.)
-- Scrolling up with the mouse wheel also enters the scrollback view, but only
-  while the pane shows its normal screen.  When a full-screen application
-  genuinely owns the alternate screen (e.g. `vim` or `less` under a tmux that
-  honors `alternate-screen`), the wheel is forwarded to that application so it
-  keeps its own mouse scrolling.  Note that with `alternate-screen off` (a
-  common setting that preserves scrollback for TUIs), tmux keeps even
-  full-screen apps on the normal screen, so the wheel correctly opens the
-  scrollback view for them too -- matching tmux's own wheel-up behavior.
-  Disable this with:
-
-  ```elisp
-  (setq tmux-control-wheel-enters-scrollback nil)
-  ```
+- `C-c C-e` opens a normal Emacs scrollback view of the pane (movement/search/
+  copy, `g` to refresh, `q`/`RET`/`C-c C-e` to return).  Typing an ordinary
+  character also returns to the live pane and forwards that key, so you can
+  just start your next command.  (For modal users this fires only on
+  self-inserting keys, so command-mode navigation in the read-only buffer is
+  preserved.)
+- Scrolling up with the mouse wheel also enters the scrollback view (while the
+  pane shows its normal screen); a full-screen app that genuinely owns the
+  alternate screen keeps its own wheel scrolling instead.  Disable with
+  `(setq tmux-control-wheel-enters-scrollback nil)`.
 
 Line numbers are disabled locally in live and scrollback buffers.
 
@@ -266,27 +241,21 @@ For an upper bound on that, enable tmux's control-mode flow control:
 ```
 
 When the output buffered for this client falls more than that many seconds
-behind, tmux pauses the pane and notifies the client, which reseeds from the
-pane's current screen and resumes — so the view jumps to the latest state
-instead of replaying the whole backlog.  It engages only when the client
-genuinely can't keep up with the stream, which in practice means a
-**low-bandwidth** link — Emacs reads the control socket eagerly, so a client
-with enough throughput keeps up and never triggers it.  That includes a fast
-local client and, in testing, even a high-latency remote SSH connection with
-ample bandwidth: latency alone does not trigger pause mode, only a starved
-pipe does.  Off by default; requires tmux 3.2 or newer.
+behind, tmux pauses the pane; the client reseeds from the current screen and
+resumes, so the view jumps to the latest state instead of replaying the
+backlog.  It engages only on a genuinely **low-bandwidth** link — Emacs reads
+the socket eagerly, so a fast client (even a high-latency-but-fat-pipe SSH one)
+keeps up and never triggers it.  Off by default; needs tmux 3.2+.
 
 ## Status
 
-The single-pane client is stable.  It can attach to tmux, seed the live
-terminal from `capture-pane` (cursor included), open a same-buffer Emacs
-scrollback view that automatically compacts repeated TUI redraws, render live
-`%output` through Eat in batches, send keyboard input back with `send-keys -H`
-(chunking large pastes), resize the tmux client, and optionally use tmux flow
-control (pause mode) for very high-volume output.  Windows are navigated like
-tabs — next/previous/last switching and a clickable header-line **tab bar**
-that flags background windows with unseen output.  Mouse handling and broader
-edge-case hardening still need work.
+The single-pane client is stable: it attaches to a tmux session (local or
+remote over SSH), seeds the live screen from `capture-pane`, streams `%output`
+through Eat, sends input with `send-keys -H`, resizes the client, navigates
+windows like tabs (with the activity-flagging tab bar), opens an Emacs
+scrollback view that auto-compacts repeated TUI redraws, and can use tmux flow
+control for very high-volume output.  Mouse handling and broader edge-case
+hardening still need work.
 
 The **multi-pane tiling** view (`C-c C-t`, see
 [Tiling every pane at once](#tiling-every-pane-at-once-experimental)) renders
@@ -312,14 +281,11 @@ elsewhere:
 make test EAT_DIR=/path/to/eat
 ```
 
-There is also a **live integration suite** that asserts render fidelity —
-that the text tmux-control paints into an Eat buffer matches tmux's own
-`capture-pane` for the same screen, for the connect-time seed and the live
-`%output` stream, across plain text, colors, UTF-8 box-drawing, wide lines,
-and double-width CJK/emoji glyphs; it also covers window navigation
-(next/previous/last switching with reseed) and the tab bar's activity
-flagging.  It needs a real tmux on `PATH` (it uses a dedicated `tc-ert-test`
-socket and never touches other servers; tests skip where tmux is absent):
+A **live integration suite** asserts render fidelity — that what tmux-control
+paints into Eat matches tmux's own `capture-pane`, across plain text, colors,
+UTF-8 box-drawing, wide/CJK/emoji glyphs, the live `%output` stream, window
+switching, and the tab bar's activity flags.  It needs a real tmux on `PATH`
+(a dedicated `tc-ert-test` socket; skipped where tmux is absent):
 
 ```sh
 make test-integration
