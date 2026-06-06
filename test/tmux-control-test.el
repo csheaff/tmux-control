@@ -1111,5 +1111,40 @@ each wrapped in an evolving prompt line and a status bar.")
         (should (null made))
         (should (null tmux-control--panes))))))
 
+(ert-deftest tmux-control-test-cycle-session-wraps ()
+  ;; next/previous-session step through the host/socket's sessions in tmux's
+  ;; list order, wrapping at the ends, routing the target through
+  ;; --connect-or-switch (reuse-or-connect).
+  (with-temp-buffer
+    (setq-local tmux-control--host nil)
+    (setq-local tmux-control--socket-name "s")
+    (setq-local tmux-control--session "b")
+    (let ((switched nil))
+      (cl-letf (((symbol-function 'tmux-control--list-sessions)
+                 (lambda (_host _socket) '("a" "b" "c")))
+                ((symbol-function 'tmux-control--connect-or-switch)
+                 (lambda (_host _socket session) (setq switched session))))
+        (tmux-control-next-session)       (should (equal switched "c"))
+        (tmux-control-previous-session)   (should (equal switched "a"))
+        (setq-local tmux-control--session "c")
+        (tmux-control-next-session)       (should (equal switched "a"))   ; wrap fwd
+        (setq-local tmux-control--session "a")
+        (tmux-control-previous-session)   (should (equal switched "c")))))) ; wrap back
+
+(ert-deftest tmux-control-test-cycle-session-single-is-noop ()
+  ;; With only the current session present, cycling does nothing.
+  (with-temp-buffer
+    (setq-local tmux-control--host nil)
+    (setq-local tmux-control--socket-name "s")
+    (setq-local tmux-control--session "only")
+    (let ((switched nil))
+      (cl-letf (((symbol-function 'tmux-control--list-sessions)
+                 (lambda (_host _socket) '("only")))
+                ((symbol-function 'tmux-control--connect-or-switch)
+                 (lambda (&rest _) (setq switched t)))
+                ((symbol-function 'tmux-control--message) #'ignore))
+        (tmux-control-next-session)
+        (should-not switched)))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

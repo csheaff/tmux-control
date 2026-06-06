@@ -58,6 +58,8 @@ attaches, typing a new name creates it.
   terminal and no tmux chrome.
 - **Windows as tabs** in a header-line tab bar, with an activity **dot** on
   background windows; flip them like browser tabs (`C-c C-n` / `C-c C-p`).
+- **Switch between sessions** on the host in place (`C-c C-s`) — each tmux
+  session is its own buffer with its own scrollback and tabs.
 - **Scrollback** as ordinary Emacs text (`C-c C-e`), auto-collapsing repeated
   full-screen redraws.
 - **Tiled view** (`C-c C-t`, experimental) — every pane of a window at once,

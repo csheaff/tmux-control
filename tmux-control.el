@@ -317,6 +317,7 @@ kills, which are deliberate.")
     (define-key map (kbd "C-c C-t") #'tmux-control-toggle-tiling)
     (define-key map (kbd "C-c C-n") #'tmux-control-next-window)
     (define-key map (kbd "C-c C-p") #'tmux-control-previous-window)
+    (define-key map (kbd "C-c C-s") #'tmux-control-select-session)
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
     map)
   "High-precedence keymap for tmux-control buffers.")
@@ -353,6 +354,7 @@ resulting prompt/redraw burst in every pane does not flag every window.")
     (define-key map (kbd "C-c C-t") #'tmux-control-toggle-tiling)
     (define-key map (kbd "C-c C-n") #'tmux-control-next-window)
     (define-key map (kbd "C-c C-p") #'tmux-control-previous-window)
+    (define-key map (kbd "C-c C-s") #'tmux-control-select-session)
     ;; Route every "paste" gesture to the terminal.  Eat's own map covers
     ;; C-y, M-y, S-insert and mouse yank, but a GUI/macOS paste -- `s-v'
     ;; (Cmd-V), the `[paste]' event, the Edit > Paste menu -- stays bound to
@@ -518,6 +520,80 @@ session (tmux attaches if it exists, otherwise creates it)."
          (format "refresh-client -f pause-after=%d" tmux-control-pause-after)))
       (tmux-control--disable-line-numbers))
     buffer))
+
+(defun tmux-control--session-live-buffer (host session)
+  "Return the live tmux-control buffer already showing HOST/SESSION, or nil.
+Mirrors `tmux-control-connect's buffer naming so a session that is already
+connected is reused instead of respawned."
+  (let* ((local (or (null host) (string-empty-p host)))
+         (buffer (get-buffer (format "*tmux-control:%s:%s*"
+                                     (if local "local" host) session))))
+    (when (and buffer
+               (buffer-live-p buffer)
+               (process-live-p (buffer-local-value 'tmux-control--process buffer)))
+      buffer)))
+
+(defun tmux-control--connect-or-switch (host socket-name session)
+  "Show SESSION on HOST/SOCKET-NAME, reusing a live connection if there is one.
+Each tmux session is its own tmux-control buffer with its own control
+connection (so each keeps its scrollback and tab-bar state); switching means
+showing that buffer, or connecting it the first time.
+
+The view switches *in place*: the target replaces the current session in the
+selected window (like flipping a terminal tab) instead of splitting the frame,
+even when `tmux-control-connect' would otherwise pop a new window."
+  (let ((buffer (tmux-control--session-live-buffer host session))
+        (display-buffer-overriding-action '((display-buffer-same-window))))
+    (if buffer
+        (pop-to-buffer buffer)
+      (tmux-control-connect host socket-name session))))
+
+;;;###autoload
+(defun tmux-control-select-session ()
+  "Switch the view to another tmux session on the same host and socket.
+Completes over the sessions that currently exist there; an existing
+connection is reused, otherwise the session is connected.  Bound to
+\\`C-c C-s'.  See also `tmux-control-next-session'."
+  (interactive)
+  (unless tmux-control--session
+    (user-error "Not in a tmux-control session buffer"))
+  (let* ((host tmux-control--host)
+         (socket tmux-control--socket-name)
+         (sessions (tmux-control--list-sessions host socket))
+         (choice (completing-read
+                  (format "Session (current: %s): " tmux-control--session)
+                  sessions nil nil)))
+    (when (and choice (not (string-empty-p choice)))
+      (tmux-control--connect-or-switch host socket choice))))
+
+(defun tmux-control--cycle-session (delta)
+  "Switch to the session DELTA steps from the current one (wrapping).
+Cycles over the sessions that exist on this buffer's host and socket, in
+tmux's own list order, connecting the target on demand."
+  (unless tmux-control--session
+    (user-error "Not in a tmux-control session buffer"))
+  (let* ((host tmux-control--host)
+         (socket tmux-control--socket-name)
+         (sessions (tmux-control--list-sessions host socket)))
+    (cond
+     ((null sessions) (tmux-control--message "No sessions to switch to"))
+     ((not (cdr sessions)) (tmux-control--message "Only one session"))
+     (t (let* ((n (length sessions))
+               (cur (or (cl-position tmux-control--session sessions :test #'equal) 0))
+               (next (nth (mod (+ cur delta) n) sessions)))
+          (tmux-control--connect-or-switch host socket next))))))
+
+;;;###autoload
+(defun tmux-control-next-session ()
+  "Switch to the next tmux session on this host/socket, wrapping around."
+  (interactive)
+  (tmux-control--cycle-session 1))
+
+;;;###autoload
+(defun tmux-control-previous-session ()
+  "Switch to the previous tmux session on this host/socket, wrapping around."
+  (interactive)
+  (tmux-control--cycle-session -1))
 
 (defun tmux-control-disconnect ()
   "Disconnect the current tmux-control client."
