@@ -737,6 +737,38 @@ before flocking (see `tmux-control-flock')."
       (tmux-control-unflock)
     (tmux-control-flock connect-all)))
 
+(defun tmux-control--sessions-frame ()
+  "Return the dedicated sessions frame, creating it if there isn't one.
+The caller raises and focuses it (see `tmux-control-flock-other-frame')."
+  (let ((frame (seq-find (lambda (fr) (frame-parameter fr 'tmux-control-sessions-frame))
+                         (frame-list))))
+    (if (frame-live-p frame)
+        frame
+      (make-frame '((name . "tmux-control — sessions")
+                    (tmux-control-sessions-frame . t))))))
+
+;;;###autoload
+(defun tmux-control-flock-other-frame (&optional connect-all)
+  "Flock every connected session in a separate, reusable frame.
+Creates (or raises) a dedicated \"sessions\" frame and runs
+`tmux-control-flock' there, so you can watch every session beside your code
+\(or on another monitor) instead of giving the current frame to the grid --
+the flock devotes a whole frame, so a second frame is the clean way to keep
+a code buffer in view.  Re-run it to refresh and raise that frame.
+
+\(A single session needs none of this: the single-pane view is just a buffer,
+so put one beside your code with an ordinary window split or `C-x 5 b'.)
+
+With a prefix argument CONNECT-ALL, connect every session on this buffer's
+host/socket first (run it from a session buffer so the host is known)."
+  (interactive "P")
+  ;; Connect-all needs this buffer's host/socket, so do it before leaving for
+  ;; the (buffer-agnostic) sessions frame.
+  (when connect-all
+    (tmux-control--connect-all-sessions))
+  (select-frame-set-input-focus (tmux-control--sessions-frame))
+  (tmux-control-flock))
+
 (defun tmux-control-disconnect ()
   "Disconnect the current tmux-control client."
   (interactive)

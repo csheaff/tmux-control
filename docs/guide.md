@@ -105,6 +105,22 @@ Like the tiled view it takes the **whole frame** and resizes each session to
 its cell, so a session also attached elsewhere (another client) follows tmux's
 `window-size` rule.  Experimental.
 
+#### Watching the flock beside your code
+
+Because the flock owns a whole frame, the clean way to keep a **code buffer in
+view at the same time** is a second Emacs *frame* (a separate OS window — put it
+on another monitor if you have one).  `M-x tmux-control-flock-other-frame`
+creates (or raises) a dedicated *“sessions”* frame and flocks there, leaving
+your current frame on your code; re-run it to refresh and raise that frame
+(`C-u` connects the whole host first, as above).  The flock and its on/off
+state are per-frame, so the two never interfere.
+
+A *single* session needs none of this — the single-pane view is just a buffer,
+so put one next to your code with an ordinary `C-x 3` split or pop it to its own
+frame with `C-x 5 b`.  And the activity dot is frame-aware: a session is flagged
+only when it is not visible on *any* frame, so a sessions frame you can see
+won’t throw false dots, and one you’ve hidden will.
+
 ### The window tab bar
 
 In the single-pane view, a **tab bar** in the header line lists the session's
