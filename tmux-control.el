@@ -98,8 +98,9 @@ A TUI that repaints by reprinting its whole screen -- common under tmux with
 in pane history.  When enabled (the default), tmux-control auto-detects the
 repeated frame and collapses it to a single copy plus whatever changed between
 repaints, so scrolling back shows the progression instead of dozens of copies.
-The collapse is conservative: it acts only when it actually finds a repeating
-frame, so ordinary command output is left untouched.
+The collapse is conservative: with no repeating frame it changes nothing, so a
+session without a repainting TUI is shown verbatim.  Collapsing a repeat does
+trim trailing whitespace from the surrounding lines.
 
 For a specific TUI you can override the auto-detected frame boundary and drop
 volatile per-frame lines with `tmux-control-scrollback-frame-start-regexp' and
@@ -1323,6 +1324,12 @@ Bound dynamically during compaction when no
 `tmux-control-scrollback-frame-start-regexp' is configured, so
 `tmux-control--scrollback-frame-start-line-p' can split frames generically.")
 
+(defconst tmux-control--auto-frame-scan-lines 4000
+  "Auto frame-top detection scans only the last this-many captured lines.
+A repainting TUI's frames are recent and recur every frame-height, so a bounded
+tail is enough to find the marker -- and it caps the cost of deciding \"no
+repeating frame\" on a long (up to `tmux-control-scrollback-lines') history.")
+
 (defun tmux-control--prepare-scrollback-text (text)
   "Prepare captured pane TEXT for the scrollback buffer.
 Compaction runs when enabled and a frame marker is available -- either a
@@ -1334,7 +1341,9 @@ shown verbatim, colors and trailing backgrounds intact."
          (auto (and tmux-control-compact-scrollback
                     (not tmux-control-scrollback-frame-start-regexp)
                     (tmux-control--auto-frame-start-line
-                     (mapcar #'string-trim-right (split-string text "\n"))))))
+                     (mapcar #'string-trim-right
+                             (last (split-string text "\n")
+                                   tmux-control--auto-frame-scan-lines))))))
     (tmux-control--trim-trailing-blank-lines
      (if (and tmux-control-compact-scrollback
               (or tmux-control-scrollback-frame-start-regexp auto))

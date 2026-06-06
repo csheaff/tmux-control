@@ -205,9 +205,10 @@ otherwise show the same screen many times over.
 `tmux-control` collapses those repeats **automatically**: it detects the
 repeated frame in the captured history and shows it once, followed by whatever
 changed between repaints (a spinner, a token count, an evolving prompt), so you
-see the progression instead of dozens of copies.  It is conservative — it acts
-only when it actually finds a repeating frame, so ordinary command output is
-left verbatim.  Turn it off with:
+see the progression instead of dozens of copies.  It is conservative — with no
+repeating frame the text is left untouched (plain scrollback is verbatim);
+collapsing a repeat trims trailing whitespace from the surrounding lines.  Turn
+it off with:
 
 ```elisp
 (setq tmux-control-compact-scrollback nil)
