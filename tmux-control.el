@@ -849,10 +849,12 @@ path costs nothing then, and during the quiet period after a full repaint
         (tmux-control--do-select-window index)))
     map))
 
-(defun tmux-control--window-tab-bar ()
+(defun tmux-control--window-tab-bar (&optional no-keymap)
   "Return the header-line string of the session's windows as tabs.
 Empty in a tiled view (each pane already carries its own mode-line label) and
-before the first window list arrives."
+before the first window list arrives.  With NO-KEYMAP the tabs are not
+clickable -- used for the read-only scrollback header, which renders the live
+buffer's tabs purely for orientation."
   (if (or tmux-control--tiled (null tmux-control--windows))
       ""
     (mapconcat
@@ -868,14 +870,38 @@ before the first window list arrives."
                           (t "")))
               (face (cond (active 'tmux-control-tab-active)
                           (busy 'tmux-control-tab-activity)
-                          (t 'tmux-control-tab-inactive))))
-         (propertize (format " %s:%s%s " idx name mark)
-                     'face face
-                     'mouse-face 'highlight
-                     'help-echo (format "Switch to tmux window %s (%s)" idx name)
-                     'keymap (tmux-control--tab-keymap idx))))
+                          (t 'tmux-control-tab-inactive)))
+              (tab (propertize (format " %s:%s%s " idx name mark)
+                               'face face
+                               'mouse-face 'highlight
+                               'help-echo (format "Switch to tmux window %s (%s)"
+                                                  idx name))))
+         (unless no-keymap
+           (put-text-property 0 (length tab) 'keymap
+                              (tmux-control--tab-keymap idx) tab))
+         tab))
      tmux-control--windows
      "")))
+
+(defun tmux-control--scrollback-header ()
+  "Header line for the scrollback view.
+Keeps the session's window tabs visible (read from the live buffer, for
+orientation) and appends a scroll-mode hint, so entering scrollback does not
+look like the tabs vanished.  Falls back to a plain info line when the tab bar
+is disabled or no live buffer is available."
+  (let* ((live tmux-control--live-buffer)
+         (tabs (and tmux-control-window-tab-bar
+                    (buffer-live-p live)
+                    (with-current-buffer live
+                      (tmux-control--window-tab-bar t)))))
+    (if (and tabs (> (length tabs) 0))
+        (concat tabs (propertize "  ⇡ scrollback  g:refresh  q/RET:live "
+                                 'face 'tmux-control-tab-inactive))
+      (format " %s socket:%s session:%s target:%s    g:refresh  q/l/RET:live"
+              (or tmux-control--host "local")
+              tmux-control--socket-name
+              tmux-control--session
+              tmux-control--scrollback-target))))
 
 (defun tmux-control-other-pane ()
   "Switch the live view to the next pane in the current window.
@@ -944,12 +970,11 @@ Use `tmux-control-live' to return to the live interactive pane."
         (setq-local tmux-control--scrollback-target target)
         (setq-local tmux-control--capture-trailing-p trailing)
         (setq-local tmux-control--live-buffer live-buffer)
-        (setq-local header-line-format
-                    (format " %s socket:%s session:%s target:%s    g:refresh  q/l/RET:live"
-                            (or host "local")
-                            socket-name
-                            session
-                            target))
+        ;; Keep the window tabs visible and show a clear box cursor, so entering
+        ;; scrollback does not feel like the tabs and the cursor vanished -- the
+        ;; frame's default cursor can be a faint bar next to the live box.
+        (setq-local cursor-type 'box)
+        (setq-local header-line-format '(:eval (tmux-control--scrollback-header)))
         (goto-char (point-max))))
     (switch-to-buffer scrollback-buffer)
     (when-let* ((window (get-buffer-window scrollback-buffer)))

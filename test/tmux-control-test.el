@@ -808,7 +808,12 @@ each wrapped in an evolving prompt line and a status bar.")
       (should (eq (get-text-property (string-match "1:beta" bar) 'face bar)
                   'tmux-control-tab-inactive))
       (should (eq (get-text-property (string-match "2:gamma" bar) 'face bar)
-                  'tmux-control-tab-activity)))
+                  'tmux-control-tab-activity))
+      ;; Tabs are clickable by default; NO-KEYMAP makes them inert (scrollback).
+      (should (get-text-property (string-match "0:alpha" bar) 'keymap bar))
+      (let ((plain (tmux-control--window-tab-bar t)))
+        (should-not (get-text-property (string-match "0:alpha" plain)
+                                       'keymap plain))))
     (setq-local tmux-control--tiled t)
     (should (equal (tmux-control--window-tab-bar) ""))))
 
