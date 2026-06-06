@@ -768,5 +768,81 @@ each wrapped in an evolving prompt line and a status bar.")
   (should (null (tmux-control--parse-layout "bf3a,80x24,0,0{40x24,0,0,1")))
   (should (null (tmux-control--parse-layout "bf3a,not-a-layout"))))
 
+;;; Window tab bar.
+
+(ert-deftest tmux-control-test-update-windows-parses-and-sorts ()
+  ;; Reply lines may arrive in any order (the filter collects command output in
+  ;; reverse); the parsed list is sorted by index, the active window becomes
+  ;; current, and that window's stale activity marker is cleared.
+  (with-temp-buffer
+    (setq-local tmux-control--activity (make-hash-table :test 'equal))
+    (puthash "2" t tmux-control--activity)
+    (tmux-control--update-windows
+     '("2\tgamma\t1\t0" "0\talpha\t0\t0" "1\tbeta\t0\t1"))
+    (should (equal (mapcar (lambda (w) (plist-get w :index)) tmux-control--windows)
+                   '("0" "1" "2")))
+    (should (equal (mapcar (lambda (w) (plist-get w :name)) tmux-control--windows)
+                   '("alpha" "beta" "gamma")))
+    (should (equal tmux-control--current-window "2"))
+    (should-not (gethash "2" tmux-control--activity))
+    (should (plist-get (nth 2 tmux-control--windows) :active))
+    (should (plist-get (nth 1 tmux-control--windows) :bell))))
+
+(ert-deftest tmux-control-test-window-tab-bar-renders ()
+  ;; The bar shows every window, marks the busy one, and faces each tab by
+  ;; state; a tiled view shows no bar.
+  (with-temp-buffer
+    (setq-local tmux-control--tiled nil)
+    (setq-local tmux-control--windows
+                '((:index "0" :name "alpha" :active t :bell nil)
+                  (:index "1" :name "beta" :active nil :bell nil)
+                  (:index "2" :name "gamma" :active nil :bell nil)))
+    (setq-local tmux-control--activity (make-hash-table :test 'equal))
+    (puthash "2" t tmux-control--activity)
+    (let ((bar (tmux-control--window-tab-bar)))
+      (should (string-match-p "0:alpha" bar))
+      (should (string-match-p "1:beta" bar))
+      (should (string-match-p "2:gamma ●" bar))
+      (should (eq (get-text-property (string-match "0:alpha" bar) 'face bar)
+                  'tmux-control-tab-active))
+      (should (eq (get-text-property (string-match "1:beta" bar) 'face bar)
+                  'tmux-control-tab-inactive))
+      (should (eq (get-text-property (string-match "2:gamma" bar) 'face bar)
+                  'tmux-control-tab-activity))
+      ;; Tabs are clickable by default; NO-KEYMAP makes them inert (scrollback).
+      (should (get-text-property (string-match "0:alpha" bar) 'keymap bar))
+      (let ((plain (tmux-control--window-tab-bar t)))
+        (should-not (get-text-property (string-match "0:alpha" plain)
+                                       'keymap plain))))
+    (setq-local tmux-control--tiled t)
+    (should (equal (tmux-control--window-tab-bar) ""))))
+
+(ert-deftest tmux-control-test-note-pane-activity ()
+  ;; Output in a background window flags it; output in the current window, or
+  ;; during the post-repaint quiet period, does not.
+  (with-temp-buffer
+    (setq-local tmux-control--tiled nil)
+    (setq-local tmux-control--current-window "0")
+    (setq-local tmux-control--activity (make-hash-table :test 'equal))
+    (setq-local tmux-control--pane-window (make-hash-table :test 'equal))
+    (puthash "%0" "0" tmux-control--pane-window)
+    (puthash "%1" "1" tmux-control--pane-window)
+    (setq-local tmux-control--activity-quiet-until 0)
+    (let ((tmux-control-window-tab-bar t))
+      (tmux-control--note-pane-activity "%0")
+      (should-not (gethash "0" tmux-control--activity))
+      (tmux-control--note-pane-activity "%1")
+      (should (gethash "1" tmux-control--activity))
+      (clrhash tmux-control--activity)
+      (setq-local tmux-control--activity-quiet-until (+ (float-time) 100))
+      (tmux-control--note-pane-activity "%1")
+      (should-not (gethash "1" tmux-control--activity)))
+    ;; With the tab bar disabled the hot path is a no-op (its only consumer).
+    (let ((tmux-control-window-tab-bar nil))
+      (clrhash tmux-control--activity)
+      (setq-local tmux-control--activity-quiet-until 0)
+      (tmux-control--note-pane-activity "%1")
+      (should-not (gethash "1" tmux-control--activity)))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

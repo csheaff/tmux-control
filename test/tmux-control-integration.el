@@ -344,5 +344,73 @@ A coordinate-only match silently fails there; matching by id does not."
           (should (member (concat "%" (plist-get leaf :id)) pane-ids))))
     (tmux-control-it--tmux-ok "kill-server")))
 
+;;; Window navigation: next/previous/last switch the live view to the right
+;;; window and reseed its screen.
+
+(ert-deftest tmux-control-it-window-switching ()
+  "next/previous/last-window change the session's active window in tmux order
+(with wraparound and last-window toggle) and the single-pane view reseeds onto
+the newly active window's screen."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-n" "w0" "-x" "80" "-y" "24")
+  (tmux-control-it--tmux "new-window" "-t" "t:" "-n" "w1")
+  (tmux-control-it--tmux "new-window" "-t" "t:" "-n" "w2")
+  ;; A distinct marker per window, so the reseed is checked -- not just tmux's
+  ;; active-window pointer.
+  (tmux-control-it--tmux "send-keys" "-t" "t:0" "echo WIN_ZERO" "Enter")
+  (tmux-control-it--tmux "send-keys" "-t" "t:1" "echo WIN_ONE" "Enter")
+  (tmux-control-it--tmux "send-keys" "-t" "t:2" "echo WIN_TWO" "Enter")
+  (let ((buf (tmux-control-connect nil tmux-control-it--socket "t")))
+    (cl-flet ((shows (mark)
+                (tmux-control-it--pump-until
+                 5 (lambda ()
+                     (cl-some (lambda (l) (string-match-p mark l))
+                              (tmux-control-it--buffer-visible buf 24))))))
+      (unwind-protect
+          (progn
+            (tmux-control-it--pump 1.5)
+            (should (shows "WIN_TWO"))                                ; w2 (last created)
+            (with-current-buffer buf (tmux-control-next-window))      ; 2 -> 0 (wrap)
+            (should (shows "WIN_ZERO"))
+            (with-current-buffer buf (tmux-control-next-window))      ; 0 -> 1
+            (should (shows "WIN_ONE"))
+            (with-current-buffer buf (tmux-control-previous-window))  ; 1 -> 0
+            (should (shows "WIN_ZERO"))
+            (with-current-buffer buf (tmux-control-last-window))      ; 0 <-> 1
+            (should (shows "WIN_ONE")))
+        (when (buffer-live-p buf)
+          (with-current-buffer buf (ignore-errors (tmux-control-disconnect)))
+          (kill-buffer buf))
+        (tmux-control-it--tmux-ok "kill-server")))))
+
+;;; Tab-bar activity: background output flags a window; visiting it clears it.
+
+(ert-deftest tmux-control-it-window-activity ()
+  "Output produced in a background window flags it in the tab bar's activity
+set, the current window is never flagged, and switching to a flagged window
+clears it."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-n" "w0" "-x" "80" "-y" "24")
+  (tmux-control-it--tmux "new-window" "-t" "t:" "-n" "w1")
+  (tmux-control-it--tmux "select-window" "-t" "t:0")   ; start on window 0
+  (let ((buf (tmux-control-connect nil tmux-control-it--socket "t")))
+    (unwind-protect
+        (with-current-buffer buf
+          (tmux-control-it--pump 2.0)                   ; past the connect quiet (1.5s)
+          (tmux-control-it--tmux "send-keys" "-t" "t:1" "echo ACT" "Enter")
+          (should (tmux-control-it--pump-until
+                   6 (lambda () (and (hash-table-p tmux-control--activity)
+                                     (gethash "1" tmux-control--activity)))))
+          (should-not (gethash "0" tmux-control--activity)) ; current window never flags
+          (tmux-control-next-window)                    ; 0 -> 1: arriving clears it
+          (should (tmux-control-it--pump-until
+                   6 (lambda () (not (gethash "1" tmux-control--activity))))))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf (ignore-errors (tmux-control-disconnect)))
+        (kill-buffer buf))
+      (tmux-control-it--tmux-ok "kill-server"))))
+
 (provide 'tmux-control-integration)
 ;;; tmux-control-integration.el ends here
