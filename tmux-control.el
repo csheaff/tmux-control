@@ -2105,7 +2105,14 @@ the matching pane's render buffer instead, so every pane updates at once."
       ;; mode reconcile the active pane's size and refresh the pane->window map
       ;; (panes came or went) for the tab bar's activity marker.
       (if tmux-control--tiled
-          (setq tmux-control--retile-pending t)
+          (progn
+            ;; Register any just-appeared pane NOW, from the layout this line
+            ;; carries, so its %output (which follows) streams in live from the
+            ;; first byte; the debounced re-tile then places it without seeding
+            ;; it (avoiding the split-into-a-screenful double-render).
+            (tmux-control--eager-register-new-panes
+             (current-buffer) (nth 2 (split-string line " ")))
+            (setq tmux-control--retile-pending t))
         (tmux-control--refresh-pane-size)
         (tmux-control--refresh-pane-window-map)))
      ((string-prefix-p "%session-window-changed " line)
@@ -2901,6 +2908,19 @@ that previously ran for every re-tile."
 (defvar-local tmux-control--pane-info nil
   "Plist of a tiled render buffer's tmux pane metadata, for its mode line.")
 
+(defvar-local tmux-control--pane-fed-live nil
+  "Non-nil in a tiled render buffer that was created the moment its pane
+appeared (a split), so its `%output' has streamed in from the pane's very
+first byte.  Set by `tmux-control--eager-register-new-panes' and honored by
+`tmux-control--build-tiling' to skip seeding such a pane from `capture-pane'
+on its INITIAL placement: the live stream already holds its whole content, so
+a capture seed would paint a second copy of the screenful a freshly-split
+pane often prints at once (a `cat', an agent's start-up banner).  The pane is
+still resized (Eat reflows) on that first placement.  build-tiling then clears
+this flag, so a LATER resize reseeds the pane normally -- by then it is
+quiescent, so the seed cannot race output, and a reseed keeps it cell-exact
+where Eat's own reflow could have drifted from tmux's grid.")
+
 (defun tmux-control--pane-mode-line ()
   "Return a concise mode-line string for a tiled pane render buffer.
 Leads with the pane id (so teammates in a split window are easy to tell
@@ -2993,6 +3013,41 @@ its own and routes commands through CONTROLLER."
       (tmux-control--disable-line-numbers)
       (tmux-control--disable-margins))
     buffer))
+
+(defun tmux-control--eager-register-new-panes (controller layout)
+  "Register render buffers for panes that are new in LAYOUT, fed live.
+LAYOUT is the window-layout string from a `%layout-change' (a split, a pane
+close).  A pane that just appeared has not been rendered yet; create its
+buffer NOW -- synchronously, from the layout already in hand, no CLI -- and
+add it to `tmux-control--panes' so its `%output' (which tmux sends strictly
+after this notification) streams straight in from the pane's first byte
+instead of being dropped for want of a buffer.  Mark it `fed-live' so the
+debounced `tmux-control--build-tiling' that follows does NOT also seed it from
+`capture-pane': the live stream is already the pane's whole content, and a
+seed would paint a second copy of the screenful a freshly-split pane often
+dumps at once.  A window SWITCH sends `%session-window-changed', not
+`%layout-change', so its pre-existing panes are not registered here and are
+still seeded normally."
+  (when (buffer-live-p controller)
+    (with-current-buffer controller
+      (when tmux-control--tiled
+        (let* ((tree (tmux-control--parse-layout layout))
+               (leaves (and tree (tmux-control--layout-leaves tree)))
+               (meta (list :host tmux-control--host
+                           :socket tmux-control--socket-name
+                           :session tmux-control--session
+                           :trailing tmux-control--capture-trailing-p
+                           :process tmux-control--process
+                           :fallback tmux-control--fallback-target)))
+          (dolist (leaf leaves)
+            (let ((pane (concat "%" (plist-get leaf :id))))
+              (unless (assoc pane tmux-control--panes)
+                (let ((buf (tmux-control--make-pane-buffer
+                            pane leaf controller meta)))
+                  (with-current-buffer buf
+                    (setq tmux-control--pane-fed-live t))
+                  (setq tmux-control--panes
+                        (cons (cons pane buf) tmux-control--panes)))))))))))
 
 (defun tmux-control--pane-buffer-killed ()
   "Recover a tiled pane buffer killed by the user, by scheduling a re-tile."
@@ -3237,8 +3292,20 @@ screen.  Safe to call repeatedly; a %layout-change routes here."
                                    (eat-term-live-p tmux-control--terminal))
                           (let ((sz (eat-term-size tmux-control--terminal)))
                             (unless (and sz (= (car sz) w) (= (cdr sz) h))
-                              (setq seed t)
-                              (eat-term-resize tmux-control--terminal w h)))))
+                              ;; A fed-live pane (registered the moment it
+                              ;; appeared) is not seeded on this first placement
+                              ;; -- its %output is streaming the whole content,
+                              ;; so a capture seed would double-paint.  Still
+                              ;; resize, so Eat reflows.
+                              (unless tmux-control--pane-fed-live
+                                (setq seed t))
+                              (eat-term-resize tmux-control--terminal w h))))
+                        ;; The fed-live skip is for the opening placement only.
+                        ;; Clear it now so a LATER resize reseeds normally: by
+                        ;; then the pane is quiescent (no seed/stream race), and
+                        ;; Eat's own reflow can drift from tmux's grid on a
+                        ;; shrink, so a capture seed keeps it cell-exact.
+                        (setq tmux-control--pane-fed-live nil))
                       (push (cons pane buf) new-panes)
                       (when seed (push buf to-seed))))))
               (setq new-panes (nreverse new-panes))

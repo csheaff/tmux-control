@@ -156,10 +156,6 @@ view):
   tile-within-a-region mode.
 - Switching windows while tiled rebuilds the new window's pane buffers, so a
   window's Emacs-side scrollback is not kept across a switch.
-- Splitting an already-tiled pane into a command that **immediately prints a
-  screenful** (a `cat`, an agent's start-up banner) can render that one pane's
-  first screen twice: the pane is both seeded from `capture-pane` and sent the
-  same content as live `%output`.  Other panes are unaffected.
 - A vertical stack spends one row on an Emacs mode line where tmux spends it on
   a pane border, so a stacked pane can sit one row short — but content is never
   clipped.
