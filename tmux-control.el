@@ -213,6 +213,26 @@ per-message decoding leaves the halves as raw bytes, so the trailing
 incomplete bytes are carried here and prepended to the next chunk by
 `tmux-control--feed-terminal'.")
 (defvar-local tmux-control--active-pane nil)
+(defvar-local tmux-control--self-reseed-pending 0
+  "Count of reseeds this client just initiated, awaiting their echoed events.
+Incremented by `tmux-control--refresh-active-pane' whenever tmux-control
+itself switches the active window (select-window, next/previous/last-window,
+new-window, kill-window) -- each such switch already reseeds, and tmux echoes
+back a `%session-window-changed' the handler must NOT reseed a second time.
+Each echoed event consumes one pending count, so several rapid self-switches
+are each matched (a single flag could only absorb one, misclassifying the
+rest as external and double-painting).  An *external* switch (another client,
+a tmux key binding, a script) increments nothing, so its event finds the
+count at zero and reseeds -- which is how the live view and scrollback follow
+external switches instead of stranding on the old pane.  Paired with
+`tmux-control--self-reseed-until' so a self-switch that yields no event (a
+no-op select, a background kill) cannot leave a count stuck and swallow a
+later external switch.")
+(defvar-local tmux-control--self-reseed-until 0
+  "Float-time deadline bounding `tmux-control--self-reseed-pending'.
+Refreshed alongside that counter.  Once it passes, any leftover pending count
+is treated as stale and cleared, so a self-initiated reseed that produced no
+`%session-window-changed' never permanently suppresses external switches.")
 (defvar-local tmux-control--fallback-target nil)
 (defvar-local tmux-control--host nil)
 (defvar-local tmux-control--socket-name nil)
@@ -577,9 +597,21 @@ running command, its title when that differs, and whether it is active."
   (unless (process-live-p tmux-control--process)
     (user-error "tmux-control process is not live")))
 
-(defun tmux-control--refresh-active-pane ()
-  "Re-query the session's active pane id, repaint the live view, and resize."
+(defun tmux-control--refresh-active-pane (&optional self-initiated)
+  "Re-query the session's active pane id, repaint the live view, and resize.
+SELF-INITIATED non-nil means this client is switching the active window
+itself; record one pending self-reseed so the `%session-window-changed' tmux
+echoes back for our own switch does not reseed a second time.  Counting
+\(rather than a single flag) lets several rapid self-switches each be matched
+to their own echoed event; the paired deadline bounds the count so a switch
+that yields no event cannot leave it stuck.  The deadline is generous enough
+to cover the notification round-trip even over SSH.  Called without
+SELF-INITIATED from that handler to follow an external switch, where
+recording a pending reseed would wrongly swallow the next external switch."
   (tmux-control--quiet-activity)
+  (when self-initiated
+    (setq tmux-control--self-reseed-pending (1+ tmux-control--self-reseed-pending)
+          tmux-control--self-reseed-until (+ (float-time) 1.0)))
   (tmux-control--send-command "display-message -p '#{pane_id}'" :pane-id)
   (tmux-control--resize-to-window))
 
@@ -672,7 +704,7 @@ to the new window's panes, so only the single-pane view reseeds here."
     (tmux-control--send-command
      (format "select-window -t %s:%s" tmux-control--session index))
     (unless ctrl
-      (tmux-control--refresh-active-pane))))
+      (tmux-control--refresh-active-pane t))))
 
 (defun tmux-control--switch-window (verb)
   "Switch the live view to another window via tmux command VERB.
@@ -693,7 +725,7 @@ window, so any other client attached to the session follows along."
     (tmux-control--send-command
      (format "%s -t %s" verb tmux-control--session))
     (unless ctrl
-      (tmux-control--refresh-active-pane))))
+      (tmux-control--refresh-active-pane t))))
 
 ;;;###autoload
 (defun tmux-control-next-window ()
@@ -732,7 +764,7 @@ With a NAME, give the new window that name."
    (concat (format "new-window -t %s:" tmux-control--session)
            (when (and name (not (string-empty-p name)))
              (concat " -n " (tmux-control--quote-tmux-arg name)))))
-  (tmux-control--refresh-active-pane))
+  (tmux-control--refresh-active-pane t))
 
 (defun tmux-control-kill-window (&optional index)
   "Kill window INDEX in the current tmux-control session.
@@ -748,7 +780,7 @@ window in the session ends the session and disconnects this client."
   (setq index (tmux-control--normalize-window-index index))
   (tmux-control--send-command
    (format "kill-window -t %s:%s" tmux-control--session index))
-  (tmux-control--refresh-active-pane))
+  (tmux-control--refresh-active-pane t))
 
 (defun tmux-control-rename-window (&optional index name)
   "Rename window INDEX in the current tmux-control session to NAME.
@@ -1663,9 +1695,15 @@ completion so the user is never stranded in a half-built chooser."
 
 (defun tmux-control--scrollback-chunks (text)
   "Split captured pane TEXT into likely TUI redraw chunks."
+  (tmux-control--scrollback-chunks-from-lines (split-string text "\n")))
+
+(defun tmux-control--scrollback-chunks-from-lines (lines)
+  "Split already-split LINES into likely TUI redraw chunks.
+Lets a caller that already holds the line list -- auto-detection trying each
+candidate marker in turn -- skip a join-then-resplit round trip over the
+whole (up to several-thousand-line) scrollback each time."
   (let (chunks current)
-    (dolist (line (mapcar #'string-trim-right
-                          (split-string text "\n")))
+    (dolist (line (mapcar #'string-trim-right lines))
       (when (and current
                  (tmux-control--scrollback-frame-start-line-p line))
         (push (nreverse current) chunks)
@@ -1704,16 +1742,25 @@ so a run of identical filler lines is not taken for frame boundaries.")
 
 (defun tmux-control--frames-share-redraw-body-p (lines marker)
   "Return non-nil when splitting LINES at MARKER yields adjacent frames that
-share a distinctive run -- evidence of a genuine repainting TUI rather than a
-coincidentally repeated line."
+share a distinctive redraw run -- evidence of a genuine repainting TUI rather
+than a coincidentally repeated line.  Mirrors what the merge step actually
+collapses: a shared run anywhere in the later frame, not only one starting at
+its top.  That matters when the capture begins mid-frame, leaving the marker
+just above a volatile line (a token counter, a clock) -- the shared body then
+sits below that line, and an only-at-the-top check would miss it and veto an
+otherwise perfect frame marker."
   (let* ((tmux-control--auto-frame-start marker)
          (tmux-control-scrollback-frame-start-regexp nil)
-         (chunks (tmux-control--scrollback-chunks (string-join lines "\n")))
+         ;; Chunk straight from LINES; auto-detection calls this once per
+         ;; candidate marker, so joining to a string and re-splitting it each
+         ;; time would be wasted O(n) work over the whole scrollback.
+         (chunks (tmux-control--scrollback-chunks-from-lines lines))
          (shared nil))
     (while (and (cdr chunks) (not shared))
       (let ((a (tmux-control--trim-blank-line-list (car chunks)))
             (b (tmux-control--trim-blank-line-list (cadr chunks))))
-        (when (and a b (tmux-control--seen-run-length a b 0 (length b)))
+        (when (and a b
+                   (< (length (tmux-control--strip-seen-runs a b)) (length b)))
           (setq shared t)))
       (setq chunks (cdr chunks)))
     shared))
@@ -1733,7 +1780,7 @@ the frames it delimits actually share a redrawn body."
         (unless (string-empty-p key)
           (push i (gethash key indices))))
       (setq i (1+ i)))
-    (let ((best nil) (best-count 0) (best-first most-positive-fixnum))
+    (let ((candidates nil))
       (maphash
        (lambda (key idxs)
          (let* ((idxs (nreverse idxs))
@@ -1741,13 +1788,27 @@ the frames it delimits actually share a redrawn body."
                 (first (car idxs)))
            (when (and (>= count tmux-control--auto-frame-min-occurrences)
                       (>= (length key) 3)
-                      (tmux-control--auto-frame-evenly-spread-p idxs)
-                      (or (> count best-count)
-                          (and (= count best-count) (< first best-first))))
-             (setq best key best-count count best-first first))))
+                      (tmux-control--auto-frame-evenly-spread-p idxs))
+             (push (list count first key) candidates))))
        indices)
-      (when (and best (tmux-control--frames-share-redraw-body-p lines best))
-        best))))
+      ;; Most frequent first, tie broken by earliest occurrence.  Accept the
+      ;; first candidate whose delimited frames actually share a redrawn body,
+      ;; rather than committing to the single most frequent line: when the
+      ;; capture starts mid-frame both frame edges recur equally often, and the
+      ;; tie-winner can be the edge sitting just above a volatile line whose
+      ;; body is unrecognisable -- the real frame top is one place down the
+      ;; list.  Also lets a mix of panels fall through to whichever genuinely
+      ;; repaints.
+      (setq candidates
+            (sort candidates
+                  (lambda (a b)
+                    (if (= (nth 0 a) (nth 0 b))
+                        (< (nth 1 a) (nth 1 b))
+                      (> (nth 0 a) (nth 0 b))))))
+      (cl-loop for cand in candidates
+               for key = (nth 2 cand)
+               when (tmux-control--frames-share-redraw-body-p lines key)
+               return key))))
 
 (defun tmux-control--strip-scrollback-chrome (lines)
   "Remove obvious TUI chrome from captured LINES."
@@ -2049,13 +2110,27 @@ the matching pane's render buffer instead, so every pane updates at once."
         (tmux-control--refresh-pane-window-map)))
      ((string-prefix-p "%session-window-changed " line)
       ;; The session's active window changed (switched here or by another
-      ;; client).  In tiling mode re-tile to the new window's panes; in
-      ;; single-pane mode the select-window commands already reseed, but
-      ;; refresh the tab bar so its highlight and unseen-output markers track
-      ;; the new current window.
+      ;; client).  In tiling mode re-tile to the new window's panes.  In
+      ;; single-pane mode always refresh the tab bar so its highlight and
+      ;; unseen-output markers track the new current window -- and reseed the
+      ;; live view onto the new window's active pane, UNLESS this client just
+      ;; initiated the switch itself (in which case `--refresh-active-pane'
+      ;; already reseeded; reseeding again would double-paint).  One pending
+      ;; count is consumed per self-switch so rapid successive ones are each
+      ;; absorbed; a passed deadline clears any stale count (a no-op select or
+      ;; a background kill arms a count but yields no event).  Following an
+      ;; *external* switch here keeps the live view -- and scrollback, which
+      ;; captures `--active-pane' -- on the window the tab bar shows, rather
+      ;; than stranding on the previous pane.
       (if tmux-control--tiled
           (setq tmux-control--retile-pending t)
-        (tmux-control--refresh-windows)))
+        (tmux-control--refresh-windows)
+        (if (and (> tmux-control--self-reseed-pending 0)
+                 (<= (float-time) tmux-control--self-reseed-until))
+            (setq tmux-control--self-reseed-pending
+                  (1- tmux-control--self-reseed-pending))
+          (setq tmux-control--self-reseed-pending 0)
+          (tmux-control--refresh-active-pane))))
      ((and (not tmux-control--tiled)
            (or (string-prefix-p "%window-add " line)
                (string-prefix-p "%window-close " line)
