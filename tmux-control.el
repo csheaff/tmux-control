@@ -213,6 +213,16 @@ per-message decoding leaves the halves as raw bytes, so the trailing
 incomplete bytes are carried here and prepended to the next chunk by
 `tmux-control--feed-terminal'.")
 (defvar-local tmux-control--active-pane nil)
+(defvar-local tmux-control--self-reseed-until 0
+  "Float-time deadline marking a reseed this client just initiated.
+Set by `tmux-control--refresh-active-pane' whenever tmux-control itself
+switches the active window (select-window, next/previous/last-window,
+new-window, kill-window).  The matching `%session-window-changed'
+notification then knows that reseed already happened and skips a redundant
+one.  An *external* window switch (another client, a tmux key binding, a
+script) sets nothing, so its notification finds this expired/cleared and
+reseeds -- which is how the live view and scrollback follow external
+switches instead of stranding on the old pane.")
 (defvar-local tmux-control--fallback-target nil)
 (defvar-local tmux-control--host nil)
 (defvar-local tmux-control--socket-name nil)
@@ -566,9 +576,18 @@ running command, its title when that differs, and whether it is active."
   (unless (process-live-p tmux-control--process)
     (user-error "tmux-control process is not live")))
 
-(defun tmux-control--refresh-active-pane ()
-  "Re-query the session's active pane id, repaint the live view, and resize."
+(defun tmux-control--refresh-active-pane (&optional self-initiated)
+  "Re-query the session's active pane id, repaint the live view, and resize.
+SELF-INITIATED non-nil means this client is switching the active window
+itself; mark a short window so the `%session-window-changed' tmux echoes
+back for our own switch does not reseed a second time.  The mark is generous
+enough to cover the notification round-trip even over SSH, and the handler
+clears it on use, so it never masks a genuine later external switch.  Called
+without SELF-INITIATED from that handler to follow an external switch, where
+arming the mark would wrongly swallow the next external switch."
   (tmux-control--quiet-activity)
+  (when self-initiated
+    (setq tmux-control--self-reseed-until (+ (float-time) 1.0)))
   (tmux-control--send-command "display-message -p '#{pane_id}'" :pane-id)
   (tmux-control--resize-to-window))
 
@@ -661,7 +680,7 @@ to the new window's panes, so only the single-pane view reseeds here."
     (tmux-control--send-command
      (format "select-window -t %s:%s" tmux-control--session index))
     (unless ctrl
-      (tmux-control--refresh-active-pane))))
+      (tmux-control--refresh-active-pane t))))
 
 (defun tmux-control--switch-window (verb)
   "Switch the live view to another window via tmux command VERB.
@@ -682,7 +701,7 @@ window, so any other client attached to the session follows along."
     (tmux-control--send-command
      (format "%s -t %s" verb tmux-control--session))
     (unless ctrl
-      (tmux-control--refresh-active-pane))))
+      (tmux-control--refresh-active-pane t))))
 
 ;;;###autoload
 (defun tmux-control-next-window ()
@@ -721,7 +740,7 @@ With a NAME, give the new window that name."
    (concat (format "new-window -t %s:" tmux-control--session)
            (when (and name (not (string-empty-p name)))
              (concat " -n " (tmux-control--quote-tmux-arg name)))))
-  (tmux-control--refresh-active-pane))
+  (tmux-control--refresh-active-pane t))
 
 (defun tmux-control-kill-window (&optional index)
   "Kill window INDEX in the current tmux-control session.
@@ -737,7 +756,7 @@ window in the session ends the session and disconnects this client."
   (setq index (tmux-control--normalize-window-index index))
   (tmux-control--send-command
    (format "kill-window -t %s:%s" tmux-control--session index))
-  (tmux-control--refresh-active-pane))
+  (tmux-control--refresh-active-pane t))
 
 (defun tmux-control-rename-window (&optional index name)
   "Rename window INDEX in the current tmux-control session to NAME.
@@ -2038,13 +2057,22 @@ the matching pane's render buffer instead, so every pane updates at once."
         (tmux-control--refresh-pane-window-map)))
      ((string-prefix-p "%session-window-changed " line)
       ;; The session's active window changed (switched here or by another
-      ;; client).  In tiling mode re-tile to the new window's panes; in
-      ;; single-pane mode the select-window commands already reseed, but
-      ;; refresh the tab bar so its highlight and unseen-output markers track
-      ;; the new current window.
+      ;; client).  In tiling mode re-tile to the new window's panes.  In
+      ;; single-pane mode always refresh the tab bar so its highlight and
+      ;; unseen-output markers track the new current window -- and reseed the
+      ;; live view onto the new window's active pane, UNLESS this client just
+      ;; initiated the switch itself (in which case `--refresh-active-pane'
+      ;; already reseeded; reseeding again would double-paint).  Following an
+      ;; *external* switch here is what keeps the live view -- and scrollback,
+      ;; which captures `--active-pane' -- on the window the tab bar shows,
+      ;; rather than stranding on the previous pane.
       (if tmux-control--tiled
           (setq tmux-control--retile-pending t)
-        (tmux-control--refresh-windows)))
+        (tmux-control--refresh-windows)
+        (if (and (> tmux-control--self-reseed-until 0)
+                 (<= (float-time) tmux-control--self-reseed-until))
+            (setq tmux-control--self-reseed-until 0)
+          (tmux-control--refresh-active-pane))))
      ((and (not tmux-control--tiled)
            (or (string-prefix-p "%window-add " line)
                (string-prefix-p "%window-close " line)
