@@ -1053,5 +1053,44 @@ each wrapped in an evolving prompt line and a status bar.")
         (should tmux-control--retile-pending)
         (should (= reseeds 0))))))
 
+(ert-deftest tmux-control-test-eager-register-new-panes ()
+  ;; A %layout-change that introduces a new pane registers a render buffer for
+  ;; it NOW, marked fed-live, so its %output streams in live from the first
+  ;; byte and the re-tile never seeds it (which would double-paint a freshly
+  ;; split pane's opening screenful).  Existing panes are left untouched, and
+  ;; nothing happens when the controller is not tiled.
+  (let ((made '()))
+    (cl-letf (((symbol-function 'tmux-control--make-pane-buffer)
+               (lambda (pane-id &rest _)
+                 (push pane-id made)
+                 (generate-new-buffer (format " *tc-test-eager-%s*" pane-id)))))
+      (with-temp-buffer
+        (setq-local tmux-control--tiled t)
+        (let ((buf0 (generate-new-buffer " *tc-test-eager-existing*")))
+          (setq-local tmux-control--panes (list (cons "%0" buf0)))
+          (unwind-protect
+              (progn
+                ;; A horizontal split of panes %0 (existing) and %1 (new).
+                (tmux-control--eager-register-new-panes
+                 (current-buffer)
+                 "abcd,80x24,0,0{40x24,0,0,0,39x24,41,0,1}")
+                ;; Only the NEW pane is made; the existing one is not remade.
+                (should (equal made '("%1")))
+                (should (assoc "%1" tmux-control--panes))
+                (should (buffer-local-value 'tmux-control--pane-fed-live
+                                            (cdr (assoc "%1" tmux-control--panes))))
+                (should (eq (cdr (assoc "%0" tmux-control--panes)) buf0)))
+            (dolist (c tmux-control--panes)
+              (when (buffer-live-p (cdr c)) (kill-buffer (cdr c)))))))
+      ;; Not tiled: a no-op (single-pane mode owns no per-pane buffers).
+      (setq made '())
+      (with-temp-buffer
+        (setq-local tmux-control--tiled nil)
+        (setq-local tmux-control--panes nil)
+        (tmux-control--eager-register-new-panes
+         (current-buffer) "abcd,80x24,0,0{40x24,0,0,0,39x24,41,0,1}")
+        (should (null made))
+        (should (null tmux-control--panes))))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
