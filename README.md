@@ -203,33 +203,38 @@ Scrollback joins soft-wrapped tmux lines by default; disable that with:
 (setq tmux-control-scrollback-join-wrapped-lines nil)
 ```
 
-#### Compacting repeated TUI redraws (opt-in)
+#### Compacting repeated TUI redraws
 
 Some TUIs repaint by reprinting their whole screen instead of using the
 alternate screen — common when tmux runs with `alternate-screen off`, which
 keeps full-screen apps on the normal screen so their history is preserved.
-Each repaint is then appended to the pane history, so scrolling back shows
-the same screen many times over.
+Each repaint is then appended to the pane history, so scrolling back would
+otherwise show the same screen many times over.
 
-`tmux-control` can collapse those repeats, but the line that marks the top of
-one repaint is necessarily application-specific, so compaction is **off by
-default** (scrollback is shown verbatim).  To enable it, point
-`tmux-control-scrollback-frame-start-regexp` at your TUI's repaint marker and
-list its per-frame "chrome" (status bars, rules, an evolving prompt) in
-`tmux-control-scrollback-chrome-regexps` so changing lines don't defeat
-de-duplication.  For the [Claude Code](https://www.anthropic.com/claude-code)
-TUI, for example:
+`tmux-control` collapses those repeats **automatically**: it detects the
+repeated frame in the captured history and shows it once, followed by whatever
+changed between repaints (a spinner, a token count, an evolving prompt), so you
+see the progression instead of dozens of copies.  It is conservative — it acts
+only when it actually finds a repeating frame, so ordinary command output is
+left verbatim.  Turn it off with:
 
 ```elisp
-(setq tmux-control-compact-scrollback t
-      tmux-control-scrollback-frame-start-regexp "\\`\\s-*\\[Session\\]"
+(setq tmux-control-compact-scrollback nil)
+```
+
+For a particular TUI you can fine-tune the result: pin the frame boundary with
+`tmux-control-scrollback-frame-start-regexp` (when auto-detection picks a poor
+line — say a busy app whose very top line changes every frame) and drop
+volatile per-frame "chrome" (status bars, rules, an evolving prompt) with
+`tmux-control-scrollback-chrome-regexps` for an even tighter collapse.  For the
+[Claude Code](https://www.anthropic.com/claude-code) TUI, for example:
+
+```elisp
+(setq tmux-control-scrollback-frame-start-regexp "\\`\\s-*\\[Session\\]"
       tmux-control-scrollback-chrome-regexps
       '("\\`\\[Session\\]" "AI Credits:" "\\`/ commands"
         "\\`[─━]\\{10,\\}\\'" "\\`❯\\'"))
 ```
-
-With no frame regexp set, `tmux-control-compact-scrollback` has nothing to act
-on and scrollback is left untouched.
 
 ### High-volume output (flow control)
 
