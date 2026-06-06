@@ -1198,5 +1198,23 @@ each wrapped in an evolving prompt line and a status bar.")
       (kill-buffer live) (kill-buffer pane)
       (kill-buffer tiled) (kill-buffer dead))))
 
+(ert-deftest tmux-control-test-connect-all-sessions-skips-live ()
+  ;; C-u flock connects every session on the host/socket that is not already
+  ;; live, and leaves the live ones alone.
+  (with-temp-buffer
+    (setq-local tmux-control--host nil)
+    (setq-local tmux-control--socket-name "sk")
+    (setq-local tmux-control--session "a")
+    (let ((connected '()))
+      (cl-letf (((symbol-function 'tmux-control--list-sessions)
+                 (lambda (_host _socket) '("a" "b" "c")))
+                ;; "a" is already live; "b"/"c" are not.
+                ((symbol-function 'tmux-control--session-live-buffer)
+                 (lambda (_host session) (equal session "a")))
+                ((symbol-function 'tmux-control-connect)
+                 (lambda (_host _socket session) (push session connected))))
+        (tmux-control--connect-all-sessions)
+        (should (equal (sort connected #'string<) '("b" "c")))))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

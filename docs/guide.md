@@ -75,8 +75,10 @@ over buffers that are already live — no extra connections.
 - Each session is sized to its cell while flocked (like the tiled pane view);
   `C-c C-f` again — or `M-x tmux-control-unflock` — returns to the single
   session under point, resized to the full window.
-- Connect the sessions you want first (`tmux-control-connect` /
-  `tmux-control-select-session`); the flock shows the ones currently connected.
+- By default it tiles the sessions you have already connected
+  (`tmux-control-connect` / `tmux-control-select-session`).  With a prefix
+  argument — `C-u C-c C-f` — it first connects *every* session on the host and
+  socket, so one keystroke gives you the whole host.
 
 Like the tiled view it takes the **whole frame** and resizes each session to
 its cell, so a session also attached elsewhere (another client) follows tmux's

@@ -653,22 +653,45 @@ their own) and tiled controllers (which render nothing)."
           (with-current-buffer buf
             (tmux-control--resize-to-window)))))))
 
+(defun tmux-control--connect-all-sessions ()
+  "Connect every session on this buffer's host/socket that isn't live yet.
+Used by `tmux-control-flock' with a prefix argument so the flock shows the
+whole host, not just the sessions you happened to open.  Connections are
+made without disturbing the window layout (the flock re-arranges it next);
+their screens seed asynchronously, like any connect."
+  (unless tmux-control--session
+    (user-error "Run this from a tmux-control session buffer"))
+  (let ((host tmux-control--host)
+        (socket tmux-control--socket-name))
+    (save-window-excursion
+      (dolist (session (tmux-control--list-sessions host socket))
+        (unless (tmux-control--session-live-buffer host session)
+          (tmux-control-connect host socket session))))))
+
 ;;;###autoload
-(defun tmux-control-flock ()
+(defun tmux-control-flock (&optional connect-all)
   "Show every connected tmux session at once, one per cell, all live.
 Each cell is an ordinary session buffer (its mode line and window tab bar
 label it), so you can read, switch windows in, or type into any session
 without leaving the overview.  Devotes the whole frame to the grid;
 `tmux-control-unflock' (or `tmux-control-toggle-flock') returns to the
-single session under point.  Sessions are connected with
-`tmux-control-connect' / `tmux-control-select-session' first."
-  (interactive)
+single session under point.
+
+By default this tiles the sessions you have already connected (with
+`tmux-control-connect' / `tmux-control-select-session').  With a prefix
+argument CONNECT-ALL, first connect every session on this buffer's
+host/socket so the flock shows them all."
+  (interactive "P")
+  (when connect-all
+    (tmux-control--connect-all-sessions))
   (let ((buffers (tmux-control--live-session-buffers)))
     (cond
      ((null buffers)
       (user-error "No live tmux-control sessions to flock"))
      ((not (cdr buffers))
-      (user-error "Only one live session; connect another to flock"))
+      (user-error
+       (substitute-command-keys
+        "Only one connected session — \\`C-u \\[tmux-control-toggle-flock]' flocks all on this host")))
      (t
       (tmux-control--flock-grid buffers)
       (tmux-control--flock-resize-all)
@@ -686,12 +709,14 @@ single session under point.  Sessions are connected with
       (tmux-control--resize-to-window))))
 
 ;;;###autoload
-(defun tmux-control-toggle-flock ()
-  "Toggle the all-sessions flock view.  Bound to \\`C-c C-f'."
-  (interactive)
+(defun tmux-control-toggle-flock (&optional connect-all)
+  "Toggle the all-sessions flock view.  Bound to \\`C-c C-f'.
+With a prefix argument CONNECT-ALL, connect every session on this host
+before flocking (see `tmux-control-flock')."
+  (interactive "P")
   (if (frame-parameter nil 'tmux-control--flock)
       (tmux-control-unflock)
-    (tmux-control-flock)))
+    (tmux-control-flock connect-all)))
 
 (defun tmux-control-disconnect ()
   "Disconnect the current tmux-control client."
