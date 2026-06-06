@@ -909,5 +909,17 @@ each wrapped in an evolving prompt line and a status bar.")
       (tmux-control--note-pane-activity "%1")
       (should-not (gethash "1" tmux-control--activity)))))
 
+(ert-deftest tmux-control-test-paste-remapped-to-terminal ()
+  ;; GUI / macOS paste gestures -- Cmd-V (`s-v'), the `[paste]' event, the
+  ;; Edit > Paste menu -- resolve to the `yank' / `clipboard-yank' commands.
+  ;; Eat's own map only rebinds C-y, M-y, S-insert and mouse yank, so those
+  ;; gestures otherwise fall through to plain `yank' and insert into the Eat
+  ;; buffer instead of sending to the pane.  tmux-control-mode-map must remap
+  ;; the yank commands to the terminal yank.
+  (should (eq (lookup-key tmux-control-mode-map [remap yank]) 'eat-yank))
+  (should (eq (lookup-key tmux-control-mode-map [remap clipboard-yank]) 'eat-yank))
+  (should (eq (lookup-key tmux-control-mode-map [remap yank-pop])
+              'eat-yank-from-kill-ring)))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

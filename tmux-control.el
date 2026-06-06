@@ -327,6 +327,17 @@ resulting prompt/redraw burst in every pane does not flag every window.")
     (define-key map (kbd "C-c C-t") #'tmux-control-toggle-tiling)
     (define-key map (kbd "C-c C-n") #'tmux-control-next-window)
     (define-key map (kbd "C-c C-p") #'tmux-control-previous-window)
+    ;; Route every "paste" gesture to the terminal.  Eat's own map covers
+    ;; C-y, M-y, S-insert and mouse yank, but a GUI/macOS paste -- `s-v'
+    ;; (Cmd-V), the `[paste]' event, the Edit > Paste menu -- stays bound to
+    ;; plain `yank', which inserts into the terminal buffer instead of sending
+    ;; to the pane: the text never reaches tmux, leaves stray characters in
+    ;; the buffer, and pasted into a full-screen TUI desyncs Eat.  Remap the
+    ;; yank commands so those gestures go through `eat-yank' (bracketed paste,
+    ;; chunked send-keys to the pane) exactly like C-y already does.
+    (define-key map [remap yank] #'eat-yank)
+    (define-key map [remap clipboard-yank] #'eat-yank)
+    (define-key map [remap yank-pop] #'eat-yank-from-kill-ring)
     map)
   "Keymap for `tmux-control-mode'.")
 
