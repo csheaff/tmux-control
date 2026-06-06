@@ -59,7 +59,9 @@ attaches, typing a new name creates it.
 - **Windows as tabs** in a header-line tab bar, with an activity **dot** on
   background windows; flip them like browser tabs (`C-c C-n` / `C-c C-p`).
 - **Switch between sessions** on the host in place (`C-c C-s`) — each tmux
-  session is its own buffer with its own scrollback and tabs.
+  session is its own buffer with its own scrollback and tabs — with a dot
+  flagging another session that wants you, or tile **every session at once**
+  in a live grid (`C-c C-f`, experimental).
 - **Scrollback** as ordinary Emacs text (`C-c C-e`), auto-collapsing repeated
   full-screen redraws.
 - **Tiled view** (`C-c C-t`, experimental) — every pane of a window at once,

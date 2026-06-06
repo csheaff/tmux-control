@@ -60,6 +60,20 @@ view stays put.  Because every session is its own buffer, you can also just keep
 several open and switch with the ordinary `C-x b` / `switch-to-buffer`; the
 session commands are the tmux-aware shortcut.
 
+### Which session wants you
+
+When you are looking at one session and **another connected session produces
+output**, its name appears with a dot at the left of the header line — e.g.
+`●worker` — the session-level "which one wants me?" signal, and the companion to
+the window tab bar's per-window dot.  Click the name to switch to it; visiting a
+session clears its dot.  The strip lists only sessions with *unseen* output, so
+an idle setup shows no extra chrome, and (like the window dot) the repaint burst
+from a connect, switch, or resize is not counted.  Turn it off with:
+
+```elisp
+(setq tmux-control-session-activity nil)
+```
+
 ### The flock view: every session at once (experimental)
 
 `C-c C-f` (`tmux-control-toggle-flock`) tiles **every connected session** into a
