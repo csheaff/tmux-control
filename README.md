@@ -12,15 +12,18 @@ agent team in split panes — rendered by iTerm2's native tmux integration
 [experimental](#tiling-every-pane-at-once-experimental); the shipped client
 mirrors one pane at a time.*
 
-Other ways to drive tmux from Emacs either **send it commands**
-([`emamux`](https://github.com/emacsorphanage/emamux)) or run tmux **inside a
-terminal buffer** (`vterm`, `eat`, `ansi-term`) — a terminal in a terminal,
-with tmux's own status bar and prefix keys.  `tmux-control` instead speaks
-tmux's **control-mode protocol** (`tmux -C`, the same one iTerm2's native
-integration uses): each live pane becomes its own Emacs buffer, rendered
-through [Eat](https://codeberg.org/akib/emacs-eat) — no nested terminal, no
-tmux chrome, just a buffer you navigate, search, and copy from.  The session
-lives on a **persistent, possibly remote** server and outlives Emacs: detach,
+Other ways to pair Emacs with tmux either **send it commands**
+([`emamux`](https://github.com/emacsorphanage/emamux)), **navigate** between
+Emacs windows and tmux panes when Emacs itself runs *inside* tmux
+([`tmux-pane`](https://github.com/laishulu/emacs-tmux-pane)), or run tmux
+*inside* an Emacs terminal buffer (`vterm`, `eat`, `ansi-term`) — a terminal in
+a terminal, with tmux's own status bar and prefix keys.  None of them render
+tmux's own panes as Emacs buffers.  `tmux-control` does: it speaks tmux's
+**control-mode protocol** (`tmux -C`, the same one iTerm2's native integration
+uses), so each live pane becomes an Emacs buffer rendered through
+[Eat](https://codeberg.org/akib/emacs-eat) — no nested terminal, no tmux
+chrome, just a buffer you navigate, search, and copy from.  The session lives
+on a **persistent, possibly remote** server and outlives Emacs: detach,
 restart, or reconnect from another machine and the pane is still there.
 
 The single-pane client is stable and in daily use; multi-pane **tiling** is
