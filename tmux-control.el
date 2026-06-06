@@ -1652,9 +1652,15 @@ completion so the user is never stranded in a half-built chooser."
 
 (defun tmux-control--scrollback-chunks (text)
   "Split captured pane TEXT into likely TUI redraw chunks."
+  (tmux-control--scrollback-chunks-from-lines (split-string text "\n")))
+
+(defun tmux-control--scrollback-chunks-from-lines (lines)
+  "Split already-split LINES into likely TUI redraw chunks.
+Lets a caller that already holds the line list -- auto-detection trying each
+candidate marker in turn -- skip a join-then-resplit round trip over the
+whole (up to several-thousand-line) scrollback each time."
   (let (chunks current)
-    (dolist (line (mapcar #'string-trim-right
-                          (split-string text "\n")))
+    (dolist (line (mapcar #'string-trim-right lines))
       (when (and current
                  (tmux-control--scrollback-frame-start-line-p line))
         (push (nreverse current) chunks)
@@ -1702,7 +1708,10 @@ sits below that line, and an only-at-the-top check would miss it and veto an
 otherwise perfect frame marker."
   (let* ((tmux-control--auto-frame-start marker)
          (tmux-control-scrollback-frame-start-regexp nil)
-         (chunks (tmux-control--scrollback-chunks (string-join lines "\n")))
+         ;; Chunk straight from LINES; auto-detection calls this once per
+         ;; candidate marker, so joining to a string and re-splitting it each
+         ;; time would be wasted O(n) work over the whole scrollback.
+         (chunks (tmux-control--scrollback-chunks-from-lines lines))
          (shared nil))
     (while (and (cdr chunks) (not shared))
       (let ((a (tmux-control--trim-blank-line-list (car chunks)))
