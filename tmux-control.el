@@ -1684,9 +1684,15 @@ completion so the user is never stranded in a half-built chooser."
 
 (defun tmux-control--scrollback-chunks (text)
   "Split captured pane TEXT into likely TUI redraw chunks."
+  (tmux-control--scrollback-chunks-from-lines (split-string text "\n")))
+
+(defun tmux-control--scrollback-chunks-from-lines (lines)
+  "Split already-split LINES into likely TUI redraw chunks.
+Lets a caller that already holds the line list -- auto-detection trying each
+candidate marker in turn -- skip a join-then-resplit round trip over the
+whole (up to several-thousand-line) scrollback each time."
   (let (chunks current)
-    (dolist (line (mapcar #'string-trim-right
-                          (split-string text "\n")))
+    (dolist (line (mapcar #'string-trim-right lines))
       (when (and current
                  (tmux-control--scrollback-frame-start-line-p line))
         (push (nreverse current) chunks)
@@ -1725,16 +1731,25 @@ so a run of identical filler lines is not taken for frame boundaries.")
 
 (defun tmux-control--frames-share-redraw-body-p (lines marker)
   "Return non-nil when splitting LINES at MARKER yields adjacent frames that
-share a distinctive run -- evidence of a genuine repainting TUI rather than a
-coincidentally repeated line."
+share a distinctive redraw run -- evidence of a genuine repainting TUI rather
+than a coincidentally repeated line.  Mirrors what the merge step actually
+collapses: a shared run anywhere in the later frame, not only one starting at
+its top.  That matters when the capture begins mid-frame, leaving the marker
+just above a volatile line (a token counter, a clock) -- the shared body then
+sits below that line, and an only-at-the-top check would miss it and veto an
+otherwise perfect frame marker."
   (let* ((tmux-control--auto-frame-start marker)
          (tmux-control-scrollback-frame-start-regexp nil)
-         (chunks (tmux-control--scrollback-chunks (string-join lines "\n")))
+         ;; Chunk straight from LINES; auto-detection calls this once per
+         ;; candidate marker, so joining to a string and re-splitting it each
+         ;; time would be wasted O(n) work over the whole scrollback.
+         (chunks (tmux-control--scrollback-chunks-from-lines lines))
          (shared nil))
     (while (and (cdr chunks) (not shared))
       (let ((a (tmux-control--trim-blank-line-list (car chunks)))
             (b (tmux-control--trim-blank-line-list (cadr chunks))))
-        (when (and a b (tmux-control--seen-run-length a b 0 (length b)))
+        (when (and a b
+                   (< (length (tmux-control--strip-seen-runs a b)) (length b)))
           (setq shared t)))
       (setq chunks (cdr chunks)))
     shared))
@@ -1754,7 +1769,7 @@ the frames it delimits actually share a redrawn body."
         (unless (string-empty-p key)
           (push i (gethash key indices))))
       (setq i (1+ i)))
-    (let ((best nil) (best-count 0) (best-first most-positive-fixnum))
+    (let ((candidates nil))
       (maphash
        (lambda (key idxs)
          (let* ((idxs (nreverse idxs))
@@ -1762,13 +1777,27 @@ the frames it delimits actually share a redrawn body."
                 (first (car idxs)))
            (when (and (>= count tmux-control--auto-frame-min-occurrences)
                       (>= (length key) 3)
-                      (tmux-control--auto-frame-evenly-spread-p idxs)
-                      (or (> count best-count)
-                          (and (= count best-count) (< first best-first))))
-             (setq best key best-count count best-first first))))
+                      (tmux-control--auto-frame-evenly-spread-p idxs))
+             (push (list count first key) candidates))))
        indices)
-      (when (and best (tmux-control--frames-share-redraw-body-p lines best))
-        best))))
+      ;; Most frequent first, tie broken by earliest occurrence.  Accept the
+      ;; first candidate whose delimited frames actually share a redrawn body,
+      ;; rather than committing to the single most frequent line: when the
+      ;; capture starts mid-frame both frame edges recur equally often, and the
+      ;; tie-winner can be the edge sitting just above a volatile line whose
+      ;; body is unrecognisable -- the real frame top is one place down the
+      ;; list.  Also lets a mix of panels fall through to whichever genuinely
+      ;; repaints.
+      (setq candidates
+            (sort candidates
+                  (lambda (a b)
+                    (if (= (nth 0 a) (nth 0 b))
+                        (< (nth 1 a) (nth 1 b))
+                      (> (nth 0 a) (nth 0 b))))))
+      (cl-loop for cand in candidates
+               for key = (nth 2 cand)
+               when (tmux-control--frames-share-redraw-body-p lines key)
+               return key))))
 
 (defun tmux-control--strip-scrollback-chrome (lines)
   "Remove obvious TUI chrome from captured LINES."
