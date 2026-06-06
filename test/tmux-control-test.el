@@ -666,6 +666,7 @@ each wrapped in an evolving prompt line and a status bar.")
   ;; A well-formed "X,Y" reply yields a (X . Y) cons of 0-indexed coords.
   (should (equal '(42 . 2) (tmux-control--parse-cursor-pos '("42,2"))))
   (should (equal '(0 . 0) (tmux-control--parse-cursor-pos '("0,0"))))
+  (should (equal '(13 . 48) (tmux-control--parse-cursor-pos '("13,48,1"))))
   ;; Reverse-order/padded reply lists and surrounding whitespace are tolerated.
   (should (equal '(7 . 3) (tmux-control--parse-cursor-pos '("" "  7,3 " ""))))
   ;; Malformed or empty replies yield nil rather than a bogus position.
@@ -673,6 +674,15 @@ each wrapped in an evolving prompt line and a status bar.")
   (should-not (tmux-control--parse-cursor-pos '("nope")))
   (should-not (tmux-control--parse-cursor-pos '("")))
   (should-not (tmux-control--parse-cursor-pos nil)))
+
+(ert-deftest tmux-control-test-parse-cursor-visible ()
+  ;; tmux's cursor_flag is carried alongside the cursor coordinates.
+  (should (eq :visible (tmux-control--parse-cursor-visible '("13,48,1"))))
+  (should (eq :hidden (tmux-control--parse-cursor-visible '("13,48,0"))))
+  ;; Older or malformed replies leave the current Eat cursor visibility alone.
+  (should (eq :unknown (tmux-control--parse-cursor-visible '("13,48"))))
+  (should (eq :unknown (tmux-control--parse-cursor-visible '("13,48,2"))))
+  (should (eq :unknown (tmux-control--parse-cursor-visible nil))))
 
 (ert-deftest tmux-control-test-capture-n-supported-p ()
   ;; capture-pane -N landed in tmux 3.1.
@@ -702,7 +712,14 @@ each wrapped in an evolving prompt line and a status bar.")
     ;; Out-of-range coordinates are clamped to the grid.
     (should (string-suffix-p
              "\e[24;80H"
-             (tmux-control--screen-seed-sequence "x\n" '(200 . 100))))))
+             (tmux-control--screen-seed-sequence "x\n" '(200 . 100))))
+    ;; Known cursor visibility is restored before the cursor is positioned.
+    (should (string-suffix-p
+             "\e[?25h\e[m\e[3;43H"
+             (tmux-control--screen-seed-sequence "x\n" '(42 . 2) :visible)))
+    (should (string-suffix-p
+             "\e[?25l\e[m\e[3;43H"
+             (tmux-control--screen-seed-sequence "x\n" '(42 . 2) :hidden)))))
 
 (ert-deftest tmux-control-test-screen-seed-sequence-preserves-trailing ()
   ;; A captured line with a trailing background fill (as `capture-pane -N'

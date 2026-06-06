@@ -247,6 +247,12 @@ is treated as stale and cleared, so a self-initiated reseed that produced no
 X and Y are tmux's 0-indexed cursor column and row on the visible
 screen, or nil when the position has not been queried.  Used by the
 `:capture' reply handler to place the cursor on the seeded screen.")
+(defvar-local tmux-control--seed-cursor-visible :unknown
+  "Most recent cursor visibility queried for a screen seed.
+The value is `:visible' when tmux reports a visible cursor, `:hidden'
+when hidden, and `:unknown' when the state has not been queried.  Used by
+the `:capture' reply handler to keep Eat's cursor visibility in sync with
+tmux.")
 (defvar-local tmux-control--capture-trailing-p nil
   "Non-nil when the connected tmux supports `capture-pane -N' (3.1+).
 With it, the screen seed preserves trailing background cells so full-width
@@ -1251,6 +1257,7 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
     (setq tmux-control--collecting-command nil)
     (setq tmux-control--command-output nil)
     (setq tmux-control--seed-cursor nil)
+    (setq tmux-control--seed-cursor-visible :unknown)
     (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
     (setq eat-terminal tmux-control--terminal)
     (eat-semi-char-mode)
@@ -2194,14 +2201,17 @@ the matching pane's render buffer instead, so every pane updates at once."
                                        tmux-control--command-output))))))
     (:cursor-pos
      (setq tmux-control--seed-cursor
-           (tmux-control--parse-cursor-pos tmux-control--command-output)))
+           (tmux-control--parse-cursor-pos tmux-control--command-output))
+     (setq tmux-control--seed-cursor-visible
+           (tmux-control--parse-cursor-visible tmux-control--command-output)))
     (:capture
      (tmux-control--write-terminal
       (tmux-control--screen-seed-sequence
        (mapconcat #'identity
                   (nreverse tmux-control--command-output)
                   "\n")
-       tmux-control--seed-cursor))))
+       tmux-control--seed-cursor
+       tmux-control--seed-cursor-visible))))
   (setq tmux-control--collecting-command nil)
   (setq tmux-control--current-command-kind :ignore)
   (setq tmux-control--command-output nil))
@@ -2217,8 +2227,9 @@ the `:capture' reply that paints the screen and consumes it."
     ;; before :capture, and if that query fails the seed falls back to the
     ;; bottom-left rather than reusing a stale position from an old seed.
     (setq tmux-control--seed-cursor nil)
+    (setq tmux-control--seed-cursor-visible :unknown)
     (tmux-control--send-command
-     (format "display-message -p -t %s \"#{cursor_x},#{cursor_y}\""
+     (format "display-message -p -t %s \"#{cursor_x},#{cursor_y},#{cursor_flag}\""
              tmux-control--active-pane)
      :cursor-pos)
     (tmux-control--send-command
@@ -2262,12 +2273,14 @@ tmux to continue so live output resumes from the present."
   "Return the display width of STRING, ignoring ANSI control sequences."
   (string-width (tmux-control--strip-ansi string)))
 
-(defun tmux-control--screen-seed-sequence (text &optional cursor)
+(defun tmux-control--screen-seed-sequence (text &optional cursor cursor-visible)
   "Return terminal escapes to paint captured visible-screen TEXT.
 CURSOR, when non-nil, is a (X . Y) cons of tmux's 0-indexed cursor column
 and row on the visible screen; the cursor is placed there (clamped to the
 grid).  When nil -- the position could not be queried -- the cursor falls
-back to the bottom-left of the screen."
+back to the bottom-left of the screen.  CURSOR-VISIBLE is `:visible',
+`:hidden', or `:unknown'; unknown leaves the current cursor visibility
+unchanged."
   (let* ((size (and tmux-control--terminal
                     (eat-term-live-p tmux-control--terminal)
                     (eat-term-size tmux-control--terminal)))
@@ -2300,6 +2313,9 @@ back to the bottom-left of the screen."
     ;; attributes first so a line's lingering background does not tint it.
     (let ((cursor-row (if cursor (min height (max 1 (1+ (cdr cursor)))) height))
           (cursor-column (if cursor (min width (max 1 (1+ (car cursor)))) 1)))
+      (pcase cursor-visible
+        (:visible (push "\e[?25h" out))
+        (:hidden (push "\e[?25l" out)))
       (push (format "\e[m\e[%d;%dH" cursor-row cursor-column) out))
     (apply #'concat (nreverse out))))
 
@@ -2648,12 +2664,34 @@ cons of positive integers, or nil when no well-formed positive size is found."
   "Parse \"X,Y\" cursor coordinates from control-mode reply OUTPUT lines.
 OUTPUT is the raw (reverse-order) reply line list.  Return a (X . Y) cons
 of tmux's 0-indexed cursor column and row, or nil when no well-formed pair
-is found.  Pure: no side effects, for unit testing the seed cursor query."
+is found.  The reply may include a third cursor visibility field
+(\"X,Y,FLAG\"), which is ignored here.  Pure: no side effects, for unit
+testing the seed cursor query."
   (let ((val (car (cl-remove-if #'string-empty-p
                                 (mapcar #'string-trim output)))))
-    (when (and val (string-match "\\`\\([0-9]+\\),\\([0-9]+\\)\\'" val))
+    (when (and val (string-match "\\`\\([0-9]+\\),\\([0-9]+\\)\\(?:,[01]\\)?\\'" val))
       (cons (string-to-number (match-string 1 val))
             (string-to-number (match-string 2 val))))))
+
+(defun tmux-control--cursor-visible-from-flag (flag)
+  "Return cursor visibility represented by tmux cursor FLAG.
+Return `:visible' for \"1\", `:hidden' for \"0\", and `:unknown' for any
+other value."
+  (pcase flag
+    ("1" :visible)
+    ("0" :hidden)
+    (_ :unknown)))
+
+(defun tmux-control--parse-cursor-visible (output)
+  "Parse cursor visibility from control-mode reply OUTPUT lines.
+Return `:visible' when tmux's cursor flag is 1, `:hidden' when it is 0,
+and `:unknown' when the flag is absent or the reply is malformed.  Pure:
+no side effects, for unit testing the seed cursor query."
+  (let ((val (car (cl-remove-if #'string-empty-p
+                                (mapcar #'string-trim output)))))
+    (if (and val (string-match "\\`[0-9]+,[0-9]+,\\([01]\\)\\'" val))
+        (tmux-control--cursor-visible-from-flag (match-string 1 val))
+      :unknown)))
 
 (defun tmux-control--capture-n-supported-p (version)
   "Return non-nil when tmux VERSION supports `capture-pane -N' (3.1 or later).
@@ -2858,14 +2896,15 @@ controller or pane render buffer where those locals are bound."
 (defun tmux-control--query-window-state ()
   "Return (LAYOUT . PANES) for the active window in one tmux query.
 LAYOUT is the `window_layout' string; PANES is an alist (PANE-ID . INFO)
-with INFO a plist of :left :top :width :height :active :cmd :title :cursor.
+with INFO a plist of :left :top :width :height :active :cmd :title :cursor
+and :cursor-visible.
 Folding the layout, every pane's geometry, and every pane's cursor into a
 single `list-panes' call avoids a separate `display-message' for the layout
 and one per pane for the cursor -- each a blocking (possibly SSH) round-trip
 that previously ran for every re-tile."
   (let* ((fmt (concat "#{window_layout}\t#{pane_id}\t#{pane_left}\t#{pane_top}\t"
                       "#{pane_width}\t#{pane_height}\t#{pane_active}\t"
-                      "#{cursor_x}\t#{cursor_y}\t#{pane_current_command}\t"
+                      "#{cursor_x}\t#{cursor_y}\t#{cursor_flag}\t#{pane_current_command}\t"
                       "#{pane_title}"))
          (text (tmux-control--run-tmux
                 (list "list-panes" "-t" tmux-control--session "-F" fmt)))
@@ -2873,7 +2912,7 @@ that previously ran for every re-tile."
          (panes nil))
     (dolist (line (split-string (string-trim text) "\n" t))
       (let ((f (split-string line "\t")))
-        (when (>= (length f) 11)
+        (when (>= (length f) 12)
           (unless layout (setq layout (nth 0 f)))
           (push (cons (nth 1 f)
                       (list :left (string-to-number (nth 2 f))
@@ -2883,8 +2922,10 @@ that previously ran for every re-tile."
                             :active (string= (nth 6 f) "1")
                             :cursor (cons (string-to-number (nth 7 f))
                                           (string-to-number (nth 8 f)))
-                            :cmd (nth 9 f)
-                            :title (nth 10 f)))
+                            :cursor-visible
+                            (tmux-control--cursor-visible-from-flag (nth 9 f))
+                            :cmd (nth 10 f)
+                            :title (nth 11 f)))
                 panes))))
     (cons layout (nreverse panes))))
 
@@ -2976,7 +3017,8 @@ its own and routes commands through CONTROLLER."
             tmux-control--display-dirty nil
             tmux-control--utf8-carry ""
             tmux-control--alt-screen-honored t
-            tmux-control--seed-cursor nil)
+            tmux-control--seed-cursor nil
+            tmux-control--seed-cursor-visible :unknown)
       (setq tmux-control--terminal (eat-term-make buffer (point-min)))
       (setq eat-terminal tmux-control--terminal)
       (eat-term-resize tmux-control--terminal w h)
@@ -3097,16 +3139,21 @@ so only the screen capture costs a round-trip here."
         (let* ((pane tmux-control--active-pane)
                (cursor (or (plist-get tmux-control--pane-info :cursor)
                            (ignore-errors (tmux-control--query-cursor pane))))
+               (cursor-visible (or (plist-get tmux-control--pane-info
+                                              :cursor-visible)
+                                  :unknown))
                (text (ignore-errors (tmux-control--capture-pane-screen pane))))
           (when text
             (setq tmux-control--seed-cursor cursor)
+            (setq tmux-control--seed-cursor-visible cursor-visible)
             ;; Clear the scrollback (\e[3J) before painting, not just the
             ;; screen, so a reseed (e.g. after a resize) does not leave the
             ;; previous, now-reflowed frame stacked above the fresh one -- an
             ;; app on a tmux with `alternate-screen off' repaints by appending.
             (tmux-control--write-terminal
              (concat "\e[3J"
-                     (tmux-control--screen-seed-sequence text cursor)))))))))
+                     (tmux-control--screen-seed-sequence
+                      text cursor cursor-visible)))))))))
 
 ;;; Window arrangement from the parsed layout tree.
 
