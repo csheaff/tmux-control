@@ -70,6 +70,11 @@ attaches, typing a new name creates it.
   detach, restart, reconnect from another machine.
 - **Stays responsive** under a flood of output (optional flow control).
 
+![Working in one session while dots flag the others, then C-c C-f tiles every session into a live grid](docs/images/flock-demo.gif)
+
+*Each connected tmux session is its own buffer; a header-line dot flags the ones
+with new output, and `C-c C-f` tiles them all into one live grid (experimental).*
+
 → Full command and key reference, the tiled view, and tuning live in
 **[docs/guide.md](docs/guide.md)**.
 

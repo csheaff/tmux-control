@@ -78,7 +78,14 @@ from a connect, switch, or resize is not counted.  Turn it off with:
 
 `C-c C-f` (`tmux-control-toggle-flock`) tiles **every connected session** into a
 grid — one live cell each — for a dashboard of all your projects (or agents) at
-a glance.  This is cheap precisely because of the design above: each session is
+a glance.
+
+![Working in one session with dots flagging the others, then C-c C-f tiles every session live](images/flock-demo.gif)
+
+*A header-line dot flags each other session with unseen output; `C-c C-f` then
+tiles all of them into one live grid — here four services streaming at once.*
+
+This is cheap precisely because of the design above: each session is
 already its own buffer with its own always-live connection (it streams whether
 or not it is on screen), so the flock view is just an Emacs window arrangement
 over buffers that are already live — no extra connections.
