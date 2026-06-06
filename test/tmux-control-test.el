@@ -1278,5 +1278,23 @@ each wrapped in an evolving prompt line and a status bar.")
                 (should-not tmux-control--session-activity)))))   ; self-cleared
       (kill-buffer self) (kill-buffer other) (kill-buffer quiet))))
 
+(ert-deftest tmux-control-test-flock-other-frame-ordering ()
+  ;; flock-other-frame: with a prefix it connects all first, then focuses the
+  ;; dedicated frame and flocks; without a prefix it skips connect-all.
+  (let ((calls '()))
+    (cl-letf (((symbol-function 'tmux-control--connect-all-sessions)
+               (lambda () (push 'connect-all calls)))
+              ((symbol-function 'tmux-control--sessions-frame)
+               (lambda () (push 'frame calls) 'dummy-frame))
+              ((symbol-function 'select-frame-set-input-focus)
+               (lambda (_f) (push 'focus calls)))
+              ((symbol-function 'tmux-control-flock)
+               (lambda (&rest _) (push 'flock calls))))
+      (tmux-control-flock-other-frame t)
+      (should (equal (nreverse calls) '(connect-all frame focus flock)))
+      (setq calls '())
+      (tmux-control-flock-other-frame nil)
+      (should (equal (nreverse calls) '(frame focus flock))))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
