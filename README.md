@@ -20,7 +20,10 @@ The tmux session outlives Emacs: detach, restart, or reconnect from another
 machine and the pane is still there. Eat handles rendering, input,
 scrollback, search, and copy.
 
-It is experimental — a first MVP (see [Status](#status)).
+The single-pane client is stable and in daily use; the multi-pane **tiling**
+view (rendering every pane at once) is still
+[experimental](#tiling-every-pane-at-once-experimental).  See
+[Status](#status) for details.
 
 ## Usage
 
@@ -150,13 +153,26 @@ each window tiles its own panes, like iTerm's per-window tabs.  `C-c C-t`
 again (or `M-x tmux-control-untile`) returns to the single-pane view on the
 currently active pane.
 
-Tiling is experimental and devotes the whole frame to the session
-(`delete-other-windows`).  Each pane's terminal is sized to tmux's grid
-(so the rendering matches tmux exactly) and the Emacs windows split to
-match; a vertical stack can leave a one-row gap where Emacs spends a mode
-line that tmux spends on a pane border, but content is never clipped.
-Re-tiles are debounced and their tmux queries batched, so a busy remote
-session is not stalled by layout changes.
+Tiling is **experimental** and devotes the whole frame to the session
+(`delete-other-windows`).  Each pane's terminal is sized to tmux's grid, so the
+rendering matches tmux cell-for-cell, and the Emacs windows split to match.
+Re-tiles are debounced and their tmux queries batched, so a busy remote session
+is not stalled by layout changes.
+
+Known limitations of the tiled view (none of which affect the single-pane
+view):
+
+- It takes the **whole frame** (`delete-other-windows`); there is no
+  tile-within-a-region mode.
+- Switching windows while tiled rebuilds the new window's pane buffers, so a
+  window's Emacs-side scrollback is not kept across a switch.
+- Splitting an already-tiled pane into a command that **immediately prints a
+  screenful** (a `cat`, an agent's start-up banner) can render that one pane's
+  first screen twice: the pane is both seeded from `capture-pane` and sent the
+  same content as live `%output`.  Other panes are unaffected.
+- A vertical stack spends one row on an Emacs mode line where tmux spends it on
+  a pane border, so a stacked pane can sit one row short — but content is never
+  clipped.
 
 Useful bindings:
 
@@ -262,22 +278,23 @@ pipe does.  Off by default; requires tmux 3.2 or newer.
 
 ## Status
 
-This is a first MVP.  It can attach to tmux, seed the live terminal from
-`capture-pane` (cursor included), open a same-buffer Emacs scrollback view that
-can optionally compact repeated TUI redraws, render live `%output` through Eat
-in batches, send keyboard input back with `send-keys -H` (chunking large
-pastes), resize the tmux client, and optionally use tmux flow control (pause
-mode) for very high-volume output.  Windows are navigated like tabs —
-next/previous/last switching and a clickable header-line **tab bar** that
-flags background windows with unseen output.  Mouse handling and broader
+The single-pane client is stable.  It can attach to tmux, seed the live
+terminal from `capture-pane` (cursor included), open a same-buffer Emacs
+scrollback view that automatically compacts repeated TUI redraws, render live
+`%output` through Eat in batches, send keyboard input back with `send-keys -H`
+(chunking large pastes), resize the tmux client, and optionally use tmux flow
+control (pause mode) for very high-volume output.  Windows are navigated like
+tabs — next/previous/last switching and a clickable header-line **tab bar**
+that flags background windows with unseen output.  Mouse handling and broader
 edge-case hardening still need work.
 
-There is also an **experimental multi-pane tiling** view (`C-c C-t`, see
-[Tiling every pane at once](#tiling-every-pane-at-once-experimental)) that
-renders all of a window's panes at once, split to match tmux's layout.  It
-is rougher than the single-pane view — whole-frame only, approximate
-sizing — but already handles live per-pane output, per-pane input,
-focus-follow, and automatic re-tiling on split/resize/close.
+The **multi-pane tiling** view (`C-c C-t`, see
+[Tiling every pane at once](#tiling-every-pane-at-once-experimental)) renders
+all of a window's panes at once, split to match tmux's layout, each pane
+cell-for-cell faithful.  It is still **experimental** — whole-frame only, with
+the known limitations listed in that section — but already handles live
+per-pane output, per-pane input, focus-follow, and automatic re-tiling on
+split/resize/close.
 
 ## Development
 
