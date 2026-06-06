@@ -60,6 +60,30 @@ view stays put.  Because every session is its own buffer, you can also just keep
 several open and switch with the ordinary `C-x b` / `switch-to-buffer`; the
 session commands are the tmux-aware shortcut.
 
+### The flock view: every session at once (experimental)
+
+`C-c C-f` (`tmux-control-toggle-flock`) tiles **every connected session** into a
+grid — one live cell each — for a dashboard of all your projects (or agents) at
+a glance.  This is cheap precisely because of the design above: each session is
+already its own buffer with its own always-live connection (it streams whether
+or not it is on screen), so the flock view is just an Emacs window arrangement
+over buffers that are already live — no extra connections.
+
+- Each cell is an ordinary session buffer: its mode line and window tab bar
+  label it, every cell updates independently and live, and you can read, switch
+  windows in, or type into any session without leaving the overview.
+- Each session is sized to its cell while flocked (like the tiled pane view);
+  `C-c C-f` again — or `M-x tmux-control-unflock` — returns to the single
+  session under point, resized to the full window.
+- By default it tiles the sessions you have already connected
+  (`tmux-control-connect` / `tmux-control-select-session`).  With a prefix
+  argument — `C-u C-c C-f` — it first connects *every* session on the host and
+  socket, so one keystroke gives you the whole host.
+
+Like the tiled view it takes the **whole frame** and resizes each session to
+its cell, so a session also attached elsewhere (another client) follows tmux's
+`window-size` rule.  Experimental.
+
 ### The window tab bar
 
 In the single-pane view, a **tab bar** in the header line lists the session's
