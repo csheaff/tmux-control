@@ -909,5 +909,73 @@ each wrapped in an evolving prompt line and a status bar.")
       (tmux-control--note-pane-activity "%1")
       (should-not (gethash "1" tmux-control--activity)))))
 
+(ert-deftest tmux-control-test-session-window-changed-external-reseeds ()
+  ;; A %session-window-changed from an EXTERNAL switch (another client, a tmux
+  ;; key binding, a script) must reseed the live view onto the new window's
+  ;; active pane, so the view -- and scrollback, which captures
+  ;; `tmux-control--active-pane' -- follows the tab bar instead of stranding on
+  ;; the previous pane.  When THIS client initiated the switch,
+  ;; `tmux-control--refresh-active-pane' already reseeded and recorded a
+  ;; pending self-reseed, so the event tmux echoes back must NOT reseed again
+  ;; (it would double-paint); it consumes one pending count.  A COUNT (not a
+  ;; single flag) is needed so several rapid self-switches are each absorbed,
+  ;; and a deadline clears a stale count so it never swallows a real external.
+  (with-temp-buffer
+    (setq-local tmux-control--tiled nil)
+    (let ((reseeds 0) (refreshes 0))
+      (cl-letf (((symbol-function 'tmux-control--flush-output-batch) #'ignore)
+                ((symbol-function 'tmux-control--refresh-windows)
+                 (lambda () (cl-incf refreshes)))
+                ((symbol-function 'tmux-control--refresh-active-pane)
+                 (lambda (&optional _self) (cl-incf reseeds))))
+        ;; External switch: no pending self-reseed -> follow it (reseed).
+        (setq-local tmux-control--self-reseed-pending 0)
+        (setq-local tmux-control--self-reseed-until 0)
+        (tmux-control--handle-line "%session-window-changed $0 @2")
+        (should (= refreshes 1))
+        (should (= reseeds 1))
+        ;; Two rapid self-initiated switches in flight: each echoed event is
+        ;; absorbed (no reseed) and consumes exactly one pending count -- a
+        ;; single flag would absorb only the first and double-paint the second.
+        (setq-local tmux-control--self-reseed-pending 2)
+        (setq-local tmux-control--self-reseed-until (+ (float-time) 100))
+        (tmux-control--handle-line "%session-window-changed $0 @3")
+        (should (= refreshes 2))
+        (should (= reseeds 1))
+        (should (= tmux-control--self-reseed-pending 1))
+        (tmux-control--handle-line "%session-window-changed $0 @4")
+        (should (= refreshes 3))
+        (should (= reseeds 1))
+        (should (= tmux-control--self-reseed-pending 0))
+        ;; A genuine external switch right afterwards still reseeds (the count
+        ;; was fully consumed, not left armed).
+        (tmux-control--handle-line "%session-window-changed $0 @0")
+        (should (= refreshes 4))
+        (should (= reseeds 2))
+        ;; A stale pending count -- a self-switch that produced no event (a
+        ;; no-op select, a background kill) -- does not permanently swallow
+        ;; externals: once the deadline passes it is cleared and the switch is
+        ;; followed.
+        (setq-local tmux-control--self-reseed-pending 1)
+        (setq-local tmux-control--self-reseed-until (- (float-time) 1))
+        (tmux-control--handle-line "%session-window-changed $0 @1")
+        (should (= refreshes 5))
+        (should (= reseeds 3))
+        (should (= tmux-control--self-reseed-pending 0))))))
+
+(ert-deftest tmux-control-test-session-window-changed-tiled-retiles ()
+  ;; In tiling mode the notification re-tiles to the new window's panes rather
+  ;; than reseeding a single pane.
+  (with-temp-buffer
+    (setq-local tmux-control--tiled t)
+    (setq-local tmux-control--retile-pending nil)
+    (let ((reseeds 0))
+      (cl-letf (((symbol-function 'tmux-control--flush-output-batch) #'ignore)
+                ((symbol-function 'tmux-control--refresh-active-pane)
+                 (lambda (&optional _self) (cl-incf reseeds))))
+        (tmux-control--handle-line "%session-window-changed $0 @2")
+        (should tmux-control--retile-pending)
+        (should (= reseeds 0))))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
