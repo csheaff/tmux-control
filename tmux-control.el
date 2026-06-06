@@ -970,10 +970,14 @@ Use `tmux-control-live' to return to the live interactive pane."
         (setq-local tmux-control--scrollback-target target)
         (setq-local tmux-control--capture-trailing-p trailing)
         (setq-local tmux-control--live-buffer live-buffer)
-        ;; Keep the window tabs visible and show a clear box cursor, so entering
-        ;; scrollback does not feel like the tabs and the cursor vanished -- the
-        ;; frame's default cursor can be a faint bar next to the live box.
-        (setq-local cursor-type 'box)
+        ;; Keep the window tabs visible.  Hide the text cursor in this read-only
+        ;; history pager: point pins at the bottom and, under pixel-scroll
+        ;; (point does not move on wheel), the cursor scrolls off-screen and
+        ;; looks like it vanished -- so show none at all, like a terminal's
+        ;; scrollback.  The user's cursor preference for live and other buffers
+        ;; is untouched.
+        (setq-local cursor-type nil)
+        (setq-local cursor-in-non-selected-windows nil)
         (setq-local header-line-format '(:eval (tmux-control--scrollback-header)))
         (goto-char (point-max))))
     (switch-to-buffer scrollback-buffer)
