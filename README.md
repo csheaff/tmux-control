@@ -96,9 +96,9 @@ In the single-pane view, a **tab bar** in the header line lists the session's
 windows like iTerm's tmux tabs — `index:name` for each, the current one
 highlighted.  It is the at-a-glance map of the session: click a tab to switch
 to it, and watch a **dot** appear on any *background* window whose pane
-produces output while you are looking elsewhere — the "which window (or agent)
-wants me" signal for a window-per-agent workflow.  Visiting a window clears its
-dot; a window that rings its bell shows a `!`.
+produces output while you are looking elsewhere — the "which window wants
+me?" signal.  Visiting a window clears its dot; a window that rings its bell
+shows a `!`.
 
 The dot reflects genuine background output: the prompt/redraw burst that a
 connect, window switch, or frame resize provokes in every pane is deliberately
@@ -110,16 +110,12 @@ tiled view, where each pane already carries its own label.  Turn it off with:
 (setq tmux-control-window-tab-bar nil)
 ```
 
-### Panes (and agent teams)
+### Panes
 
-A tmux window can hold several panes at once.  A common case is a
-[Claude Code](https://www.anthropic.com/claude-code) **agent team** in tmux
-mode (`teammateMode: tmux`), which runs each teammate in its own pane so you
-can watch them work.
-
-By default `tmux-control` mirrors **one pane at a time** — the window's
-active pane, rendered cleanly (output from the other panes is not
-interleaved into the view).  Move between panes (teammates) with:
+A tmux window can hold several panes at once (a split layout).  By default
+`tmux-control` mirrors **one pane at a time** — the window's active pane,
+rendered cleanly (output from the other panes is not interleaved into the
+view).  Move between panes with:
 
 - `C-c C-o` (`tmux-control-other-pane`) — cycle to the next pane.
 - `M-x tmux-control-select-pane` — jump to a pane by name, completing over
@@ -133,20 +129,19 @@ along and the live view repaints on the chosen pane.
 `C-c C-t` (`tmux-control-toggle-tiling`) flips between the single-pane view
 and a **tiled** view that renders *every* pane of the current window at
 once, each in its own buffer, with the Emacs windows split to match tmux's
-own layout — the iTerm "show every pane" view.  This is the natural way to
-watch a whole agent team work side by side.
+own layout — the iTerm "show every pane" view.
 
 ![The same tmux session in iTerm2 and in Emacs via tmux-control](docs/images/iterm-vs-tmux-control.png)
 
-*The same live tmux session — a [`pi-agents-tmux`](https://www.npmjs.com/package/@vanillagreen/pi-agents-tmux)
-agent team in split panes — rendered by iTerm2's native tmux integration
-(left) and by the tiled view in Emacs (right): cell-for-cell the same.*
+*The same live tmux session — a multi-pane window — rendered by iTerm2's
+native tmux integration (left) and by the tiled view in Emacs (right):
+cell-for-cell the same.*
 
 In the tiled view:
 
 - Every pane updates live and independently; output is routed per pane, so
   nothing is interleaved.
-- Type into a pane to send to that teammate; selecting a pane's Emacs
+- Type into a pane to send input to it; selecting a pane's Emacs
   window makes it tmux's active pane too (other clients follow).
 - Splitting, resizing, or closing a pane in tmux re-tiles automatically,
   and the mode line labels each pane by its id, command, and title.
@@ -155,12 +150,11 @@ In the tiled view:
 - Each pane is a normal `tmux-control` buffer, so `C-c C-e` scrollback and
   the usual movement/search/copy work in any of them.
 
-For a session with **several windows — say two, each running its own agent
-team** — tile one window, then switch windows (`M-x
-tmux-control-select-window`) to bring the other team into the tiled view;
-each window tiles its own panes, like iTerm's per-window tabs.  `C-c C-t`
-again (or `M-x tmux-control-untile`) returns to the single-pane view on the
-currently active pane.
+For a session with **several multi-pane windows**, tile one window, then
+switch windows (`M-x tmux-control-select-window`) to bring another into the
+tiled view; each window tiles its own panes, like iTerm's per-window tabs.
+`C-c C-t` again (or `M-x tmux-control-untile`) returns to the single-pane
+view on the currently active pane.
 
 Tiling is **experimental** and devotes the whole frame to the session
 (`delete-other-windows`).  Each pane's terminal is sized to tmux's grid, so the
@@ -236,14 +230,14 @@ For a particular TUI you can fine-tune the result: pin the frame boundary with
 `tmux-control-scrollback-frame-start-regexp` (when auto-detection picks a poor
 line — say a busy app whose very top line changes every frame) and drop
 volatile per-frame "chrome" (status bars, rules, an evolving prompt) with
-`tmux-control-scrollback-chrome-regexps` for an even tighter collapse.  For the
-[Claude Code](https://www.anthropic.com/claude-code) TUI, for example:
+`tmux-control-scrollback-chrome-regexps` for an even tighter collapse.  For
+example, to pin the frame to a panel whose top is a box-drawing border and
+drop a couple of volatile per-frame lines:
 
 ```elisp
-(setq tmux-control-scrollback-frame-start-regexp "\\`\\s-*\\[Session\\]"
+(setq tmux-control-scrollback-frame-start-regexp "\\`\\s-*╭"  ; the panel's top border
       tmux-control-scrollback-chrome-regexps
-      '("\\`\\[Session\\]" "AI Credits:" "\\`/ commands"
-        "\\`[─━]\\{10,\\}\\'" "\\`❯\\'"))
+      '("\\`[─━]\\{10,\\}\\'" "\\`❯\\'"))            ; a full-width rule, a bare prompt
 ```
 
 ### High-volume output (flow control)
@@ -283,6 +277,15 @@ cell-for-cell faithful.  It is still **experimental** — whole-frame only, with
 the known limitations listed in that section — but already handles live
 per-pane output, per-pane input, focus-follow, and automatic re-tiling on
 split/resize/close.
+
+## Terminal agent frameworks
+
+Some CLI coding-agent tools run a session per agent in tmux — one **pane**
+per agent, or one **window** per agent.  Because tmux-control renders the
+tmux session itself, those layouts show up as tiled buffers and window tabs
+(with the activity dot flagging which one wants you), with no special
+handling.  If that's of interest, see **[docs/agents.md](docs/agents.md)**;
+if it isn't, you can ignore it entirely — none of the above depends on it.
 
 ## Development
 
