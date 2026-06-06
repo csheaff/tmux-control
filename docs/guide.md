@@ -8,8 +8,8 @@ that session).
 
 ## Window and session management
 
-These commands act on the connected session (`C-c C-n`/`C-c C-p` are bound in
-the live buffer; the rest are `M-x`, bind them to taste):
+These commands act on the connected session (`C-c C-n`/`C-c C-p`/`C-c C-s` are
+bound in the live buffer; the rest are `M-x`, bind them to taste):
 
 - `M-x tmux-control-select-window` switches the live view to another window.
   By default it opens a two-pane chooser with a live preview of the
@@ -34,6 +34,31 @@ the live buffer; the rest are `M-x`, bind them to taste):
 
 Switching, creating, or removing a window changes the session's active
 window, so any other client attached to the same session follows along.
+
+### Switching sessions
+
+A host/socket usually runs **several tmux sessions** (one per project, say).
+`tmux-control` gives each its own buffer and control connection — so each keeps
+its own scrollback, tab bar, and activity state — and lets you flip between them
+like tabs, **in place** in the current window:
+
+- `C-c C-s` (`tmux-control-select-session`) prompts for a session on the same
+  host and socket, completing over the ones that exist there, and switches the
+  view to it.  Picking a session that is already connected reuses its live
+  buffer (no respawn); picking one that exists in tmux but isn't shown yet
+  connects it on the spot.  The prompt requires a match, so a typo can't
+  accidentally spawn a session — to *create* one, use `M-x
+  tmux-control-connect` (which attaches an existing session or creates a new
+  one).
+- `M-x tmux-control-next-session` and `M-x tmux-control-previous-session` step
+  to the next/previous session in tmux's list order, wrapping around — a quick
+  way to cycle a small set without the prompt.
+
+Switching replaces the session in the **selected window** (it does not split the
+frame or rearrange your other Emacs windows), so a code buffer beside the live
+view stays put.  Because every session is its own buffer, you can also just keep
+several open and switch with the ordinary `C-x b` / `switch-to-buffer`; the
+session commands are the tmux-aware shortcut.
 
 ### The window tab bar
 
