@@ -318,6 +318,7 @@ kills, which are deliberate.")
     (define-key map (kbd "C-c C-n") #'tmux-control-next-window)
     (define-key map (kbd "C-c C-p") #'tmux-control-previous-window)
     (define-key map (kbd "C-c C-s") #'tmux-control-select-session)
+    (define-key map (kbd "C-c C-f") #'tmux-control-toggle-flock)
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
     map)
   "High-precedence keymap for tmux-control buffers.")
@@ -355,6 +356,7 @@ resulting prompt/redraw burst in every pane does not flag every window.")
     (define-key map (kbd "C-c C-n") #'tmux-control-next-window)
     (define-key map (kbd "C-c C-p") #'tmux-control-previous-window)
     (define-key map (kbd "C-c C-s") #'tmux-control-select-session)
+    (define-key map (kbd "C-c C-f") #'tmux-control-toggle-flock)
     ;; Route every "paste" gesture to the terminal.  Eat's own map covers
     ;; C-y, M-y, S-insert and mouse yank, but a GUI/macOS paste -- `s-v'
     ;; (Cmd-V), the `[paste]' event, the Edit > Paste menu -- stays bound to
@@ -596,6 +598,100 @@ tmux's own list order, connecting the target on demand."
   "Switch to the previous tmux session on this host/socket, wrapping around."
   (interactive)
   (tmux-control--cycle-session -1))
+
+;;; Flock view: every connected session at once -----------------------------
+;;
+;; Because each session is its own buffer with its own always-live control
+;; connection (it streams %output whether or not it is on screen), showing
+;; several at once is just an Emacs window arrangement over buffers that are
+;; already live -- no extra connections, no per-pane routing.  The flock view
+;; tiles one cell per connected session and sizes each session to its cell.
+
+(defun tmux-control--live-session-buffers ()
+  "Return the live single-pane tmux-control session buffers, sorted by name.
+Excludes tiling pane buffers (which have a controller and no process of
+their own) and tiled controllers (which render nothing)."
+  (sort
+   (seq-filter
+    (lambda (b)
+      (and (buffer-live-p b)
+           (buffer-local-value 'tmux-control--session b)
+           (not (buffer-local-value 'tmux-control--controller b))
+           (not (buffer-local-value 'tmux-control--tiled b))
+           (process-live-p (buffer-local-value 'tmux-control--process b))))
+    (buffer-list))
+   (lambda (a b) (string< (buffer-name a) (buffer-name b)))))
+
+(defun tmux-control--flock-grid (buffers)
+  "Arrange BUFFERS one-per-cell in a near-square grid in the current frame."
+  (delete-other-windows)
+  (let* ((n (length buffers))
+         (cols (max 1 (ceiling (sqrt n))))
+         (rows (max 1 (ceiling (/ (float n) cols))))
+         (row-wins (list (selected-window)))
+         (remaining buffers))
+    ;; Stacked rows: split the most-recently-created bottom window each time.
+    (dotimes (_ (1- rows))
+      (push (split-window (car row-wins) nil 'below) row-wins))
+    (setq row-wins (nreverse row-wins))
+    (dolist (rw row-wins)
+      (when remaining
+        (let* ((cnt (min cols (length remaining)))
+               (cell-wins (list rw)))
+          (dotimes (_ (1- cnt))
+            (push (split-window (car cell-wins) nil 'right) cell-wins))
+          (dolist (cw (nreverse cell-wins))
+            (when remaining (set-window-buffer cw (pop remaining)))))))
+    (balance-windows)))
+
+(defun tmux-control--flock-resize-all ()
+  "Resize every session shown in the current frame to fit its cell."
+  (dolist (w (window-list nil 'no-minibuffer))
+    (let ((buf (window-buffer w)))
+      (when (process-live-p (buffer-local-value 'tmux-control--process buf))
+        (with-selected-window w
+          (with-current-buffer buf
+            (tmux-control--resize-to-window)))))))
+
+;;;###autoload
+(defun tmux-control-flock ()
+  "Show every connected tmux session at once, one per cell, all live.
+Each cell is an ordinary session buffer (its mode line and window tab bar
+label it), so you can read, switch windows in, or type into any session
+without leaving the overview.  Devotes the whole frame to the grid;
+`tmux-control-unflock' (or `tmux-control-toggle-flock') returns to the
+single session under point.  Sessions are connected with
+`tmux-control-connect' / `tmux-control-select-session' first."
+  (interactive)
+  (let ((buffers (tmux-control--live-session-buffers)))
+    (cond
+     ((null buffers)
+      (user-error "No live tmux-control sessions to flock"))
+     ((not (cdr buffers))
+      (user-error "Only one live session; connect another to flock"))
+     (t
+      (tmux-control--flock-grid buffers)
+      (tmux-control--flock-resize-all)
+      (set-frame-parameter nil 'tmux-control--flock t)
+      (message "Flock: %d sessions — C-c C-f returns to one" (length buffers))))))
+
+;;;###autoload
+(defun tmux-control-unflock ()
+  "Leave the flock view, showing only the session under point."
+  (interactive)
+  (let ((buf (current-buffer)))
+    (delete-other-windows)
+    (set-frame-parameter nil 'tmux-control--flock nil)
+    (when (process-live-p (buffer-local-value 'tmux-control--process buf))
+      (tmux-control--resize-to-window))))
+
+;;;###autoload
+(defun tmux-control-toggle-flock ()
+  "Toggle the all-sessions flock view.  Bound to \\`C-c C-f'."
+  (interactive)
+  (if (frame-parameter nil 'tmux-control--flock)
+      (tmux-control-unflock)
+    (tmux-control-flock)))
 
 (defun tmux-control-disconnect ()
   "Disconnect the current tmux-control client."

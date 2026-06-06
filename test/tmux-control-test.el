@@ -1164,5 +1164,39 @@ each wrapped in an evolving prompt line and a status bar.")
         (tmux-control-next-session)
         (should-not switched)))))
 
+(ert-deftest tmux-control-test-live-session-buffers-filters ()
+  ;; The flock view collects only plain live session buffers: not tiling pane
+  ;; buffers (which carry a controller), not tiled controllers (which render
+  ;; nothing), not dead connections; result sorted by buffer name.
+  (let ((live (generate-new-buffer "*tmux-control:local:s1*"))
+        (pane (generate-new-buffer "*tmux-control:local:s2pane*"))
+        (tiled (generate-new-buffer "*tmux-control:local:s3*"))
+        (dead (generate-new-buffer "*tmux-control:local:s4*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer live
+            (setq-local tmux-control--session "s1")
+            (setq-local tmux-control--process 'live))
+          (with-current-buffer pane
+            (setq-local tmux-control--session "s2")
+            (setq-local tmux-control--controller live)
+            (setq-local tmux-control--process 'live))
+          (with-current-buffer tiled
+            (setq-local tmux-control--session "s3")
+            (setq-local tmux-control--tiled t)
+            (setq-local tmux-control--process 'live))
+          (with-current-buffer dead
+            (setq-local tmux-control--session "s4")
+            (setq-local tmux-control--process 'dead))
+          (cl-letf (((symbol-function 'process-live-p)
+                     (lambda (p) (eq p 'live))))
+            (let ((got (mapcar #'buffer-name (tmux-control--live-session-buffers))))
+              (should (member "*tmux-control:local:s1*" got))
+              (should-not (member "*tmux-control:local:s2pane*" got))
+              (should-not (member "*tmux-control:local:s3*" got))
+              (should-not (member "*tmux-control:local:s4*" got)))))
+      (kill-buffer live) (kill-buffer pane)
+      (kill-buffer tiled) (kill-buffer dead))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
