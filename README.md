@@ -4,13 +4,12 @@
 the [iTerm2 tmux-integration](https://iterm2.com/documentation-tmux-integration.html)
 idea, but in Emacs.
 
-![The same tmux session in iTerm2 and in Emacs via tmux-control](docs/images/iterm-vs-tmux-control.png)
+![A live tmux session in Emacs via tmux-control: the session's windows as a header-line tab bar, switched with one key, with a dot flagging a background window that produced output](docs/images/demo.gif)
 
-*The same live tmux session — a [`pi-agents-tmux`](https://www.npmjs.com/package/@vanillagreen/pi-agents-tmux)
-agent team in split panes — rendered by iTerm2's native tmux integration
-(left) and by tmux-control in Emacs (right). Multi-pane **tiling** is
-[experimental](#tiling-every-pane-at-once-experimental); the shipped client
-mirrors one pane at a time.*
+*A live tmux session in Emacs. Each window is a **tab** in the header line,
+flipped with one key (`C-c C-n`); a **dot** marks a background window that
+produced output — the "which window wants me?" signal — and clears when you
+visit it. Every pane is just an Emacs buffer you can search and copy from.*
 
 Other ways to pair Emacs with tmux either **send it commands**
 ([`emamux`](https://github.com/emacsorphanage/emamux)), **navigate** between
@@ -30,13 +29,24 @@ The single-pane client is stable and in daily use; multi-pane **tiling** is
 still [experimental](#tiling-every-pane-at-once-experimental) (see
 [Status](#status)).
 
+## Requirements
+
+- **Emacs 29.1+**
+- **[Eat](https://codeberg.org/akib/emacs-eat) 0.9.4+** — the terminal renderer
+  and a hard dependency (`straight`/`package.el` pulls it in automatically).
+- **tmux 3.x** on the target host, local or remote over SSH (flow control needs
+  3.2+).
+- macOS or Linux.
+
 ## Usage
 
 ```elisp
 (use-package tmux-control
-  :straight (:local-repo "~/code/tmux-control" :type git)
+  :straight (tmux-control :type git :host github :repo "csheaff/tmux-control")
   :custom
-  (tmux-control-default-host "dev")
+  ;; Connection defaults for `M-x tmux-control-connect' — these are examples;
+  ;; set them to your own host / socket / session.
+  (tmux-control-default-host "dev")          ; an SSH host alias, or nil for local
   (tmux-control-default-socket-name "main")
   (tmux-control-default-session "emacs"))
 ```
@@ -53,7 +63,8 @@ creates that session (tmux attaches if it exists, otherwise creates it).
 
 ### Window and session management
 
-These commands act on the connected session (no key bindings by default):
+These commands act on the connected session (`C-c C-n`/`C-c C-p` are bound in
+the live buffer; the rest are `M-x`, bind them to taste):
 
 - `M-x tmux-control-select-window` switches the live view to another window.
   By default it opens a two-pane chooser with a live preview of the
@@ -123,7 +134,15 @@ along and the live view repaints on the chosen pane.
 and a **tiled** view that renders *every* pane of the current window at
 once, each in its own buffer, with the Emacs windows split to match tmux's
 own layout — the iTerm "show every pane" view.  This is the natural way to
-watch a whole agent team work side by side.  In the tiled view:
+watch a whole agent team work side by side.
+
+![The same tmux session in iTerm2 and in Emacs via tmux-control](docs/images/iterm-vs-tmux-control.png)
+
+*The same live tmux session — a [`pi-agents-tmux`](https://www.npmjs.com/package/@vanillagreen/pi-agents-tmux)
+agent team in split panes — rendered by iTerm2's native tmux integration
+(left) and by the tiled view in Emacs (right): cell-for-cell the same.*
+
+In the tiled view:
 
 - Every pane updates live and independently; output is routed per pane, so
   nothing is interleaved.
