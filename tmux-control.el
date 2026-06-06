@@ -2669,7 +2669,7 @@ is found.  The reply may include a third cursor visibility field
 testing the seed cursor query."
   (let ((val (car (cl-remove-if #'string-empty-p
                                 (mapcar #'string-trim output)))))
-    (when (and val (string-match "\\`\\([0-9]+\\),\\([0-9]+\\)\\(?:,[01]\\)?\\'" val))
+    (when (and val (string-match "\\`\\([0-9]+\\),\\([0-9]+\\)\\(?:,[01]?\\)?\\'" val))
       (cons (string-to-number (match-string 1 val))
             (string-to-number (match-string 2 val))))))
 

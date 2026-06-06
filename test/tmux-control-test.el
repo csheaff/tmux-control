@@ -667,6 +667,7 @@ each wrapped in an evolving prompt line and a status bar.")
   (should (equal '(42 . 2) (tmux-control--parse-cursor-pos '("42,2"))))
   (should (equal '(0 . 0) (tmux-control--parse-cursor-pos '("0,0"))))
   (should (equal '(13 . 48) (tmux-control--parse-cursor-pos '("13,48,1"))))
+  (should (equal '(13 . 48) (tmux-control--parse-cursor-pos '("13,48,"))))
   ;; Reverse-order/padded reply lists and surrounding whitespace are tolerated.
   (should (equal '(7 . 3) (tmux-control--parse-cursor-pos '("" "  7,3 " ""))))
   ;; Malformed or empty replies yield nil rather than a bogus position.
@@ -681,6 +682,7 @@ each wrapped in an evolving prompt line and a status bar.")
   (should (eq :hidden (tmux-control--parse-cursor-visible '("13,48,0"))))
   ;; Older or malformed replies leave the current Eat cursor visibility alone.
   (should (eq :unknown (tmux-control--parse-cursor-visible '("13,48"))))
+  (should (eq :unknown (tmux-control--parse-cursor-visible '("13,48,"))))
   (should (eq :unknown (tmux-control--parse-cursor-visible '("13,48,2"))))
   (should (eq :unknown (tmux-control--parse-cursor-visible nil))))
 
