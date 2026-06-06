@@ -45,7 +45,11 @@ like tabs, **in place** in the current window:
 - `C-c C-s` (`tmux-control-select-session`) prompts for a session on the same
   host and socket, completing over the ones that exist there, and switches the
   view to it.  Picking a session that is already connected reuses its live
-  buffer (no respawn); picking a fresh one connects it on the spot.
+  buffer (no respawn); picking one that exists in tmux but isn't shown yet
+  connects it on the spot.  The prompt requires a match, so a typo can't
+  accidentally spawn a session — to *create* one, use `M-x
+  tmux-control-connect` (which attaches an existing session or creates a new
+  one).
 - `M-x tmux-control-next-session` and `M-x tmux-control-previous-session` step
   to the next/previous session in tmux's list order, wrapping around — a quick
   way to cycle a small set without the prompt.

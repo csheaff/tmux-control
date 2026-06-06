@@ -1131,6 +1131,24 @@ each wrapped in an evolving prompt line and a status bar.")
         (setq-local tmux-control--session "a")
         (tmux-control-previous-session)   (should (equal switched "c")))))) ; wrap back
 
+(ert-deftest tmux-control-test-select-session-requires-match ()
+  ;; C-c C-s must not let a typo spawn a session: completing-read is called
+  ;; with REQUIRE-MATCH non-nil, so only an existing session can be chosen.
+  (with-temp-buffer
+    (setq-local tmux-control--host nil)
+    (setq-local tmux-control--socket-name "s")
+    (setq-local tmux-control--session "a")
+    (let ((require-match-arg 'unset))
+      (cl-letf (((symbol-function 'tmux-control--list-sessions)
+                 (lambda (_host _socket) '("a" "b")))
+                ((symbol-function 'completing-read)
+                 (lambda (_prompt _coll &optional _pred require-match &rest _)
+                   (setq require-match-arg require-match)
+                   "b"))
+                ((symbol-function 'tmux-control--connect-or-switch) #'ignore))
+        (tmux-control-select-session)
+        (should require-match-arg)))))
+
 (ert-deftest tmux-control-test-cycle-session-single-is-noop ()
   ;; With only the current session present, cycling does nothing.
   (with-temp-buffer

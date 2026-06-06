@@ -551,9 +551,11 @@ even when `tmux-control-connect' would otherwise pop a new window."
 ;;;###autoload
 (defun tmux-control-select-session ()
   "Switch the view to another tmux session on the same host and socket.
-Completes over the sessions that currently exist there; an existing
-connection is reused, otherwise the session is connected.  Bound to
-\\`C-c C-s'.  See also `tmux-control-next-session'."
+Completes over the sessions that currently exist there, requiring a match so
+a typo cannot accidentally spawn a new session; an existing connection is
+reused, otherwise the session is connected.  Bound to \\`C-c C-s'.  To
+*create* a session, use `tmux-control-connect' (which attaches or creates).
+See also `tmux-control-next-session'."
   (interactive)
   (unless tmux-control--session
     (user-error "Not in a tmux-control session buffer"))
@@ -562,7 +564,7 @@ connection is reused, otherwise the session is connected.  Bound to
          (sessions (tmux-control--list-sessions host socket))
          (choice (completing-read
                   (format "Session (current: %s): " tmux-control--session)
-                  sessions nil nil)))
+                  sessions nil t)))
     (when (and choice (not (string-empty-p choice)))
       (tmux-control--connect-or-switch host socket choice))))
 
