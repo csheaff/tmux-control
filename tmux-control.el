@@ -69,8 +69,16 @@ When nil or empty, connect to local tmux."
   "Shell snippet used before running tmux on a remote host."
   :type 'string)
 
-(defcustom tmux-control-scrollback-lines 50000
-  "Number of pane-history lines to show in scrollback view."
+(defcustom tmux-control-scrollback-lines 10000
+  "Number of pane-history lines to capture for the scrollback view.
+
+This bounds the work `tmux-control-scrollback' does on every invocation --
+capturing the lines (a round trip, possibly over SSH), colorizing them, and,
+when `tmux-control-compact-scrollback' is on, collapsing repeated TUI
+redraws.  All of that scales with this number, so a very large value (tens of
+thousands of lines of a busy repainting pane) can make opening scrollback
+visibly lag.  10000 lines is generous for browsing recent history; raise it
+if you routinely need to scroll back further and can accept the extra cost."
   :type 'integer)
 
 (defcustom tmux-control-pause-after nil
@@ -2296,12 +2304,23 @@ small table, a two-line banner) is never silently dropped.")
   "Return non-nil when LINES are substantial enough to be a redraw body.
 Requires several nonblank lines with enough distinct content, so that
 generic filler (blank lines, repeated rule characters) is not mistaken
-for a repeated full-screen panel."
-  (let ((nonblank (seq-filter (lambda (line)
-                                (not (string-empty-p (string-trim line))))
-                              lines)))
-    (and (>= (length nonblank) 4)
-         (>= (length (seq-uniq (mapcar #'string-trim nonblank))) 3))))
+for a repeated full-screen panel.  Counts in one pass and stops as soon as
+both thresholds are met -- this runs in the innermost compaction loop, so an
+O(n) early-exit count beats building and de-duplicating intermediate lists."
+  (let ((nonblank 0)
+        (distinct 0)
+        (seen (make-hash-table :test 'equal)))
+    (catch 'enough
+      (dolist (line lines)
+        (let ((trimmed (string-trim line)))
+          (unless (string-empty-p trimmed)
+            (setq nonblank (1+ nonblank))
+            (unless (gethash trimmed seen)
+              (puthash trimmed t seen)
+              (setq distinct (1+ distinct)))
+            (when (and (>= nonblank 4) (>= distinct 3))
+              (throw 'enough t)))))
+      nil)))
 
 (defun tmux-control--seen-run-length (haystack chunk start n)
   "Return the length of the longest already-seen redraw run of CHUNK at START.
@@ -2309,15 +2328,26 @@ Considers runs from START up to N, returning the longest contiguous run
 that is distinctive (`tmux-control--redraw-run-distinctive-p') and already
 present in HAYSTACK, or nil when no qualifying run starts at START."
   (let ((len (min (- n start) tmux-control-compact-scrollback-window))
-        (found nil))
+        (in-haystack nil))
+    ;; Find the LONGEST run at START present in HAYSTACK.  Presence is
+    ;; monotonic in LEN -- a longer run embeds its shorter prefix, so once a
+    ;; length is absent every greater length is too -- hence the first hit
+    ;; scanning down from the max is the longest, and we stop there.
     (while (and (>= len tmux-control--scrollback-min-redraw-run)
-                (not found))
-      (let ((candidate (cl-subseq chunk start (+ start len))))
-        (when (and (tmux-control--redraw-run-distinctive-p candidate)
-                   (cl-search candidate haystack :test #'string=))
-          (setq found len)))
+                (not in-haystack))
+      (when (cl-search (cl-subseq chunk start (+ start len)) haystack
+                       :test #'string=)
+        (setq in-haystack len))
       (setq len (1- len)))
-    found))
+    ;; Distinctiveness is monotonic too (a longer run has at least as much
+    ;; distinct content as its prefix), so if the longest seen run is not
+    ;; distinctive no shorter one is either -- the old scan that tested both
+    ;; conditions at every length would reach the same nil.  Testing it once
+    ;; on the winner, rather than at every candidate length, is the speedup.
+    (when (and in-haystack
+               (tmux-control--redraw-run-distinctive-p
+                (cl-subseq chunk start (+ start in-haystack))))
+      in-haystack)))
 
 (defun tmux-control--strip-seen-runs (out chunk)
   "Remove from CHUNK contiguous line runs already present in recent OUT.

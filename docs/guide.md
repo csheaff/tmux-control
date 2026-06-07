@@ -256,6 +256,13 @@ explicitly over TRAMP, e.g. `C-x C-f /ssh:dev:~/path/to/file`.
 
 ## Scrollback
 
+`tmux-control-scrollback-lines` (default `10000`) sets how many lines of pane
+history each scrollback view captures.  Opening scrollback captures, colorizes,
+and — when compaction is on — collapses that many lines, all of which scale
+with the number, so a very large value over a busy repainting pane can make the
+view take a moment to appear.  Raise it if you routinely scroll back further and
+can accept the extra cost; it is capped by the pane's own tmux `history-limit`.
+
 Scrollback joins soft-wrapped tmux lines by default; disable that with:
 
 ```elisp
