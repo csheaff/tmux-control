@@ -174,6 +174,16 @@ is forwarded to the terminal unchanged."
                  (const :tag "Minibuffer + inline preview" inline)
                  (const :tag "Plain completion, no preview" nil)))
 
+(defcustom tmux-control-session-preview t
+  "Non-nil previews sessions in place as you choose one with completion.
+When `tmux-control-select-session' prompts, each *already-connected* session is
+shown in the live window as you move through the candidates (an unconnected
+session is not previewed -- it would have to be connected first); cancelling
+restores the session you came from.  Like the window `inline' preview, this
+needs `consult' and degrades to a plain prompt without it.  Set to nil for a
+plain prompt."
+  :type 'boolean)
+
 (defcustom tmux-control-window-preview-delay 0.15
   "Idle seconds to wait before refreshing the window preview as you move.
 
@@ -580,6 +590,28 @@ even when `tmux-control-connect' would otherwise pop a new window."
         (pop-to-buffer buffer)
       (tmux-control-connect host socket-name session))))
 
+(defun tmux-control--select-session-inline (host socket sessions current)
+  "Choose a session in the minibuffer, previewing connected ones in place.
+Each already-connected session is shown in the live window as you move through
+the candidates; an unconnected one is not previewed.  Cancelling restores the
+session you came from.  Uses `consult'."
+  (let* ((window (selected-window))
+         (orig-buffer (window-buffer window))
+         (choices (mapcar (lambda (s)
+                            (cons (if (equal s current) (concat s " (current)") s) s))
+                          sessions))
+         (choice (tmux-control--read-with-preview
+                  (format "Session (current: %s): " current) choices
+                  (lambda (s)
+                    (when-let* ((buf (tmux-control--session-live-buffer host s)))
+                      (when (window-live-p window) (set-window-buffer window buf))))
+                  (lambda ()
+                    (when (and (window-live-p window) (buffer-live-p orig-buffer))
+                      (set-window-buffer window orig-buffer)))
+                  'tmux-control-session)))
+    (when (and choice (not (string-empty-p choice)))
+      (tmux-control--connect-or-switch host socket choice))))
+
 ;;;###autoload
 (defun tmux-control-select-session ()
   "Switch the view to another tmux session on the same host and socket.
@@ -587,18 +619,22 @@ Completes over the sessions that currently exist there, requiring a match so
 a typo cannot accidentally spawn a new session; an existing connection is
 reused, otherwise the session is connected.  Bound to \\`C-c C-s'.  To
 *create* a session, use `tmux-control-connect' (which attaches or creates).
-See also `tmux-control-next-session'."
+With `tmux-control-session-preview' (and `consult'), connected sessions are
+previewed in place as you choose.  See also `tmux-control-next-session'."
   (interactive)
   (unless tmux-control--session
     (user-error "Not in a tmux-control session buffer"))
   (let* ((host tmux-control--host)
          (socket tmux-control--socket-name)
-         (sessions (tmux-control--list-sessions host socket))
-         (choice (completing-read
-                  (format "Session (current: %s): " tmux-control--session)
-                  sessions nil t)))
-    (when (and choice (not (string-empty-p choice)))
-      (tmux-control--connect-or-switch host socket choice))))
+         (current tmux-control--session)
+         (sessions (tmux-control--list-sessions host socket)))
+    (if (and tmux-control-session-preview (fboundp 'consult--read))
+        (tmux-control--select-session-inline host socket sessions current)
+      (let ((choice (completing-read
+                     (format "Session (current: %s): " current)
+                     sessions nil t)))
+        (when (and choice (not (string-empty-p choice)))
+          (tmux-control--connect-or-switch host socket choice))))))
 
 (defun tmux-control--cycle-session (delta)
   "Switch to the session DELTA steps from the current one (wrapping).
@@ -926,51 +962,55 @@ tmux runs with `alternate-screen off'."
     (or (cdr (assoc choice choices))
         (car (split-string choice ":")))))
 
+(defun tmux-control--read-with-preview (prompt choices preview restore &optional category)
+  "Read a value from CHOICES with PROMPT, previewing each candidate live.
+CHOICES is an alist of (DISPLAY . VALUE).  PREVIEW is called with a VALUE as
+you move through candidates (a live in-place preview); RESTORE is called with
+no arguments if you cancel, to undo the previews.  Returns the selected VALUE
+\(the caller commits it), or nil.  Uses `consult' for the live preview;
+without it, a plain completion prompt with no preview."
+  (if (not (fboundp 'consult--read))
+      (cdr (assoc (completing-read prompt choices nil t) choices))
+    (let ((committed nil))
+      (unwind-protect
+          (prog1 (cdr (assoc
+                       (consult--read
+                        (mapcar #'car choices)
+                        :prompt prompt :require-match t :sort nil
+                        :category (or category 'tmux-control)
+                        :state (lambda (action cand)
+                                 (when (and (eq action 'preview) cand)
+                                   (when-let* ((value (cdr (assoc cand choices))))
+                                     (funcall preview value)))))
+                       choices))
+            (setq committed t))
+        (unless committed (funcall restore))))))
+
 (defun tmux-control--select-window-inline ()
   "Choose a window in the minibuffer, previewing each candidate in place.
-Uses `consult' for live per-candidate preview when available -- the live view
-switches to the highlighted window as you move, and is restored to the window
-you came from if you cancel.  Without `consult', falls back to a plain prompt."
-  (let ((choices (tmux-control--window-choices)))
-    (if (not (fboundp 'consult--read))
-        (tmux-control--do-select-window
-         (tmux-control--normalize-window-index
-          (or (cdr (assoc (completing-read "Window: " choices nil t) choices))
-              (user-error "No window selected"))))
-      (let ((buffer (current-buffer))
-            ;; Derive the window to restore on cancel from the freshly-queried
-            ;; active window (its candidate carries `tmux-window-active'), not
-            ;; from `tmux-control--current-window' -- that is only maintained
-            ;; when the tab bar is on.
-            (original (or (cdr (seq-find
-                                (lambda (c)
-                                  (get-text-property 0 'tmux-window-active (car c)))
-                                choices))
-                          tmux-control--current-window))
-            (committed nil))
-        (unwind-protect
-            (let* ((display (consult--read
-                             (mapcar #'car choices)
-                             :prompt "Window: "
-                             :require-match t
-                             :sort nil
-                             :category 'tmux-control-window
-                             :state
-                             (lambda (action cand)
-                               (when (and (eq action 'preview) cand
-                                          (buffer-live-p buffer))
-                                 (when-let* ((idx (cdr (assoc cand choices))))
-                                   (with-current-buffer buffer
-                                     (tmux-control--do-select-window idx)))))))
-                   (idx (cdr (assoc display choices))))
-              (when idx
-                (with-current-buffer buffer (tmux-control--do-select-window idx))
-                (setq committed t)))
-          ;; Quit or empty selection: restore the window we started on.
-          (unless committed
-            (when (and original (buffer-live-p buffer))
-              (with-current-buffer buffer
-                (tmux-control--do-select-window original)))))))))
+With `consult' the live view switches to the highlighted window as you move and
+is restored to the window you came from if you cancel; without it, a plain
+prompt."
+  (let* ((choices (tmux-control--window-choices))
+         (buffer (current-buffer))
+         ;; Restore on cancel to the freshly-queried active window (its candidate
+         ;; carries `tmux-window-active'), not `tmux-control--current-window' --
+         ;; that is only maintained when the tab bar is on.
+         (original (or (cdr (seq-find
+                             (lambda (c) (get-text-property 0 'tmux-window-active (car c)))
+                             choices))
+                       tmux-control--current-window))
+         (idx (tmux-control--read-with-preview
+               "Window: " choices
+               (lambda (i) (when (buffer-live-p buffer)
+                             (with-current-buffer buffer (tmux-control--do-select-window i))))
+               (lambda () (when (and original (buffer-live-p buffer))
+                            (with-current-buffer buffer
+                              (tmux-control--do-select-window original))))
+               'tmux-control-window)))
+    (when idx
+      (with-current-buffer buffer
+        (tmux-control--do-select-window (tmux-control--normalize-window-index idx))))))
 
 (defun tmux-control--normalize-window-index (index)
   "Return INDEX as a validated window-index string or signal a `user-error'."

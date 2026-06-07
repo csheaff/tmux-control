@@ -65,7 +65,11 @@ like tabs, **in place** in the current window:
   connects it on the spot.  The prompt requires a match, so a typo can't
   accidentally spawn a session — to *create* one, use `M-x
   tmux-control-connect` (which attaches an existing session or creates a new
-  one).
+  one).  With `tmux-control-session-preview` (default t) and `consult`, each
+  *already-connected* session is previewed in place as you move through the
+  candidates — like the window `inline` preview above — and cancelling restores
+  the session you came from.  Set `tmux-control-session-preview` to nil for a
+  plain prompt.
 - `M-x tmux-control-next-session` and `M-x tmux-control-previous-session` step
   to the next/previous session in tmux's list order, wrapping around — a quick
   way to cycle a small set without the prompt.

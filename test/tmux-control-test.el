@@ -1332,5 +1332,44 @@ each wrapped in an evolving prompt line and a status bar.")
       ;; previewed window 1, then restored the original active window 0
       (should (equal (nreverse switched) '("1" "0"))))))
 
+(ert-deftest tmux-control-test-read-with-preview-cancel-calls-restore ()
+  ;; The shared preview reader previews the navigated candidate and, on a
+  ;; `quit', invokes RESTORE (and does not return a value).
+  (let ((previewed nil) (restored nil))
+    (cl-letf (((symbol-function 'consult--read)
+               (lambda (_cands &rest opts)
+                 (funcall (plist-get opts :state) 'preview "x")
+                 (signal 'quit nil))))
+      (ignore-error quit
+        (tmux-control--read-with-preview
+         "P: " '(("x" . 1) ("y" . 2))
+         (lambda (v) (setq previewed v))
+         (lambda () (setq restored t))))
+      (should (eq previewed 1))
+      (should restored))))
+
+(ert-deftest tmux-control-test-session-inline-previews-connected-commits ()
+  ;; Session preview shows an already-connected session in place (not an
+  ;; unconnected one) and commits the chosen session via --connect-or-switch.
+  (let ((bbuf (generate-new-buffer " tc-test-b"))
+        (previewed '()) (committed nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'tmux-control--session-live-buffer)
+                   (lambda (_host s) (when (equal s "b") bbuf))) ; only "b" connected
+                  ((symbol-function 'set-window-buffer)
+                   (lambda (_w buf) (push buf previewed)))
+                  ((symbol-function 'tmux-control--connect-or-switch)
+                   (lambda (_h _s session) (setq committed session)))
+                  ((symbol-function 'consult--read)
+                   (lambda (_cands &rest opts)
+                     (funcall (plist-get opts :state) 'preview "a (current)") ; unconnected → skip
+                     (funcall (plist-get opts :state) 'preview "b")           ; connected → preview
+                     "b")))
+          (tmux-control--select-session-inline nil "sock" '("a" "b" "c") "a")
+          (should (memq bbuf previewed))        ; previewed b's buffer
+          (should-not (memq nil previewed))     ; unconnected "a" did not preview
+          (should (equal committed "b")))       ; committed b
+      (kill-buffer bbuf))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
