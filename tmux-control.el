@@ -3584,6 +3584,58 @@ so only the screen capture costs a round-trip here."
 
 ;;; Window arrangement from the parsed layout tree.
 
+(defun tmux-control--our-tiling-window-p (window controller)
+  "Return non-nil when WINDOW belongs to CONTROLLER's single-pane or tiled view.
+True for the window showing CONTROLLER itself, for a tiled pane window (it
+carries the `tmux-control-pane' parameter), and for any window showing a
+render buffer whose controller is CONTROLLER.  Everything else on the frame
+is a foreign window -- a user's non-tmux buffer the tiling must not consume."
+  (let ((b (window-buffer window)))
+    (or (eq b controller)
+        (window-parameter window 'tmux-control-pane)
+        (eq (buffer-local-value 'tmux-control--controller b) controller))))
+
+(defun tmux-control--tiled-region-size (frame controller)
+  "Return (COLS . ROWS): the size tmux should lay CONTROLLER's panes out in.
+This is FRAME's text area (its columns, and its lines minus the minibuffer
+row -- the rows must budget each stacked pane's mode line) reduced by any
+foreign window sharing the frame: a full-height neighbor steals columns, a
+full-width one steals rows.  With no foreign window it is exactly the old
+whole-frame size, so a tiling that owns the frame is unchanged; with one it
+is the smaller region the tiling may use, so panes never overrun a non-tmux
+window's space.  Computed the same way whether called before tiling (from
+the controller's own window) or while tiled (from the pane windows), so the
+size never disagrees with itself and never forces a spurious re-tile."
+  (let ((cols (frame-text-cols frame))
+        (rows (1- (frame-text-lines frame))))
+    (dolist (w (window-list frame 'no-mini))
+      (unless (tmux-control--our-tiling-window-p w controller)
+        (if (>= (window-total-height w) rows)
+            (setq cols (- cols (window-total-width w)))     ; a side column
+          (setq rows (- rows (window-total-height w))))))    ; a top/bottom band
+    (cons (max 1 cols) (max 1 rows))))
+
+(defun tmux-control--collapse-tile-windows (keep)
+  "Delete this tiling's own windows on KEEP's frame, except KEEP.
+A tiling is always grown by splitting a single window, so every pane window
+is a descendant of that one window and carries the `tmux-control-pane'
+parameter `tmux-control--tile-arrange-node' stamps on it.  Deleting those
+reclaims the tiling's rectangle back into KEEP without disturbing any
+foreign (non-tmux) window sharing the frame -- the whole point, so switching
+windows or untiling no longer wipes a user's other buffer.  When the tiling
+owned the whole frame this deletes every other window, exactly as the old
+`delete-other-windows' did.  KEEP loses its own pane marker so it reads as a
+plain window afterwards."
+  (when (window-live-p keep)
+    (let ((frame (window-frame keep)))
+      (dolist (w (window-list frame 'no-mini))
+        (when (and (window-live-p w)
+                   (not (eq w keep))
+                   (window-parameter w 'tmux-control-pane)
+                   (> (length (window-list frame 'no-mini)) 1))
+          (ignore-errors (delete-window w)))))
+    (set-window-parameter keep 'tmux-control-pane nil)))
+
 (defun tmux-control--tile-arrange-node (node window panes collect)
   "Subdivide WINDOW to match layout NODE, assigning PANES buffers to leaves.
 COLLECT is called as (PANE-ID WINDOW) for each leaf placed.  Splits follow
@@ -3621,9 +3673,12 @@ takes the remaining window."
        (tmux-control--tile-arrange-node (car kids) win panes collect)))))
 
 (defun tmux-control--tile-arrange (controller tree panes)
-  "Tile CONTROLLER's frame to match layout TREE, showing PANES buffers.
-Devotes the whole frame to the tiling (`delete-other-windows').  Returns
-an alist (PANE-ID . WINDOW), or nil when the windows could not be built."
+  "Tile CONTROLLER's window region to match layout TREE, showing PANES buffers.
+Subdivides the controller's own window (collapsing any prior tiling windows
+back into it first), so a non-tmux window sharing the frame is preserved
+rather than wiped; when the controller already fills the frame the tiling
+fills the frame as before.  Returns an alist (PANE-ID . WINDOW), or nil when
+the windows could not be built."
   ;; Prefer the selected window when it already shows the controller or one
   ;; of our pane buffers, so a re-tile never reaches onto a different frame
   ;; (an all-frames `get-buffer-window' could) and clobber its layout.
@@ -3636,7 +3691,10 @@ an alist (PANE-ID . WINDOW), or nil when the windows could not be built."
     (condition-case err
         (progn
           (select-window root)
-          (delete-other-windows root)
+          ;; Reclaim only this tiling's own windows back into ROOT, leaving a
+          ;; non-tmux window sharing the frame intact -- tiling devotes the
+          ;; controller's region, not the whole frame.
+          (tmux-control--collapse-tile-windows root)
           (let ((acc '()))
             (tmux-control--tile-arrange-node
              tree (selected-window) panes
@@ -3849,8 +3907,11 @@ window.  Does not reseed; callers that resume single-pane do that."
                          (selected-window))))
             (when (window-live-p win)
               (select-window win)
-              (set-window-buffer win controller)
-              (delete-other-windows win))))
+              ;; Collapse only the tiling's own windows back into WIN; a
+              ;; non-tmux window sharing the frame survives untiling.  With no
+              ;; foreign window this reclaims the whole frame as before.
+              (tmux-control--collapse-tile-windows win)
+              (set-window-buffer win controller))))
         (dolist (np panes)
           (when (buffer-live-p (cdr np))
             (let ((kill-buffer-query-functions nil)
@@ -3859,29 +3920,24 @@ window.  Does not reseed; callers that resume single-pane do that."
 
 ;;; Interactive entry points.
 
-(defun tmux-control--tiling-frame-size (frame)
-  "Return a (W . H) char size for the tiling area of FRAME.
-Tiling devotes the whole frame, so this is the frame's text area minus the
-minibuffer row -- the size tmux is asked to lay the window's panes out in."
-  (cons (max 1 (frame-text-cols frame))
-        (max 1 (- (frame-text-lines frame) 1))))
-
 (defun tmux-control-tile ()
   "Tile every pane of the current tmux window into Emacs windows.
 Each pane is rendered live in its own buffer, arranged to match tmux's
 own layout -- the iTerm \"show every pane\" view -- which is handy for a
-split-pane window such as a Claude Code agent team.  Devotes the whole
-frame to the session.  `tmux-control-untile' (or \\`C-c C-t') returns to
-the single-pane view."
+split-pane window such as a Claude Code agent team.  Tiles within the
+controller's own window region, so a non-tmux window sharing the frame is
+left alone; when the controller fills the frame the tiling fills it.
+`tmux-control-untile' (or \\`C-c C-t') returns to the single-pane view."
   (interactive)
   (tmux-control--ensure-live)
   (when tmux-control--controller
     (user-error "This is a tiled pane; use C-c C-t to untile"))
   (when tmux-control--tiled
     (user-error "Already tiling this session"))
-  (let ((size (tmux-control--tiling-frame-size (selected-frame))))
-    ;; Ask tmux to size the window to the Emacs area we tile into; the
-    ;; resulting %layout-change re-tiles to the exact pane sizes.
+  (let ((size (tmux-control--tiled-region-size (selected-frame) (current-buffer))))
+    ;; Ask tmux to size the window to the Emacs area we tile into -- the frame
+    ;; less any non-tmux window sharing it -- so the resulting %layout-change
+    ;; re-tiles to the exact pane sizes.
     (setq tmux-control--tiled-client-size size)
     (tmux-control--send-command
      (format "refresh-client -C %dx%d" (car size) (cdr size)))
@@ -3889,14 +3945,16 @@ the single-pane view."
 
 (defun tmux-control--reassert-tiling-size (controller frame)
   "Ask tmux to match CONTROLLER's tiling area on FRAME when it has resized.
-Only acts when the frame's tiling area actually changed, so it ignores the
-internal window splits a re-tile makes (those keep the frame size)."
+Recomputes the tiling region (the frame less any foreign window sharing it,
+the same measure tiling started from) and only acts when it actually
+changed, so it ignores the internal window splits a re-tile makes -- those
+keep the region size -- and so it never disagrees with the tile-time size."
   (when (and (buffer-live-p controller)
              (buffer-local-value 'tmux-control--tiled controller)
              (process-live-p
               (buffer-local-value 'tmux-control--process controller)))
     (with-current-buffer controller
-      (let ((size (tmux-control--tiling-frame-size frame)))
+      (let ((size (tmux-control--tiled-region-size frame controller)))
         (unless (equal size tmux-control--tiled-client-size)
           (setq tmux-control--tiled-client-size size)
           (tmux-control--send-command

@@ -121,9 +121,11 @@ over buffers that are already live — no extra connections.
   argument — `C-u C-c C-f` — it first connects *every* session on the host and
   socket, so one keystroke gives you the whole host.
 
-Like the tiled view it takes the **whole frame** and resizes each session to
-its cell, so a session also attached elsewhere (another client) follows tmux's
-`window-size` rule.  Experimental.
+The flock takes the **whole frame** and resizes each session to its cell, so a
+session also attached elsewhere (another client) follows tmux's `window-size`
+rule.  (To keep a non-tmux buffer beside a single session instead, the tiled
+view above preserves a window sharing the frame; the flock always owns it —
+see below.)  Experimental.
 
 #### Watching the flock beside your code
 
@@ -207,17 +209,18 @@ tiled view; each window tiles its own panes, like iTerm's per-window tabs.
 `C-c C-t` again (or `M-x tmux-control-untile`) returns to the single-pane
 view on the currently active pane.
 
-Tiling is **experimental** and devotes the whole frame to the session
-(`delete-other-windows`).  Each pane's terminal is sized to tmux's grid, so the
-rendering matches tmux cell-for-cell, and the Emacs windows split to match.
-Re-tiles are debounced and their tmux queries batched, so a busy remote session
-is not stalled by layout changes.
+Tiling is **experimental** and fills the tmux-control buffer's **own window
+region**, not the whole frame: a non-tmux window sharing the frame (a code
+buffer, notes, a REPL) is preserved, and the panes tile only in the space the
+single-pane view occupied.  When the tmux-control buffer already fills the
+frame, the tiling fills the frame.  Each pane's terminal is sized to tmux's
+grid, so the rendering matches tmux cell-for-cell, and the Emacs windows split
+to match.  Re-tiles are debounced and their tmux queries batched, so a busy
+remote session is not stalled by layout changes.
 
 Known limitations of the tiled view (none of which affect the single-pane
 view):
 
-- It takes the **whole frame** (`delete-other-windows`); there is no
-  tile-within-a-region mode.
 - Switching windows while tiled rebuilds the new window's pane buffers, so a
   window's Emacs-side scrollback is not kept across a switch.
 - A vertical stack spends one row on an Emacs mode line where tmux spends it on

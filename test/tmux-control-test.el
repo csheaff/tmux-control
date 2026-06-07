@@ -1371,5 +1371,74 @@ each wrapped in an evolving prompt line and a status bar.")
           (should (equal committed "b")))       ; committed b
       (kill-buffer bbuf))))
 
+;;; Tiling preserves a foreign (non-tmux) window sharing the frame.
+
+(ert-deftest tmux-control-test-our-tiling-window-p ()
+  "`tmux-control--our-tiling-window-p' recognizes the controller window and a
+tagged pane window as ours, and a foreign window as not ours."
+  (let ((ctrl-buf (generate-new-buffer " tc-test-ctrl"))
+        (foreign-buf (generate-new-buffer " tc-test-foreign")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (let* ((cw (selected-window))
+                 (ow (split-window cw nil 'right)))
+            (set-window-buffer cw ctrl-buf)
+            (set-window-buffer ow foreign-buf)
+            (should (tmux-control--our-tiling-window-p cw ctrl-buf))      ; controller
+            (should-not (tmux-control--our-tiling-window-p ow ctrl-buf))  ; foreign
+            (set-window-parameter ow 'tmux-control-pane "%3")
+            (should (tmux-control--our-tiling-window-p ow ctrl-buf))))    ; tagged pane
+      (kill-buffer ctrl-buf)
+      (kill-buffer foreign-buf))))
+
+(ert-deftest tmux-control-test-collapse-preserves-foreign-window ()
+  "`tmux-control--collapse-tile-windows' removes the tiling's own windows but
+leaves a foreign window sharing the frame untouched -- the regression behind
+\"switching tmux windows clobbers my other buffer\"."
+  (let ((ctrl-buf (generate-new-buffer " tc-test-ctrl"))
+        (foreign-buf (generate-new-buffer " tc-test-foreign")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (let* ((root (selected-window))
+                 (foreign-win (split-window root nil 'right)))
+            (set-window-buffer root ctrl-buf)
+            (set-window-buffer foreign-win foreign-buf)
+            (let ((pane2 (split-window root nil 'below)))
+              (set-window-parameter root 'tmux-control-pane "%1")
+              (set-window-parameter pane2 'tmux-control-pane "%2")
+              (tmux-control--collapse-tile-windows root)
+              (should (window-live-p foreign-win))                  ; foreign survives
+              (should (eq (window-buffer foreign-win) foreign-buf)) ; still its buffer
+              (should-not (window-live-p pane2))                    ; sibling pane collapsed
+              (should (window-live-p root))                         ; keeper survives
+              (should-not (window-parameter root 'tmux-control-pane))))) ; marker cleared
+      (kill-buffer ctrl-buf)
+      (kill-buffer foreign-buf))))
+
+(ert-deftest tmux-control-test-tiled-region-size-subtracts-foreign ()
+  "`tmux-control--tiled-region-size' is the whole frame with no foreign window
+\(the old size, so a frame-owning tiling is unchanged), and fewer columns at
+the same rows once a full-height foreign window shares the frame."
+  (let ((ctrl-buf (generate-new-buffer " tc-test-ctrl"))
+        (foreign-buf (generate-new-buffer " tc-test-foreign")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (let* ((frame (selected-frame))
+                 (cw (selected-window)))
+            (set-window-buffer cw ctrl-buf)
+            (let ((whole (tmux-control--tiled-region-size frame ctrl-buf)))
+              (should (= (car whole) (frame-text-cols frame)))
+              (should (= (cdr whole) (1- (frame-text-lines frame))))
+              (let ((fw (split-window cw nil 'right)))
+                (set-window-buffer fw foreign-buf)
+                (let ((reduced (tmux-control--tiled-region-size frame ctrl-buf)))
+                  (should (< (car reduced) (car whole)))     ; foreign steals columns
+                  (should (= (cdr reduced) (cdr whole))))))))  ; rows unchanged (side split)
+      (kill-buffer ctrl-buf)
+      (kill-buffer foreign-buf))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
