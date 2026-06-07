@@ -42,6 +42,10 @@
 (require 'subr-x)
 (require 'eat)
 
+;; Optional: `consult' drives the per-candidate preview for the `inline'
+;; window-preview style.  Soft -- referenced only when bound.
+(declare-function consult--read "consult" (candidates &rest options))
+
 (defgroup tmux-control nil
   "Drive a tmux pane from Emacs using tmux control mode."
   :group 'terminals)
@@ -155,13 +159,20 @@ is forwarded to the terminal unchanged."
   :type 'boolean)
 
 (defcustom tmux-control-window-preview t
-  "Non-nil means `tmux-control-select-window' shows a live preview chooser.
+  "How `tmux-control-select-window' previews windows as you choose.
 
-When enabled, choosing a window interactively opens a two-pane chooser
-that lists the session's windows on one side and shows a snapshot of the
-highlighted window's visible screen on the other, similar to tmux's own
-`choose-tree' menu.  Set to nil to fall back to a plain completion prompt."
-  :type 'boolean)
+- t (default) opens a two-pane chooser that lists the session's windows on
+  one side and shows a snapshot of the highlighted window's visible screen on
+  the other, like tmux's own `choose-tree' menu.
+- `inline' keeps selection in the minibuffer (so your completion UI -- vertico,
+  ido, default -- is used) but previews the highlighted window *in place* in
+  the live buffer instead of splitting the frame; cancelling restores the
+  window you came from.  Live preview needs `consult' (it drives the
+  per-candidate preview); without it this degrades to a plain prompt.
+- nil prompts with plain completion and no preview."
+  :type '(choice (const :tag "Two-pane chooser" t)
+                 (const :tag "Minibuffer + inline preview" inline)
+                 (const :tag "Plain completion, no preview" nil)))
 
 (defcustom tmux-control-window-preview-delay 0.15
   "Idle seconds to wait before refreshing the window preview as you move.
@@ -899,17 +910,59 @@ tmux runs with `alternate-screen off'."
      (format "show-options -wv -t %s alternate-screen" tmux-control--active-pane)
      :alt-screen-opt)))
 
-(defun tmux-control--read-window-index (prompt)
-  "Read a window index for the current session using PROMPT with completion."
+(defun tmux-control--window-choices ()
+  "Return an alist of (DISPLAY . INDEX) for the current session's windows."
   (unless tmux-control--session
     (user-error "No tmux-control session in this buffer"))
-  (let* ((windows (tmux-control--list-windows tmux-control--host
-                                              tmux-control--socket-name
-                                              tmux-control--session))
-         (choices (mapcar (lambda (w) (cons (cdr w) (car w))) windows))
+  (mapcar (lambda (w) (cons (cdr w) (car w)))
+          (tmux-control--list-windows tmux-control--host
+                                      tmux-control--socket-name
+                                      tmux-control--session)))
+
+(defun tmux-control--read-window-index (prompt)
+  "Read a window index for the current session using PROMPT with completion."
+  (let* ((choices (tmux-control--window-choices))
          (choice (completing-read prompt choices nil t)))
     (or (cdr (assoc choice choices))
         (car (split-string choice ":")))))
+
+(defun tmux-control--select-window-inline ()
+  "Choose a window in the minibuffer, previewing each candidate in place.
+Uses `consult' for live per-candidate preview when available -- the live view
+switches to the highlighted window as you move, and is restored to the window
+you came from if you cancel.  Without `consult', falls back to a plain prompt."
+  (let ((choices (tmux-control--window-choices)))
+    (if (not (fboundp 'consult--read))
+        (tmux-control--do-select-window
+         (tmux-control--normalize-window-index
+          (or (cdr (assoc (completing-read "Window: " choices nil t) choices))
+              (user-error "No window selected"))))
+      (let ((buffer (current-buffer))
+            (original tmux-control--current-window)
+            (committed nil))
+        (unwind-protect
+            (let* ((display (consult--read
+                             (mapcar #'car choices)
+                             :prompt "Window: "
+                             :require-match t
+                             :sort nil
+                             :category 'tmux-control-window
+                             :state
+                             (lambda (action cand)
+                               (when (and (eq action 'preview) cand
+                                          (buffer-live-p buffer))
+                                 (when-let* ((idx (cdr (assoc cand choices))))
+                                   (with-current-buffer buffer
+                                     (tmux-control--do-select-window idx)))))))
+                   (idx (cdr (assoc display choices))))
+              (when idx
+                (with-current-buffer buffer (tmux-control--do-select-window idx))
+                (setq committed t)))
+          ;; Quit or empty selection: restore the window we started on.
+          (unless committed
+            (when (and original (buffer-live-p buffer))
+              (with-current-buffer buffer
+                (tmux-control--do-select-window original)))))))))
 
 (defun tmux-control--normalize-window-index (index)
   "Return INDEX as a validated window-index string or signal a `user-error'."
@@ -938,6 +991,8 @@ When INDEX is given non-interactively, switch to it directly."
    (index
     (tmux-control--do-select-window
      (tmux-control--normalize-window-index index)))
+   ((eq tmux-control-window-preview 'inline)
+    (tmux-control--select-window-inline))
    (tmux-control-window-preview
     (tmux-control--open-window-chooser))
    (t
