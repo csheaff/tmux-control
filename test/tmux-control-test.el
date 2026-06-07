@@ -1296,5 +1296,41 @@ each wrapped in an evolving prompt line and a status bar.")
       (tmux-control-flock-other-frame nil)
       (should (equal (nreverse calls) '(frame focus flock))))))
 
+(ert-deftest tmux-control-test-inline-preview-commit ()
+  ;; The inline window preview previews the highlighted candidate (switching
+  ;; the live view) and, on selection, commits it.
+  (let ((switched '())
+        (choices (list (cons (propertize "0: a (active)" 'tmux-window-active t) "0")
+                       (cons "1: b" "1")
+                       (cons "2: c" "2"))))
+    (cl-letf (((symbol-function 'tmux-control--window-choices) (lambda () choices))
+              ((symbol-function 'tmux-control--do-select-window)
+               (lambda (idx) (push idx switched)))
+              ((symbol-function 'consult--read)
+               (lambda (_cands &rest opts)
+                 (funcall (plist-get opts :state) 'preview "2: c") ; navigate-preview
+                 "2: c")))                                          ; select-commit
+      (tmux-control--select-window-inline)
+      ;; previewed window 2, then committed window 2
+      (should (equal (nreverse switched) '("2" "2"))))))
+
+(ert-deftest tmux-control-test-inline-preview-cancel-restores ()
+  ;; Cancelling (a `quit') restores the window we started on, even though a
+  ;; different one was previewed -- via the `unwind-protect'.
+  (let ((switched '())
+        (choices (list (cons (propertize "0: a (active)" 'tmux-window-active t) "0")
+                       (cons "1: b" "1")
+                       (cons "2: c" "2"))))
+    (cl-letf (((symbol-function 'tmux-control--window-choices) (lambda () choices))
+              ((symbol-function 'tmux-control--do-select-window)
+               (lambda (idx) (push idx switched)))
+              ((symbol-function 'consult--read)
+               (lambda (_cands &rest opts)
+                 (funcall (plist-get opts :state) 'preview "1: b") ; preview window 1
+                 (signal 'quit nil))))                             ; cancel
+      (ignore-error quit (tmux-control--select-window-inline))
+      ;; previewed window 1, then restored the original active window 0
+      (should (equal (nreverse switched) '("1" "0"))))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

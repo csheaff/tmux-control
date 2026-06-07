@@ -12,11 +12,27 @@ These commands act on the connected session (`C-c C-n`/`C-c C-p`/`C-c C-s` are
 bound in the live buffer; the rest are `M-x`, bind them to taste):
 
 - `M-x tmux-control-select-window` switches the live view to another window.
-  By default it opens a two-pane chooser with a live preview of the
-  highlighted window (like tmux's `choose-tree`): move with the arrow keys,
-  `n`/`p`, or the mouse, `RET` or click to select, `q`/`C-g` to cancel.  Its
-  keys take precedence over modal packages (`xah-fly-keys`, `evil`).  Fall back
-  to plain completion with `(setq tmux-control-window-preview nil)`.
+  By default (`tmux-control-window-preview` = t) it opens a two-pane chooser
+  with a live preview of the highlighted window (like tmux's `choose-tree`):
+  move with the arrow keys, `n`/`p`, or the mouse, `RET` or click to select,
+  `q`/`C-g` to cancel.  Its keys take precedence over modal packages
+  (`xah-fly-keys`, `evil`).  Two alternatives:
+    - `(setq tmux-control-window-preview 'inline)` keeps selection in the
+      **minibuffer** (so your usual completion UI is used) but previews the
+      highlighted window **in place** in the live buffer rather than splitting
+      the frame — cancelling restores the window you came from.  The live
+      preview is driven by [`consult`](https://github.com/minad/consult); with
+      consult absent it degrades to a plain prompt.
+    - `(setq tmux-control-window-preview nil)` is a plain completion prompt
+      with no preview.
+
+  ![Inline window preview: a minibuffer window list with the highlighted window previewed in place](images/inline-window-preview.png)
+
+  *`tmux-control-window-preview` = `inline`: pick a window in the minibuffer
+  while the live buffer behind previews the highlighted one (here `0: code`) —
+  no split; moving the selection updates the preview, and cancelling restores
+  the window you started on.*
+
 - `C-c C-n` (`tmux-control-next-window`) and `C-c C-p`
   (`tmux-control-previous-window`) flip to the next or previous window in the
   session, wrapping around — like a terminal's next/previous-tab keys, with no
