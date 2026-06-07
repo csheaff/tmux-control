@@ -938,7 +938,15 @@ you came from if you cancel.  Without `consult', falls back to a plain prompt."
           (or (cdr (assoc (completing-read "Window: " choices nil t) choices))
               (user-error "No window selected"))))
       (let ((buffer (current-buffer))
-            (original tmux-control--current-window)
+            ;; Derive the window to restore on cancel from the freshly-queried
+            ;; active window (its candidate carries `tmux-window-active'), not
+            ;; from `tmux-control--current-window' -- that is only maintained
+            ;; when the tab bar is on.
+            (original (or (cdr (seq-find
+                                (lambda (c)
+                                  (get-text-property 0 'tmux-window-active (car c)))
+                                choices))
+                          tmux-control--current-window))
             (committed nil))
         (unwind-protect
             (let* ((display (consult--read
