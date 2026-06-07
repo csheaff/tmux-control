@@ -25,6 +25,14 @@ bound in the live buffer; the rest are `M-x`, bind them to taste):
       consult absent it degrades to a plain prompt.
     - `(setq tmux-control-window-preview nil)` is a plain completion prompt
       with no preview.
+
+  ![Inline window preview: a minibuffer window list with the highlighted window previewed in place](images/inline-window-preview.png)
+
+  *`tmux-control-window-preview` = `inline`: pick a window in the minibuffer
+  while the live buffer behind previews the highlighted one (here `0: code`) —
+  no split; moving the selection updates the preview, and cancelling restores
+  the window you started on.*
+
 - `C-c C-n` (`tmux-control-next-window`) and `C-c C-p`
   (`tmux-control-previous-window`) flip to the next or previous window in the
   session, wrapping around — like a terminal's next/previous-tab keys, with no
