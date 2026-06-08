@@ -255,6 +255,13 @@ mirroring a pane on `dev` sitting in `~/proj`, `C-x C-f` opens at
 full TRAMP path. `C-x 4 f` does the same in another window (keeping the live
 pane in view), and `C-x d` opens Dired there.
 
+The remote path is built with **your configured TRAMP method** for that host
+(`tramp-default-method`, or a per-host entry in `tramp-default-method-alist`) —
+so if you use a faster backend like [tramp-rpc] the path is `/rpc:dev:…`, not a
+hardcoded `/ssh:…`.
+
+[tramp-rpc]: https://github.com/ArthurHeymans/emacs-tramp-rpc
+
 - A prefix argument (`C-u C-x C-f`) opens at this buffer's own **local**
   directory instead, for the occasional local file.
 - Only the file-finding commands are pane-aware. The buffer's
