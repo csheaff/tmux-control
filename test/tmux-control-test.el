@@ -1442,11 +1442,26 @@ the same rows once a full-height foreign window shares the frame."
 
 ;;; Pane-directory-aware file commands.
 
+(ert-deftest tmux-control-test-remote-file-method-honors-config ()
+  "`tmux-control--remote-file-method' uses the user's configured TRAMP method
+\(e.g. tramp-rpc's \"rpc\"), not a hardcoded one, and ignores a user@ prefix."
+  (require 'tramp)
+  (let ((tramp-default-method-alist nil))
+    (let ((tramp-default-method "rpc"))
+      (should (equal (tmux-control--remote-file-method "somehost") "rpc"))
+      (should (equal (tmux-control--remote-file-method "me@somehost") "rpc")))
+    (let ((tramp-default-method "sshx"))
+      (should (equal (tmux-control--remote-file-method "somehost") "sshx")))))
+
 (ert-deftest tmux-control-test-pane-directory-wraps-remote ()
   "`tmux-control--pane-directory' returns the pane's cwd as a directory --
-plain for a local session, TRAMP-wrapped for a remote host -- and nil when
-the path cannot be read."
-  (cl-letf (((symbol-function 'derived-mode-p) (lambda (&rest _) t)))
+plain for a local session, wrapped with the user's TRAMP method for a remote
+host -- and nil when the path cannot be read."
+  (cl-letf (((symbol-function 'derived-mode-p) (lambda (&rest _) t))
+            ;; Pin the resolved method so the test does not depend on the
+            ;; ambient `tramp-default-method'.
+            ((symbol-function 'tmux-control--remote-file-method)
+             (lambda (_) "rpc")))
     (let ((tmux-control--active-pane "%0")
           (tmux-control--socket-name "s"))
       (cl-letf (((symbol-function 'tmux-control--run-tmux)
@@ -1455,12 +1470,12 @@ the path cannot be read."
           (should (equal (tmux-control--pane-directory) "/home/u/proj/")))
         (let ((tmux-control--host ""))
           (should (equal (tmux-control--pane-directory) "/home/u/proj/")))
-        (let ((tmux-control--host "claylien"))
+        (let ((tmux-control--host "dev"))
           (should (equal (tmux-control--pane-directory)
-                         "/ssh:claylien:/home/u/proj/"))))
+                         "/rpc:dev:/home/u/proj/"))))
       ;; An empty/failed query yields nil, so callers fall back to local.
       (cl-letf (((symbol-function 'tmux-control--run-tmux) (lambda (_) "")))
-        (let ((tmux-control--host "claylien"))
+        (let ((tmux-control--host "dev"))
           (should-not (tmux-control--pane-directory)))))))
 
 (ert-deftest tmux-control-test-call-in-pane-directory ()

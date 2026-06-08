@@ -1448,13 +1448,39 @@ tmux reports so the view repaints on it."
   (let ((pane (or pane (tmux-control--read-pane))))
     (tmux-control--send-command (format "select-pane -t %s" pane))))
 
+(defun tmux-control--remote-file-method (host)
+  "Return the TRAMP method to reach HOST, honoring the user's TRAMP config.
+Resolves the method TRAMP would itself use for HOST -- a per-host default
+from `tramp-default-method-alist', otherwise `tramp-default-method' -- so a
+remote pane's files open through the method the user configured (for example
+\"rpc\" for tramp-rpc, or \"sshx\") rather than a hardcoded \"ssh\".  Falls
+back to `tramp-default-method', then \"ssh\", if TRAMP is unavailable."
+  ;; `tramp-find-method' returns a string carrying a `tramp-default' text
+  ;; property; strip it so the constructed `default-directory' is a clean
+  ;; string.
+  (substring-no-properties
+   (or (and (require 'tramp nil t)
+            (fboundp 'tramp-find-method)
+            ;; `tramp-find-method' wants a bare host; drop any user@ part.
+            (ignore-errors
+              (tramp-find-method
+               nil nil
+               (if (string-match "@\\([^@]*\\)\\'" host)
+                   (match-string 1 host)
+                 host))))
+       (bound-and-true-p tramp-default-method)
+       "ssh")))
+
 (defun tmux-control--pane-directory ()
   "Return the live pane's working directory as a `default-directory' string.
 Queries tmux for the active pane's `#{pane_current_path}'.  For a remote
-session the path is wrapped as a TRAMP `/ssh:HOST:...' directory, so file
-commands open on the host the pane runs on; for a local session it is the
-plain directory.  Returns nil when there is no pane or the path cannot be
-read, so callers fall back to the buffer's own directory."
+session the path is wrapped as a TRAMP `/METHOD:HOST:...' directory -- METHOD
+being whatever the user configured for that host (see
+`tmux-control--remote-file-method'), so it rides the user's own TRAMP method
+\(tramp-rpc, sshx, ...) -- so file commands open on the host the pane runs on;
+for a local session it is the plain directory.  Returns nil when there is no
+pane or the path cannot be read, so callers fall back to the buffer's own
+directory."
   (when (and (derived-mode-p 'tmux-control-mode)
              (or tmux-control--active-pane tmux-control--fallback-target))
     (let* ((pane (or tmux-control--active-pane tmux-control--fallback-target))
@@ -1466,7 +1492,8 @@ read, so callers fall back to the buffer's own directory."
       (when (and path (not (string-empty-p path)))
         (let ((dir (file-name-as-directory path)))
           (if (and tmux-control--host (not (string-empty-p tmux-control--host)))
-              (concat "/ssh:" tmux-control--host ":" dir)
+              (concat "/" (tmux-control--remote-file-method tmux-control--host)
+                      ":" tmux-control--host ":" dir)
             dir))))))
 
 (defun tmux-control--call-in-pane-directory (command arg)
