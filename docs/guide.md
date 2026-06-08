@@ -245,14 +245,24 @@ view):
 
 Line numbers are disabled locally in live and scrollback buffers.
 
-## Files are local
+## Opening files from a pane
 
-A tmux-control buffer is a local Emacs buffer that *renders* a remote pane;
-it is not a remote filesystem context.  Its `default-directory` stays local
-and the package does no directory tracking, so `find-file`, `dired`,
-`M-x compile`, and similar commands operate on the machine running Emacs —
-not on the remote host.  To edit a file you see in a remote pane, open it
-explicitly over TRAMP, e.g. `C-x C-f /ssh:dev:~/path/to/file`.
+A tmux-control buffer renders a pane that has its own working directory — and,
+for a remote session, lives on another host. So **`find-file` and `dired`
+default to that pane's directory, on the pane's host**: from a buffer
+mirroring a pane on `dev` sitting in `~/proj`, `C-x C-f` opens at
+`/ssh:dev:~/proj/` and you type just the filename, instead of spelling out the
+full TRAMP path. `C-x 4 f` does the same in another window (keeping the live
+pane in view), and `C-x d` opens Dired there.
+
+- A prefix argument (`C-u C-x C-f`) opens at this buffer's own **local**
+  directory instead, for the occasional local file.
+- Only the file-finding commands are pane-aware. The buffer's
+  `default-directory` itself stays local and there is no directory tracking, so
+  `M-x compile`, `M-x grep`, and similar still run on the machine running
+  Emacs — not on the remote host.
+- To turn the pane-directory behavior off entirely (back to plain local
+  `find-file`), set `tmux-control-pane-aware-find-file` to nil.
 
 ## Scrollback
 

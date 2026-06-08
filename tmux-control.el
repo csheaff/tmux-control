@@ -166,6 +166,18 @@ or when the application requests mouse events itself, the wheel event
 is forwarded to the terminal unchanged."
   :type 'boolean)
 
+(defcustom tmux-control-pane-aware-find-file t
+  "Non-nil means file commands in a tmux-control buffer start at the pane's dir.
+
+`tmux-control-find-file' and friends normally open at the live pane's own
+current directory, on the pane's host -- so from a buffer mirroring a tmux
+pane on a remote host, finding a file roots at `/ssh:HOST:PANE-CWD/' and you
+type only the filename, instead of spelling out a full TRAMP path.  Other
+commands (`compile', `grep', and so on) are untouched and still run locally.
+Set this nil to make those commands open at the buffer's own (local)
+directory instead, like ordinary `find-file'."
+  :type 'boolean)
+
 (defcustom tmux-control-window-preview t
   "How `tmux-control-select-window' previews windows as you choose.
 
@@ -412,6 +424,14 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     (define-key map [remap yank] #'eat-yank)
     (define-key map [remap clipboard-yank] #'eat-yank)
     (define-key map [remap yank-pop] #'eat-yank-from-kill-ring)
+    ;; Open files at the live pane's own directory (on the pane's host), so
+    ;; finding a file from a buffer mirroring a remote pane does not mean
+    ;; spelling out a full TRAMP path.  Eat's semi-char mode leaves C-x and
+    ;; M-x for Emacs, so the ordinary file keys reach these.  See
+    ;; `tmux-control-pane-aware-find-file'.
+    (define-key map [remap find-file] #'tmux-control-find-file)
+    (define-key map [remap find-file-other-window] #'tmux-control-find-file-other-window)
+    (define-key map [remap dired] #'tmux-control-dired)
     map)
   "Keymap for `tmux-control-mode'.")
 
@@ -1428,6 +1448,64 @@ tmux reports so the view repaints on it."
   (let ((pane (or pane (tmux-control--read-pane))))
     (tmux-control--send-command (format "select-pane -t %s" pane))))
 
+(defun tmux-control--pane-directory ()
+  "Return the live pane's working directory as a `default-directory' string.
+Queries tmux for the active pane's `#{pane_current_path}'.  For a remote
+session the path is wrapped as a TRAMP `/ssh:HOST:...' directory, so file
+commands open on the host the pane runs on; for a local session it is the
+plain directory.  Returns nil when there is no pane or the path cannot be
+read, so callers fall back to the buffer's own directory."
+  (when (and (derived-mode-p 'tmux-control-mode)
+             (or tmux-control--active-pane tmux-control--fallback-target))
+    (let* ((pane (or tmux-control--active-pane tmux-control--fallback-target))
+           (path (ignore-errors
+                   (string-trim
+                    (tmux-control--run-tmux
+                     (list "display-message" "-p" "-t" pane
+                           "#{pane_current_path}"))))))
+      (when (and path (not (string-empty-p path)))
+        (let ((dir (file-name-as-directory path)))
+          (if (and tmux-control--host (not (string-empty-p tmux-control--host)))
+              (concat "/ssh:" tmux-control--host ":" dir)
+            dir))))))
+
+(defun tmux-control--call-in-pane-directory (command arg)
+  "Call interactive COMMAND with `default-directory' at the pane's directory.
+With ARG non-nil (a prefix argument), or when
+`tmux-control-pane-aware-find-file' is nil, call COMMAND with this buffer's
+own (local) directory instead -- like the plain command."
+  (let ((default-directory
+         (or (and (not arg)
+                  tmux-control-pane-aware-find-file
+                  (tmux-control--pane-directory))
+             default-directory)))
+    (call-interactively command)))
+
+(defun tmux-control-find-file (&optional arg)
+  "Find a file starting at the live pane's directory, on the pane's host.
+A tmux-control buffer renders a pane that has its own current directory --
+often a project or a remote host's working tree -- so opening a file roots
+the prompt there (`/ssh:HOST:PANE-CWD/' for a remote session) and you type
+just the filename instead of a full TRAMP path.  With a prefix ARG, start at
+this buffer's own (local) directory instead.  Bound to the `find-file' key
+\(\\[find-file]) in tmux-control buffers; honors
+`tmux-control-pane-aware-find-file'."
+  (interactive "P")
+  (tmux-control--call-in-pane-directory #'find-file arg))
+
+(defun tmux-control-find-file-other-window (&optional arg)
+  "Like `tmux-control-find-file', but show the file in another window.
+Keeps the live pane visible beside the file.  With a prefix ARG, start at
+this buffer's own (local) directory.  Bound to \\[find-file-other-window]."
+  (interactive "P")
+  (tmux-control--call-in-pane-directory #'find-file-other-window arg))
+
+(defun tmux-control-dired (&optional arg)
+  "Open Dired on the live pane's directory, on the pane's host.
+With a prefix ARG, use this buffer's own (local) directory.  Bound to
+\\[dired]."
+  (interactive "P")
+  (tmux-control--call-in-pane-directory #'dired arg))
 
 (defun tmux-control-scrollback ()
   "Show tmux pane history in a separate scrollback buffer as normal Emacs text.
