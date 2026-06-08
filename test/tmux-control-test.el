@@ -1440,5 +1440,46 @@ the same rows once a full-height foreign window shares the frame."
       (kill-buffer ctrl-buf)
       (kill-buffer foreign-buf))))
 
+;;; Pane-directory-aware file commands.
+
+(ert-deftest tmux-control-test-pane-directory-wraps-remote ()
+  "`tmux-control--pane-directory' returns the pane's cwd as a directory --
+plain for a local session, TRAMP-wrapped for a remote host -- and nil when
+the path cannot be read."
+  (cl-letf (((symbol-function 'derived-mode-p) (lambda (&rest _) t)))
+    (let ((tmux-control--active-pane "%0")
+          (tmux-control--socket-name "s"))
+      (cl-letf (((symbol-function 'tmux-control--run-tmux)
+                 (lambda (_) "/home/u/proj")))
+        (let ((tmux-control--host nil))
+          (should (equal (tmux-control--pane-directory) "/home/u/proj/")))
+        (let ((tmux-control--host ""))
+          (should (equal (tmux-control--pane-directory) "/home/u/proj/")))
+        (let ((tmux-control--host "claylien"))
+          (should (equal (tmux-control--pane-directory)
+                         "/ssh:claylien:/home/u/proj/"))))
+      ;; An empty/failed query yields nil, so callers fall back to local.
+      (cl-letf (((symbol-function 'tmux-control--run-tmux) (lambda (_) "")))
+        (let ((tmux-control--host "claylien"))
+          (should-not (tmux-control--pane-directory)))))))
+
+(ert-deftest tmux-control-test-call-in-pane-directory ()
+  "`tmux-control--call-in-pane-directory' roots at the pane dir, but uses the
+buffer's own directory with a prefix arg or when the option is off."
+  (let ((seen nil))
+    (cl-letf (((symbol-function 'tmux-control--pane-directory)
+               (lambda () "/ssh:host:/proj/"))
+              ((symbol-function 'tmux-control-test--record-dir)
+               (lambda () (interactive) (setq seen default-directory))))
+      (let ((default-directory "/local/")
+            (tmux-control-pane-aware-find-file t))
+        (tmux-control--call-in-pane-directory 'tmux-control-test--record-dir nil)
+        (should (equal seen "/ssh:host:/proj/"))           ; no prefix -> pane dir
+        (tmux-control--call-in-pane-directory 'tmux-control-test--record-dir t)
+        (should (equal seen "/local/"))                    ; prefix -> local
+        (let ((tmux-control-pane-aware-find-file nil))
+          (tmux-control--call-in-pane-directory 'tmux-control-test--record-dir nil)
+          (should (equal seen "/local/")))))))             ; option off -> local
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
