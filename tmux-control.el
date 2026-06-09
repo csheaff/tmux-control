@@ -1926,7 +1926,8 @@ configured `tmux-control-scrollback-frame-start-regexp' or, failing that, one
 auto-detected from repeated content (`tmux-control--auto-frame-start-line').
 When no marker is found -- ordinary, non-repainting scrollback -- the text is
 shown verbatim, colors and trailing backgrounds intact."
-  (let* ((text (tmux-control--colorize-scrollback text))
+  (let* ((tmux-control--scrollback-key-cache (make-hash-table :test 'equal))
+         (text (tmux-control--colorize-scrollback text))
          (auto (and tmux-control-compact-scrollback
                     (not tmux-control-scrollback-frame-start-regexp)
                     (tmux-control--auto-frame-start-line
@@ -2269,7 +2270,40 @@ marker."
    (tmux-control-scrollback-frame-start-regexp
     (string-match-p tmux-control-scrollback-frame-start-regexp line))
    (tmux-control--auto-frame-start
-    (string= (string-trim line) tmux-control--auto-frame-start))))
+    (string= (tmux-control--scrollback-match-key line)
+             tmux-control--auto-frame-start))))
+
+(defvar tmux-control--scrollback-key-cache nil
+  "Hash table memoizing scrollback match keys during one compaction pass.
+Bound by `tmux-control--prepare-scrollback-text'; nil outside compaction,
+in which case keys are computed without caching.")
+
+(defun tmux-control--scrollback-match-key (line)
+  "Return a width-insensitive comparison key for scrollback LINE.
+A repainting TUI re-emits the same logical line dressed for the current
+pane width: a gutter glyph at the last column, status text right-aligned
+to the edge, rules stretched to fill it.  Comparing raw text therefore
+treats a frame repainted after a resize as all-new content, and
+resize-driven repeats never collapse.  The key drops that dressing --
+a trailing padded gutter glyph, repeated-character runs capped, padding
+runs collapsed -- so equality follows content rather than geometry.
+Keys are only ever compared; display always uses the original line."
+  (or (and tmux-control--scrollback-key-cache
+           (gethash line tmux-control--scrollback-key-cache))
+      (let* ((key (string-trim-right line))
+             ;; A lone box-drawing or block glyph after padding at the end
+             ;; of the line is a right-edge gutter, not content.
+             (key (replace-regexp-in-string "[ \t][─-▟]\\'" "" key))
+             ;; Rules and dividers stretch with the pane width; cap any
+             ;; repeated symbol run so length differences vanish.
+             (key (replace-regexp-in-string
+                   "\\([^[:alnum:][:blank:]]\\)\\1\\{3,\\}" "\\1\\1\\1\\1" key))
+             ;; Alignment padding scales with width too.
+             (key (replace-regexp-in-string "[ \t]\\{2,\\}" " " key))
+             (key (string-trim key)))
+        (when tmux-control--scrollback-key-cache
+          (puthash line key tmux-control--scrollback-key-cache))
+        key)))
 
 (defconst tmux-control--auto-frame-min-occurrences 3
   "A line must recur at least this many times to anchor auto-detected frames.")
@@ -2318,11 +2352,14 @@ ordinary (non-repainting) scrollback.  A generic stand-in for a hand-written
 `tmux-control-scrollback-frame-start-regexp': pick the distinctive line that
 recurs like a screen top -- at least `tmux-control--auto-frame-min-occurrences'
 times, spread out, the earliest among equally frequent lines -- then confirm
-the frames it delimits actually share a redrawn body."
+the frames it delimits actually share a redrawn body.  Lines are counted by
+their width-insensitive `tmux-control--scrollback-match-key', so a TUI
+repainted across pane resizes still accumulates occurrences of its recurring
+lines, and the returned marker is that key."
   (let ((indices (make-hash-table :test 'equal))
         (i 0))
     (dolist (line lines)
-      (let ((key (string-trim line)))
+      (let ((key (tmux-control--scrollback-match-key line)))
         (unless (string-empty-p key)
           (push i (gethash key indices))))
       (setq i (1+ i)))
@@ -2382,8 +2419,11 @@ Returns nil when no chrome patterns are configured."
    (t
     (let ((overlap (tmux-control--line-list-overlap out chunk)))
       (if (> overlap 0)
-          ;; A clean suffix/prefix overlap: extend OUT with the new tail.
-          (append out (nthcdr overlap chunk))
+          ;; A clean suffix/prefix overlap: extend OUT with the new tail --
+          ;; itself stripped of already-seen redraw runs, since a few lines
+          ;; of coincidental overlap (chrome, a frame edge) can front a
+          ;; remainder that still embeds a whole repeated frame body.
+          (append out (tmux-control--strip-seen-runs out (nthcdr overlap chunk)))
         ;; No clean overlap.  The chunk may still embed a previously seen
         ;; full-screen redraw body wrapped in new volatile lines (an
         ;; evolving prompt, a status bar).  Drop those already-seen
@@ -2409,38 +2449,47 @@ small table, a two-line banner) is never silently dropped.")
   "Return non-nil when LINES are substantial enough to be a redraw body.
 Requires several nonblank lines with enough distinct content, so that
 generic filler (blank lines, repeated rule characters) is not mistaken
-for a repeated full-screen panel.  Counts in one pass and stops as soon as
-both thresholds are met -- this runs in the innermost compaction loop, so an
-O(n) early-exit count beats building and de-duplicating intermediate lists."
+for a repeated full-screen panel."
+  (tmux-control--redraw-run-distinctive-keys-p
+   (mapcar #'tmux-control--scrollback-match-key lines)))
+
+(defun tmux-control--redraw-run-distinctive-keys-p (keys)
+  "`tmux-control--redraw-run-distinctive-p' over precomputed match KEYS.
+Counts in one pass and stops as soon as both thresholds are met -- this
+runs in the innermost compaction loop, so an O(n) early-exit count beats
+building and de-duplicating intermediate lists."
   (let ((nonblank 0)
         (distinct 0)
         (seen (make-hash-table :test 'equal)))
     (catch 'enough
-      (dolist (line lines)
-        (let ((trimmed (string-trim line)))
-          (unless (string-empty-p trimmed)
-            (setq nonblank (1+ nonblank))
-            (unless (gethash trimmed seen)
-              (puthash trimmed t seen)
-              (setq distinct (1+ distinct)))
-            (when (and (>= nonblank 4) (>= distinct 3))
-              (throw 'enough t)))))
+      (dolist (key keys)
+        (unless (string-empty-p key)
+          (setq nonblank (1+ nonblank))
+          (unless (gethash key seen)
+            (puthash key t seen)
+            (setq distinct (1+ distinct)))
+          (when (and (>= nonblank 4) (>= distinct 3))
+            (throw 'enough t))))
       nil)))
 
-(defun tmux-control--seen-run-length (haystack chunk start n)
-  "Return the length of the longest already-seen redraw run of CHUNK at START.
-Considers runs from START up to N, returning the longest contiguous run
-that is distinctive (`tmux-control--redraw-run-distinctive-p') and already
-present in HAYSTACK, or nil when no qualifying run starts at START."
+(defun tmux-control--seen-run-length (hkeys ckeys start n)
+  "Return the length of the longest already-seen redraw run of CKEYS at START.
+HKEYS and CKEYS are precomputed match-key sequences for the haystack and
+chunk (`tmux-control--scrollback-match-key'); the caller maps lines to keys
+once, so the innermost search compares plain strings rather than re-deriving
+keys per comparison.  Considers runs from START up to N, returning the
+longest contiguous run that is distinctive
+\(`tmux-control--redraw-run-distinctive-keys-p') and already present in
+HKEYS, or nil when no qualifying run starts at START."
   (let ((len (min (- n start) tmux-control-compact-scrollback-window))
         (in-haystack nil))
-    ;; Find the LONGEST run at START present in HAYSTACK.  Presence is
+    ;; Find the LONGEST run at START present in HKEYS.  Presence is
     ;; monotonic in LEN -- a longer run embeds its shorter prefix, so once a
     ;; length is absent every greater length is too -- hence the first hit
     ;; scanning down from the max is the longest, and we stop there.
     (while (and (>= len tmux-control--scrollback-min-redraw-run)
                 (not in-haystack))
-      (when (cl-search (cl-subseq chunk start (+ start len)) haystack
+      (when (cl-search (cl-subseq ckeys start (+ start len)) hkeys
                        :test #'string=)
         (setq in-haystack len))
       (setq len (1- len)))
@@ -2450,8 +2499,8 @@ present in HAYSTACK, or nil when no qualifying run starts at START."
     ;; conditions at every length would reach the same nil.  Testing it once
     ;; on the winner, rather than at every candidate length, is the speedup.
     (when (and in-haystack
-               (tmux-control--redraw-run-distinctive-p
-                (cl-subseq chunk start (+ start in-haystack))))
+               (tmux-control--redraw-run-distinctive-keys-p
+                (cl-subseq ckeys start (+ start in-haystack))))
       in-haystack)))
 
 (defun tmux-control--strip-seen-runs (out chunk)
@@ -2459,33 +2508,44 @@ present in HAYSTACK, or nil when no qualifying run starts at START."
 Only long, distinctive runs are removed, so repeated full-screen TUI
 redraw bodies collapse to a single copy while genuinely new lines (and
 ordinary short repeats) are kept.  OUT is searched only within the recent
-`tmux-control-compact-scrollback-window' lines."
+`tmux-control-compact-scrollback-window' lines.  Lines are compared by
+their width-insensitive match keys, so a frame repainted at another pane
+size still collapses."
   (let* ((haystack (last out tmux-control-compact-scrollback-window))
-         (n (length chunk))
+         (hkeys (mapcar #'tmux-control--scrollback-match-key haystack))
+         (ckeys (mapcar #'tmux-control--scrollback-match-key chunk))
+         (cvec (vconcat chunk))
+         (n (length cvec))
          (i 0)
          (result '()))
     (while (< i n)
-      (let ((run-len (tmux-control--seen-run-length haystack chunk i n)))
+      (let ((run-len (tmux-control--seen-run-length hkeys ckeys i n)))
         (if run-len
             (setq i (+ i run-len))
-          (push (nth i chunk) result)
+          (push (aref cvec i) result)
           (setq i (1+ i)))))
     (nreverse result)))
 
 (defun tmux-control--line-list-contains-p (haystack needle)
-  "Return non-nil when HAYSTACK contains NEEDLE as contiguous lines."
+  "Return non-nil when HAYSTACK contains NEEDLE as contiguous lines.
+Lines are compared by their width-insensitive match keys."
   (and (<= (length needle) (length haystack))
-       (cl-search needle haystack :test #'string=)))
+       (cl-search (mapcar #'tmux-control--scrollback-match-key needle)
+                  (mapcar #'tmux-control--scrollback-match-key haystack)
+                  :test #'string=)))
 
 (defun tmux-control--line-list-overlap (left right)
-  "Return largest safe suffix/prefix overlap between LEFT and RIGHT."
-  (let* ((max (min (length left)
+  "Return largest safe suffix/prefix overlap between LEFT and RIGHT.
+Lines are compared by their width-insensitive match keys."
+  (let* ((lkeys (mapcar #'tmux-control--scrollback-match-key left))
+         (rkeys (mapcar #'tmux-control--scrollback-match-key right))
+         (max (min (length left)
                    (length right)
                    tmux-control-compact-scrollback-window))
          (overlap 0))
     (while (and (> max 0) (= overlap 0))
-      (let ((candidate (cl-subseq right 0 max)))
-        (when (and (equal (last left max) candidate)
+      (let ((candidate (cl-subseq rkeys 0 max)))
+        (when (and (equal (last lkeys max) candidate)
                    (tmux-control--line-list-safe-overlap-p candidate))
           (setq overlap max)))
       (setq max (1- max)))
