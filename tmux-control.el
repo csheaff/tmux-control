@@ -1919,6 +1919,40 @@ A repainting TUI's frames are recent and recur every frame-height, so a bounded
 tail is enough to find the marker -- and it caps the cost of deciding \"no
 repeating frame\" on a long (up to `tmux-control-scrollback-lines') history.")
 
+(defvar tmux-control--scrollback-key-cache nil
+  "Hash table memoizing scrollback match keys during one compaction pass.
+Bound by `tmux-control--prepare-scrollback-text'; nil outside compaction,
+in which case keys are computed without caching.  Defined before its
+first `let'-binding so the byte-compiler knows the symbol is special and
+keeps that binding dynamic.")
+
+(defun tmux-control--scrollback-match-key (line)
+  "Return a width-insensitive comparison key for scrollback LINE.
+A repainting TUI re-emits the same logical line dressed for the current
+pane width: a gutter glyph at the last column, status text right-aligned
+to the edge, rules stretched to fill it.  Comparing raw text therefore
+treats a frame repainted after a resize as all-new content, and
+resize-driven repeats never collapse.  The key drops that dressing --
+a trailing padded gutter glyph, repeated-character runs capped, padding
+runs collapsed -- so equality follows content rather than geometry.
+Keys are only ever compared; display always uses the original line."
+  (or (and tmux-control--scrollback-key-cache
+           (gethash line tmux-control--scrollback-key-cache))
+      (let* ((key (string-trim-right line))
+             ;; A lone box-drawing or block glyph after padding at the end
+             ;; of the line is a right-edge gutter, not content.
+             (key (replace-regexp-in-string "[ \t][─-▟]\\'" "" key))
+             ;; Rules and dividers stretch with the pane width; cap any
+             ;; repeated symbol run so length differences vanish.
+             (key (replace-regexp-in-string
+                   "\\([^[:alnum:][:blank:]]\\)\\1\\{3,\\}" "\\1\\1\\1\\1" key))
+             ;; Alignment padding scales with width too.
+             (key (replace-regexp-in-string "[ \t]\\{2,\\}" " " key))
+             (key (string-trim key)))
+        (when tmux-control--scrollback-key-cache
+          (puthash line key tmux-control--scrollback-key-cache))
+        key)))
+
 (defun tmux-control--prepare-scrollback-text (text)
   "Prepare captured pane TEXT for the scrollback buffer.
 Compaction runs when enabled and a frame marker is available -- either a
@@ -2272,38 +2306,6 @@ marker."
    (tmux-control--auto-frame-start
     (string= (tmux-control--scrollback-match-key line)
              tmux-control--auto-frame-start))))
-
-(defvar tmux-control--scrollback-key-cache nil
-  "Hash table memoizing scrollback match keys during one compaction pass.
-Bound by `tmux-control--prepare-scrollback-text'; nil outside compaction,
-in which case keys are computed without caching.")
-
-(defun tmux-control--scrollback-match-key (line)
-  "Return a width-insensitive comparison key for scrollback LINE.
-A repainting TUI re-emits the same logical line dressed for the current
-pane width: a gutter glyph at the last column, status text right-aligned
-to the edge, rules stretched to fill it.  Comparing raw text therefore
-treats a frame repainted after a resize as all-new content, and
-resize-driven repeats never collapse.  The key drops that dressing --
-a trailing padded gutter glyph, repeated-character runs capped, padding
-runs collapsed -- so equality follows content rather than geometry.
-Keys are only ever compared; display always uses the original line."
-  (or (and tmux-control--scrollback-key-cache
-           (gethash line tmux-control--scrollback-key-cache))
-      (let* ((key (string-trim-right line))
-             ;; A lone box-drawing or block glyph after padding at the end
-             ;; of the line is a right-edge gutter, not content.
-             (key (replace-regexp-in-string "[ \t][─-▟]\\'" "" key))
-             ;; Rules and dividers stretch with the pane width; cap any
-             ;; repeated symbol run so length differences vanish.
-             (key (replace-regexp-in-string
-                   "\\([^[:alnum:][:blank:]]\\)\\1\\{3,\\}" "\\1\\1\\1\\1" key))
-             ;; Alignment padding scales with width too.
-             (key (replace-regexp-in-string "[ \t]\\{2,\\}" " " key))
-             (key (string-trim key)))
-        (when tmux-control--scrollback-key-cache
-          (puthash line key tmux-control--scrollback-key-cache))
-        key)))
 
 (defconst tmux-control--auto-frame-min-occurrences 3
   "A line must recur at least this many times to anchor auto-detected frames.")
