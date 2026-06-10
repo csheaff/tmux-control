@@ -548,6 +548,76 @@ each wrapped in an evolving prompt line and a status bar.")
     (dolist (n '(100 200 300 400))
       (should (member (format "  tokens: %d" n) lines)))))
 
+(ert-deftest tmux-control-test-scrollback-match-key ()
+  ;; The match key is width-insensitive: a trailing padded gutter glyph, the
+  ;; length of a stretched rule, and alignment padding all wash out, while
+  ;; content differences survive.
+  (let ((key #'tmux-control--scrollback-match-key))
+    ;; Right-edge gutter at different columns -> same key.
+    (should (equal (funcall key "  hello world           ┃")
+                   (funcall key "  hello world   ┃")))
+    (should (equal (funcall key "  hello world   ┃") "hello world"))
+    ;; A glyph with no padding before it is content, not a gutter.
+    (should (equal (funcall key "└────┘┃") "└────┘┃"))
+    ;; Rules stretched to different pane widths -> same key.
+    (should (equal (funcall key (make-string 120 ?─))
+                   (funcall key (make-string 100 ?─))))
+    ;; Right-aligned status text -> padding collapses.
+    (should (equal (funcall key " /proj        Session: 9 AIC used")
+                   (funcall key " /proj   Session: 9 AIC used")))
+    ;; Content still distinguishes.
+    (should-not (equal (funcall key "alpha   ┃") (funcall key "beta   ┃")))
+    (should-not (equal (funcall key "Session: 9 AIC used")
+                       (funcall key "Session: 12 AIC used")))))
+
+(ert-deftest tmux-control-test-auto-compaction-collapses-resized-redraws ()
+  ;; A TUI repainted across pane RESIZES re-emits each line dressed for the
+  ;; new width: gutter glyph at the last column, status text right-aligned,
+  ;; rules stretched.  Raw comparison sees all-new content; key comparison
+  ;; collapses the repeats.  Modeled on the GitHub Copilot CLI, which also has
+  ;; no stable frame-top chrome (its status line carries a changing credit
+  ;; counter), so detection must anchor on a recurring body line.
+  (let* ((tmux-control-compact-scrollback t)
+         (tmux-control-compact-scrollback-window 300)
+         (tmux-control-scrollback-frame-start-regexp nil)
+         (tmux-control-scrollback-chrome-regexps nil)
+         (frame
+          (lambda (w)
+            (concat
+             (format " /proj%sSession: 3 AIC used\n" (make-string (- w 30) ?\s))
+             (mapconcat
+              (lambda (word)
+                (let ((body (format "  build step %s done" word)))
+                  (concat body (make-string (- w (length body) 1) ?\s) "┃\n")))
+              '("alpha" "beta" "gamma" "delta" "epsilon" "zeta" "eta" "theta")
+              "")
+             (make-string w ?─) "\n"
+             "❯ waiting\n"
+             (format " / commands · ? help%sClaude\n" (make-string (- w 26) ?\s)))))
+         (text (concat (funcall frame 80) (funcall frame 60)
+                       (funcall frame 80) (funcall frame 60)))
+         (out (tmux-control--prepare-scrollback-text text))
+         (out-keys (mapcar #'tmux-control--scrollback-match-key
+                           (split-string out "\n"))))
+    ;; Every body line survives exactly once, despite no two frames being
+    ;; raw-identical neighbours.
+    (dolist (word '("alpha" "beta" "gamma" "delta" "epsilon" "zeta"))
+      (should (= 1 (seq-count
+                    (lambda (k) (equal k (format "build step %s done" word)))
+                    out-keys))))))
+
+(ert-deftest tmux-control-test-merge-overlap-strips-remainder ()
+  ;; A few lines of suffix/prefix overlap must not smuggle in a repeated
+  ;; frame body: the post-overlap remainder is still stripped of runs
+  ;; already present in OUT.  (Regression: the overlap path used to append
+  ;; the remainder verbatim, so a chunk that happened to extend OUT by a
+  ;; couple of lines re-added a whole already-seen redraw.)
+  (let ((tmux-control-compact-scrollback-window 300))
+    (should (equal (tmux-control--merge-scrollback-chunk
+                    '("P1" "P2" "A" "B" "C" "D" "E" "F")
+                    '("E" "F" "X" "A" "B" "C" "D" "E" "F"))
+                   '("P1" "P2" "A" "B" "C" "D" "E" "F" "X")))))
+
 (ert-deftest tmux-control-test-auto-compaction-skips-subthreshold-frequent-line ()
   ;; The most frequent candidate is not blindly accepted.  A small panel whose
   ;; shared body is below the redraw-run threshold recurs more often than a
