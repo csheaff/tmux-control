@@ -60,6 +60,9 @@ attaches, typing a new name creates it.
   terminal and no tmux chrome.
 - **Windows as tabs** in a header-line tab bar, with an activity **dot** on
   background windows; flip them like browser tabs (`C-c C-n` / `C-c C-p`).
+  Each visited window keeps its own scrollback across flips and **keeps
+  streaming in the background** — flip back and see everything it printed
+  while you were away.
 - **Switch between sessions** on the host in place (`C-c C-s`) — each tmux
   session is its own buffer with its own scrollback and tabs — with a dot
   flagging another session that wants you, or tile **every session at once**

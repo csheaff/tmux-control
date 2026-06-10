@@ -41,6 +41,16 @@ bound in the live buffer; the rest are `M-x`, bind them to taste):
   window you came from.  These delegate to tmux's own
   `next-window`/`previous-window`/`last-window`, so they follow the session's
   window order and any other attached client stays in sync.
+
+  **Each visited window keeps its own buffer** (`tmux-control-window-buffers`,
+  default on): a switch swaps buffers instead of repainting one in place, so
+  every window keeps its accumulated Emacs-side scrollback across flips — and
+  a visited window **keeps streaming while you look at another**, so flipping
+  back shows everything it printed in the meantime (an agent's full
+  transcript, a build's output), not just its final screen.  Memory grows only
+  with windows you actually visit.  Set the option to nil for the old
+  repaint-in-place behavior (a switch then discards the previous window's
+  scrollback).
 - `M-x tmux-control-new-window` creates a window (optionally named) and
   switches to it.
 - `M-x tmux-control-rename-window` renames a window, with completion over

@@ -361,7 +361,10 @@ the newly active window's screen."
   (tmux-control-it--tmux "send-keys" "-t" "t:0" "echo WIN_ZERO" "Enter")
   (tmux-control-it--tmux "send-keys" "-t" "t:1" "echo WIN_ONE" "Enter")
   (tmux-control-it--tmux "send-keys" "-t" "t:2" "echo WIN_TWO" "Enter")
-  (let ((buf (tmux-control-connect nil tmux-control-it--socket "t")))
+  ;; This asserts the historical repaint-in-place path; the per-window
+  ;; buffer path is asserted by `tmux-control-it-window-buffers-persist'.
+  (let* ((tmux-control-window-buffers nil)
+         (buf (tmux-control-connect nil tmux-control-it--socket "t")))
     (cl-flet ((shows (mark)
                 (tmux-control-it--pump-until
                  5 (lambda ()
@@ -379,6 +382,64 @@ the newly active window's screen."
             (should (shows "WIN_ZERO"))
             (with-current-buffer buf (tmux-control-last-window))      ; 0 <-> 1
             (should (shows "WIN_ONE")))
+        (when (buffer-live-p buf)
+          (with-current-buffer buf (ignore-errors (tmux-control-disconnect)))
+          (kill-buffer buf))
+        (tmux-control-it--tmux-ok "kill-server")))))
+
+(ert-deftest tmux-control-it-window-buffers-persist ()
+  "With per-window buffers, a switch creates a sibling render buffer for the
+new window (seeded to its screen), the previous window's buffer keeps its
+content, and output produced in the background window accumulates in its
+buffer while another window is current."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-n" "w0" "-x" "80" "-y" "24")
+  (tmux-control-it--tmux "new-window" "-t" "t:" "-n" "w1")
+  (tmux-control-it--tmux "select-window" "-t" "t:0")
+  (tmux-control-it--tmux "send-keys" "-t" "t:0" "echo WIN_ZERO" "Enter")
+  (tmux-control-it--tmux "send-keys" "-t" "t:1" "echo WIN_ONE" "Enter")
+  ;; Tab bar OFF on purpose: the window list and pane->window map that
+  ;; routing depends on must be requested for per-window buffers on their
+  ;; own, not as a tab-bar side effect (a real review catch).
+  (let* ((tmux-control-window-buffers t)
+         (tmux-control-window-tab-bar nil)
+         (buf (tmux-control-connect nil tmux-control-it--socket "t")))
+    (cl-flet ((buffer-has (b mark)
+                (tmux-control-it--pump-until
+                 6 (lambda ()
+                     (and (buffer-live-p b)
+                          (with-current-buffer b
+                            (string-match-p
+                             mark (buffer-substring-no-properties
+                                   (point-min) (point-max)))))))))
+      (unwind-protect
+          (progn
+            (tmux-control-it--pump 1.5)
+            (should (buffer-has buf "WIN_ZERO"))
+            ;; Switch: a sibling buffer appears for w1, seeded to its screen.
+            (with-current-buffer buf (tmux-control-next-window))
+            (let ((sibling
+                   (progn
+                     (tmux-control-it--pump-until
+                      6 (lambda ()
+                          (with-current-buffer buf
+                            (cdr (cl-find-if
+                                  (lambda (e) (not (eq (cdr e) buf)))
+                                  tmux-control--window-buffers)))))
+                     (with-current-buffer buf
+                       (cdr (cl-find-if (lambda (e) (not (eq (cdr e) buf)))
+                                        tmux-control--window-buffers))))))
+              (should (buffer-live-p sibling))
+              (should (buffer-has sibling "WIN_ONE"))
+              ;; The previous window's buffer kept its content...
+              (should (buffer-has buf "WIN_ZERO"))
+              ;; ...and accumulates output produced while w1 is current.
+              (tmux-control-it--tmux "send-keys" "-t" "t:0"
+                                     "echo ZERO_WHILE_AWAY" "Enter")
+              (should (buffer-has buf "ZERO_WHILE_AWAY"))
+              ;; Both windows' content coexists; nothing was repainted away.
+              (should (buffer-has buf "WIN_ZERO"))))
         (when (buffer-live-p buf)
           (with-current-buffer buf (ignore-errors (tmux-control-disconnect)))
           (kill-buffer buf))

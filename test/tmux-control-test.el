@@ -1043,8 +1043,8 @@ each wrapped in an evolving prompt line and a status bar.")
     (setq-local tmux-control--current-window "0")
     (setq-local tmux-control--activity (make-hash-table :test 'equal))
     (setq-local tmux-control--pane-window (make-hash-table :test 'equal))
-    (puthash "%0" "0" tmux-control--pane-window)
-    (puthash "%1" "1" tmux-control--pane-window)
+    (puthash "%0" (cons "0" "@0") tmux-control--pane-window)
+    (puthash "%1" (cons "1" "@1") tmux-control--pane-window)
     (setq-local tmux-control--activity-quiet-until 0)
     (let ((tmux-control-window-tab-bar t))
       (tmux-control--note-pane-activity "%0")
@@ -1087,7 +1087,10 @@ each wrapped in an evolving prompt line and a status bar.")
   ;; and a deadline clears a stale count so it never swallows a real external.
   (with-temp-buffer
     (setq-local tmux-control--tiled nil)
-    (let ((reseeds 0) (refreshes 0))
+    (let ((reseeds 0) (refreshes 0)
+          ;; This exercises the in-place reseed path; per-window buffers
+          ;; replace it with a buffer swap (tested separately).
+          (tmux-control-window-buffers nil))
       (cl-letf (((symbol-function 'tmux-control--flush-output-batch) #'ignore)
                 ((symbol-function 'tmux-control--refresh-windows)
                  (lambda () (cl-incf refreshes)))
@@ -1802,6 +1805,9 @@ output), :calls (side-effect invocations in order), :active-pane,
   (with-temp-buffer
     (let ((proc (make-pipe-process :name "tc-fuzz" :buffer (current-buffer)
                                    :noquery t))
+          ;; The invariance property targets the base filter; the per-window
+          ;; buffer layer on top has its own tests.
+          (tmux-control-window-buffers nil)
           (fed '())
           (calls '()))
       (unwind-protect
@@ -1892,6 +1898,113 @@ output), :calls (side-effect invocations in order), :active-pane,
                              (number-sequence 1 12))))
       (should (equal (tmux-control-test--run-filter-chunked chunks)
                      reference)))))
+
+;;; Per-window render buffers.
+
+(ert-deftest tmux-control-test-window-buffer-registry ()
+  ;; Register/lookup round-trips; killing a render buffer deregisters it.
+  (with-temp-buffer
+    (let ((ctrl (current-buffer))
+          (buf (generate-new-buffer " *tc-wb-test*")))
+      (with-current-buffer buf
+        (setq-local tmux-control--window-id "@7"
+                    tmux-control--controller ctrl)
+        (add-hook 'kill-buffer-hook #'tmux-control--window-buffer-killed nil t))
+      (tmux-control--register-window-buffer "@7" buf)
+      (should (eq (tmux-control--window-buffer "@7") buf))
+      (should-not (tmux-control--window-buffer "@9"))
+      (kill-buffer buf)
+      (should-not (tmux-control--window-buffer "@7"))
+      (should-not (assoc "@7" tmux-control--window-buffers)))))
+
+(ert-deftest tmux-control-test-update-windows-claims-controller-window ()
+  ;; The first window list binds the controller buffer to its own window id
+  ;; and registers it as that window's render buffer.
+  (with-temp-buffer
+    (let ((tmux-control-window-buffers t))
+      (tmux-control--update-windows
+       '("0\tcode\t1\t0\t@5" "1\tbuild\t0\t0\t@6"))
+      (should (equal tmux-control--current-window "0"))
+      (should (equal tmux-control--window-id "@5"))
+      (should (eq (tmux-control--window-buffer "@5") (current-buffer)))
+      (should (equal (tmux-control--window-id-for-index "1") "@6")))))
+
+(ert-deftest tmux-control-test-batch-pane-output-routes-to-window-buffer ()
+  ;; Output for a pane whose window has a render buffer accumulates in THAT
+  ;; buffer; panes without one keep the controller's active-pane behavior.
+  (with-temp-buffer
+    (let ((tmux-control-window-buffers t)
+          (ctrl (current-buffer))
+          (buf (generate-new-buffer " *tc-wb-route*")))
+      (unwind-protect
+          (progn
+            (setq-local tmux-control--tiled nil
+                        tmux-control--active-pane "%0"
+                        tmux-control--output-batch nil
+                        tmux-control--pane-window (make-hash-table :test 'equal))
+            (puthash "%0" (cons "0" "@5") tmux-control--pane-window)
+            (puthash "%1" (cons "1" "@6") tmux-control--pane-window)
+            (with-current-buffer buf
+              (setq-local tmux-control--active-pane "%1"
+                          tmux-control--output-batch nil))
+            (tmux-control--register-window-buffer "@6" buf)
+            (cl-letf (((symbol-function 'tmux-control--note-pane-activity)
+                       #'ignore)
+                      ((symbol-function 'tmux-control--note-session-activity)
+                       #'ignore))
+              ;; Background window's pane -> its buffer.
+              (tmux-control--batch-pane-output "%1" "bg-line")
+              (should (equal (buffer-local-value 'tmux-control--output-batch buf)
+                             '("bg-line")))
+              (should-not tmux-control--output-batch)
+              ;; Controller's own pane (no sibling buffer for it) -> controller.
+              (tmux-control--batch-pane-output "%0" "fg-line")
+              (should (equal tmux-control--output-batch '("fg-line")))))
+        (kill-buffer buf)))))
+
+(ert-deftest tmux-control-test-session-window-changed-swaps-display ()
+  ;; With per-window buffers on, a window switch -- ours or external -- swaps
+  ;; the displayed buffer; the in-place reseed machinery is bypassed.
+  (with-temp-buffer
+    (setq-local tmux-control--tiled nil)
+    (let ((tmux-control-window-buffers t)
+          (swapped nil) (reseeds 0))
+      (cl-letf (((symbol-function 'tmux-control--flush-output-batch) #'ignore)
+                ((symbol-function 'tmux-control--refresh-windows) #'ignore)
+                ((symbol-function 'tmux-control--display-window-buffer)
+                 (lambda (id) (setq swapped id)))
+                ((symbol-function 'tmux-control--refresh-active-pane)
+                 (lambda (&optional _self) (cl-incf reseeds))))
+        (tmux-control--handle-line "%session-window-changed $0 @3")
+        (should (equal swapped "@3"))
+        (should (= reseeds 0))))))
+
+(ert-deftest tmux-control-test-window-close-kills-render-buffer ()
+  ;; %window-close takes the closed window's render buffer with it.
+  (with-temp-buffer
+    (setq-local tmux-control--tiled nil)
+    (let ((tmux-control-window-buffers t)
+          (buf (generate-new-buffer " *tc-wb-close*")))
+      (with-current-buffer buf
+        (setq-local tmux-control--window-id "@4"
+                    tmux-control--controller (current-buffer)))
+      (tmux-control--register-window-buffer "@4" buf)
+      (cl-letf (((symbol-function 'tmux-control--flush-output-batch) #'ignore)
+                ((symbol-function 'tmux-control--refresh-windows) #'ignore)
+                ((symbol-function 'tmux-control--refresh-pane-window-map)
+                 #'ignore))
+        (tmux-control--handle-line "%window-close @4"))
+      (should-not (buffer-live-p buf))
+      (should-not (tmux-control--window-buffer "@4")))))
+
+(ert-deftest tmux-control-test-session-display-buffer-fallback ()
+  ;; Without a render buffer for the current window the controller itself
+  ;; represents the session.
+  (with-temp-buffer
+    (let ((tmux-control-window-buffers t))
+      (setq-local tmux-control--current-window "0"
+                  tmux-control--windows '((:index "0" :name "x" :id "@1")))
+      (should (eq (tmux-control--session-display-buffer) (current-buffer))))))
 
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
