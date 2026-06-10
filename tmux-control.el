@@ -644,7 +644,11 @@ session (tmux attaches if it exists, otherwise creates it)."
         ;; The connect seed repaints every pane; don't let that flag everything.
         (tmux-control--quiet-activity 1.5))
       (when tmux-control-window-tab-bar
-        (setq tmux-control--activity (make-hash-table :test 'equal))
+        (setq tmux-control--activity (make-hash-table :test 'equal)))
+      ;; The window list and pane->window map feed the tab bar AND the
+      ;; per-window buffer routing; request them when either is on, so
+      ;; output routing works with the tab bar disabled too.
+      (when (or tmux-control-window-tab-bar tmux-control-window-buffers)
         (tmux-control--refresh-windows)
         (tmux-control--refresh-pane-window-map))
       (when (and (integerp tmux-control-pause-after)
@@ -3886,13 +3890,11 @@ it asynchronously over the control connection."
   "Deregister a killed window render buffer from its controller."
   (when (and tmux-control--window-id
              (buffer-live-p tmux-control--controller))
-    (let ((id tmux-control--window-id)
-          (buf (current-buffer)))
+    (let ((buf (current-buffer)))
       (with-current-buffer tmux-control--controller
         (setq tmux-control--window-buffers
               (cl-remove-if (lambda (e) (eq (cdr e) buf))
-                            tmux-control--window-buffers))
-        (ignore id)))))
+                            tmux-control--window-buffers))))))
 
 (defun tmux-control--seed-window-buffer (buffer window-id)
   "Resolve WINDOW-ID's active pane and seed BUFFER from it, asynchronously.

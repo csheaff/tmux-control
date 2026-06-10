@@ -399,7 +399,11 @@ buffer while another window is current."
   (tmux-control-it--tmux "select-window" "-t" "t:0")
   (tmux-control-it--tmux "send-keys" "-t" "t:0" "echo WIN_ZERO" "Enter")
   (tmux-control-it--tmux "send-keys" "-t" "t:1" "echo WIN_ONE" "Enter")
+  ;; Tab bar OFF on purpose: the window list and pane->window map that
+  ;; routing depends on must be requested for per-window buffers on their
+  ;; own, not as a tab-bar side effect (a real review catch).
   (let* ((tmux-control-window-buffers t)
+         (tmux-control-window-tab-bar nil)
          (buf (tmux-control-connect nil tmux-control-it--socket "t")))
     (cl-flet ((buffer-has (b mark)
                 (tmux-control-it--pump-until
