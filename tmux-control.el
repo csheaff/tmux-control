@@ -506,6 +506,7 @@ the cross-session activity strip (see `tmux-control-session-activity').")
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
     (define-key map (kbd "g") #'tmux-control-scrollback-refresh)
+    (define-key map (kbd "c") #'tmux-control-scrollback-toggle-compaction)
     (define-key map (kbd "C-c C-e") #'tmux-control-live)
     (define-key map (kbd "RET") #'tmux-control-live)
     (define-key map (kbd "q") #'tmux-control-live)
@@ -1523,18 +1524,21 @@ orientation) and appends a scroll-mode hint, so entering scrollback does not
 look like the tabs vanished.  Falls back to a plain info line when the tab bar
 is disabled or no live buffer is available."
   (let* ((live tmux-control--live-buffer)
+         (cmode (if tmux-control-compact-scrollback "c:verbatim" "c:compact"))
          (tabs (and tmux-control-window-tab-bar
                     (buffer-live-p live)
                     (with-current-buffer live
                       (tmux-control--window-tab-bar t)))))
     (if (and tabs (> (length tabs) 0))
-        (concat tabs (propertize "  ⇡ scrollback  g:refresh  q/RET:live "
+        (concat tabs (propertize (format "  ⇡ scrollback  g:refresh  %s  q/RET:live "
+                                         cmode)
                                  'face 'tmux-control-tab-inactive))
-      (format " %s socket:%s session:%s target:%s    g:refresh  q/l/RET:live"
+      (format " %s socket:%s session:%s target:%s    g:refresh  %s  q/l/RET:live"
               (or tmux-control--host "local")
               tmux-control--socket-name
               tmux-control--session
-              tmux-control--scrollback-target))))
+              tmux-control--scrollback-target
+              cmode))))
 
 (defun tmux-control-other-pane ()
   "Switch the live view to the next pane in the current window.
@@ -1792,6 +1796,22 @@ the live interactive pane."
                                       tmux-control--capture-trailing-p
                                       (unless at-end line)
                                       (unless at-end column))))
+
+(defun tmux-control-scrollback-toggle-compaction ()
+  "Toggle redraw-compaction in this scrollback view and re-render.
+Compaction collapses repeated full-screen redraws (common with TUIs under
+`alternate-screen off'), but on dense, heavily-repainted output its
+de-duplication can elide more than you want; this flips to the verbatim
+capture -- every line as tmux has it -- and back, without leaving the
+pager.  Buffer-local, so it does not change the global default."
+  (interactive)
+  (unless (derived-mode-p 'tmux-control-scrollback-mode)
+    (user-error "Not in tmux-control scrollback mode"))
+  (setq-local tmux-control-compact-scrollback
+              (not tmux-control-compact-scrollback))
+  (message "tmux-control scrollback: compaction %s"
+           (if tmux-control-compact-scrollback "on" "verbatim (off)"))
+  (tmux-control-scrollback-refresh))
 
 (defun tmux-control-live ()
   "Return from scrollback view to the live interactive tmux pane."

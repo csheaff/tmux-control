@@ -2006,5 +2006,24 @@ output), :calls (side-effect invocations in order), :active-pane,
                   tmux-control--windows '((:index "0" :name "x" :id "@1")))
       (should (eq (tmux-control--session-display-buffer) (current-buffer))))))
 
+(ert-deftest tmux-control-test-scrollback-toggle-compaction ()
+  ;; The pager toggle flips the buffer-local compaction flag and re-renders,
+  ;; without touching the global default.
+  (let ((tmux-control-compact-scrollback t))   ; global default unchanged
+    (with-temp-buffer
+      (tmux-control-scrollback-mode)
+      (setq-local tmux-control-compact-scrollback t)
+      (let ((refreshed 0))
+        (cl-letf (((symbol-function 'tmux-control-scrollback-refresh)
+                   (lambda () (cl-incf refreshed))))
+          (tmux-control-scrollback-toggle-compaction)
+          (should-not tmux-control-compact-scrollback)
+          (should (= refreshed 1))
+          (tmux-control-scrollback-toggle-compaction)
+          (should tmux-control-compact-scrollback)
+          (should (= refreshed 2))))
+      ;; Global default was never mutated.
+      (should (eq (default-value 'tmux-control-compact-scrollback) t)))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
