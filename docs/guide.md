@@ -340,6 +340,17 @@ backlog.  It engages only on a genuinely **low-bandwidth** link — Emacs reads
 the socket eagerly, so a fast client (even a high-latency-but-fat-pipe SSH one)
 keeps up and never triggers it.  Off by default; needs tmux 3.2+.
 
+## A connection that stops replying
+
+Replies on the control connection are matched to commands strictly in order,
+so a reply that never arrives — a hung server, a half-dead SSH link — would
+otherwise stall every later command silently.  A watchdog notices when the
+oldest pending command has waited longer than `tmux-control-command-timeout`
+(default 10 seconds) and says so in the session buffer and echo area, pointing
+at `M-x tmux-control-reconnect`.  It never guesses at recovery — a late reply
+still pairs with its own command, and the client announces when one arrives.
+Set the timeout to `nil` to disable the watchdog.
+
 ## Development
 
 Run the pure-logic unit tests (no tmux server required):

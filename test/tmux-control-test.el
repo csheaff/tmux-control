@@ -1566,5 +1566,81 @@ buffer's own directory with a prefix arg or when the option is off."
           (tmux-control--call-in-pane-directory 'tmux-control-test--record-dir nil)
           (should (equal seen "/local/")))))))             ; option off -> local
 
+;;; Command-queue watchdog.
+
+(defmacro tmux-control-test--with-watchdog-buffer (&rest body)
+  "Run BODY in a temp buffer with watchdog state and a live mock process."
+  `(with-temp-buffer
+     (setq-local tmux-control--command-queue nil
+                 tmux-control--command-watchdog-timer nil
+                 tmux-control--command-watchdog-warned nil
+                 tmux-control--current-command-kind :ignore
+                 tmux-control--collecting-command nil
+                 tmux-control--command-output nil
+                 tmux-control--output-batch nil
+                 tmux-control--process nil)
+     (cl-letf (((symbol-function 'process-live-p) (lambda (_) t)))
+       (unwind-protect
+           (progn ,@body)
+         (when tmux-control--command-watchdog-timer
+           (cancel-timer tmux-control--command-watchdog-timer))))))
+
+(ert-deftest tmux-control-test-command-watchdog-warns-once-when-stuck ()
+  ;; An overdue head entry produces exactly one warning per stuck episode,
+  ;; leaves the queue untouched (replies pair strictly in order), and keeps
+  ;; the watchdog armed so recovery or drain is still noticed.
+  (tmux-control-test--with-watchdog-buffer
+   (let ((tmux-control-command-timeout 10))
+     (setq tmux-control--command-queue
+           (list (cons :capture (- (float-time) 60))))
+     (tmux-control--command-watchdog-check (current-buffer))
+     (should tmux-control--command-watchdog-warned)
+     (should (string-match-p "connection may be stuck" (buffer-string)))
+     (should (= 1 (length tmux-control--command-queue)))
+     (should tmux-control--command-watchdog-timer)
+     (cancel-timer tmux-control--command-watchdog-timer)
+     (setq tmux-control--command-watchdog-timer nil)
+     ;; Still stuck at the next check: no second warning.
+     (tmux-control--command-watchdog-check (current-buffer))
+     (should (= 1 (cl-count-if
+                   (lambda (line)
+                     (string-match-p "connection may be stuck" line))
+                   (split-string (buffer-string) "\n")))))))
+
+(ert-deftest tmux-control-test-command-watchdog-rearms-for-fresh-head ()
+  ;; A head entry younger than the timeout neither warns nor pops; the
+  ;; check just re-arms for the remaining wait.
+  (tmux-control-test--with-watchdog-buffer
+   (let ((tmux-control-command-timeout 10))
+     (setq tmux-control--command-queue
+           (list (cons :ignore (- (float-time) 2))))
+     (tmux-control--command-watchdog-check (current-buffer))
+     (should-not tmux-control--command-watchdog-warned)
+     (should-not (string-match-p "stuck" (buffer-string)))
+     (should tmux-control--command-watchdog-timer))))
+
+(ert-deftest tmux-control-test-command-watchdog-clears-on-drain ()
+  ;; A drained queue ends the episode: the flag resets and the watchdog
+  ;; does not re-arm.
+  (tmux-control-test--with-watchdog-buffer
+   (let ((tmux-control-command-timeout 10))
+     (setq tmux-control--command-watchdog-warned t)
+     (tmux-control--command-watchdog-check (current-buffer))
+     (should-not tmux-control--command-watchdog-warned)
+     (should-not tmux-control--command-watchdog-timer))))
+
+(ert-deftest tmux-control-test-begin-reply-pairs-kind-and-recovers ()
+  ;; A %begin reply takes its kind from the queue entry cons and, after a
+  ;; warned episode, announces recovery and clears the flag.
+  (tmux-control-test--with-watchdog-buffer
+   (setq tmux-control--command-queue
+         (list (cons :capture (float-time))))
+   (setq tmux-control--command-watchdog-warned t)
+   (tmux-control--handle-line "%begin 1717171717 42 1")
+   (should (eq tmux-control--current-command-kind :capture))
+   (should-not tmux-control--command-queue)
+   (should-not tmux-control--command-watchdog-warned)
+   (should (string-match-p "recovered" (buffer-string)))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
