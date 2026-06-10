@@ -314,6 +314,12 @@ by the command watchdog to spot a connection that has stopped replying.")
 (defvar-local tmux-control--current-command-kind :ignore)
 (defvar-local tmux-control--collecting-command nil)
 (defvar-local tmux-control--command-output nil)
+(defvar-local tmux-control--command-block-number nil
+  "Command number from the current reply's %begin line, as a string.
+A %end or %error line closes the block only when its number matches;
+a captured pane whose CONTENT contains a line starting with \"%end \"
+(someone viewing a control-mode transcript, say) must not terminate
+the block early.")
 (defvar-local tmux-control--command-watchdog-timer nil
   "Pending watchdog timer for the command queue, or nil.")
 (defvar-local tmux-control--command-watchdog-warned nil
@@ -1564,10 +1570,86 @@ With a prefix ARG, use this buffer's own (local) directory.  Bound to
   (interactive "P")
   (tmux-control--call-in-pane-directory #'dired arg))
 
+(defun tmux-control--scrollback-capture-command (target lines trailing)
+  "Build the in-band capture-pane command for the scrollback view.
+TARGET, LINES and TRAILING mirror `tmux-control--capture-pane''s flags."
+  (concat "capture-pane -p -e"
+          (when tmux-control-scrollback-join-wrapped-lines " -J")
+          (when trailing " -N")
+          (format " -S -%d" lines)
+          (when target (format " -t %s" target))))
+
+(defun tmux-control--scrollback-populate (buffer text &optional line column)
+  "Fill scrollback BUFFER with prepared TEXT and restore the view.
+With LINE and COLUMN, return point there (a refresh away from the
+bottom); otherwise follow the bottom.  Runs from a query callback or
+synchronously; BUFFER may have been killed in between."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t)
+            (at-end (null line)))
+        (when-let* ((window (get-buffer-window buffer t)))
+          (set-window-margins window 0 0))
+        (erase-buffer)
+        (insert (tmux-control--prepare-scrollback-text text))
+        (unless (bolp)
+          (insert "\n"))
+        (cond
+         (at-end
+          (goto-char (point-max))
+          (when-let* ((window (get-buffer-window buffer t)))
+            (with-selected-window window
+              (goto-char (point-max))
+              (recenter -1))))
+         (t
+          (goto-char (point-min))
+          (forward-line (1- line))
+          (move-to-column (or column 0))
+          (when-let* ((window (get-buffer-window buffer t)))
+            (set-window-point window (point)))))))))
+
+(defun tmux-control--scrollback-request (buffer target lines trailing
+                                                &optional restore-line
+                                                restore-column)
+  "Capture pane history for scrollback BUFFER and populate it.
+Prefers an IN-BAND capture-pane query over the live control connection
+-- no extra tmux or ssh process, and Emacs never blocks on the round
+trip (which spans the network for a remote session).  Falls back to the
+out-of-band CLI capture when the connection is gone, so the pager still
+works for a post-mortem look.  TARGET, LINES, TRAILING as in
+`tmux-control--capture-pane'; RESTORE-LINE/RESTORE-COLUMN as in
+`tmux-control--scrollback-populate'."
+  (let* ((live tmux-control--live-buffer)
+         (proc (and (buffer-live-p live)
+                    (buffer-local-value 'tmux-control--process live))))
+    (if (process-live-p proc)
+        (with-current-buffer live
+          (tmux-control--query
+           (tmux-control--scrollback-capture-command target lines trailing)
+           (lambda (reply-lines)
+             (if reply-lines
+                 (tmux-control--scrollback-populate
+                  buffer (string-join reply-lines "\n")
+                  restore-line restore-column)
+               (when (buffer-live-p buffer)
+                 (with-current-buffer buffer
+                   (let ((inhibit-read-only t))
+                     (erase-buffer)
+                     (insert "[tmux-control] capture failed\n"))))))))
+      (tmux-control--scrollback-populate
+       buffer
+       (tmux-control--capture-pane tmux-control--host
+                                   tmux-control--socket-name
+                                   target lines trailing)
+       restore-line restore-column))))
+
 (defun tmux-control-scrollback ()
   "Show tmux pane history in a separate scrollback buffer as normal Emacs text.
 
-Use `tmux-control-live' to return to the live interactive pane."
+The capture rides the live control connection (asynchronously -- a
+remote session's round trip never freezes Emacs); the buffer shows a
+capturing notice until it lands.  Use `tmux-control-live' to return to
+the live interactive pane."
   (interactive)
   (unless tmux-control--session
     (user-error "No tmux-control session in this buffer"))
@@ -1576,18 +1658,14 @@ Use `tmux-control-live' to return to the live interactive pane."
          (session tmux-control--session)
          (target (or tmux-control--active-pane tmux-control--fallback-target))
          (trailing tmux-control--capture-trailing-p)
-         (text (tmux-control--capture-pane host socket-name target
-                                           tmux-control-scrollback-lines
-                                           trailing))
          (live-buffer (current-buffer))
          (scrollback-buffer-name (format "*%s-scrollback*" (buffer-name)))
          (scrollback-buffer (get-buffer-create scrollback-buffer-name)))
     (with-current-buffer scrollback-buffer
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (insert (tmux-control--prepare-scrollback-text text))
-        (unless (bolp)
-          (insert "\n"))
+        (insert (format "[tmux-control] capturing %d lines…\n"
+                        tmux-control-scrollback-lines))
         (tmux-control-scrollback-mode)
         (tmux-control--disable-line-numbers)
         (setq-local tmux-control--host host)
@@ -1609,38 +1687,25 @@ Use `tmux-control-live' to return to the live interactive pane."
     (switch-to-buffer scrollback-buffer)
     (when-let* ((window (get-buffer-window scrollback-buffer)))
       (set-window-margins window 0 0))
-    (goto-char (point-max))
-    (when (get-buffer-window scrollback-buffer)
-      (recenter -1))))
+    (with-current-buffer scrollback-buffer
+      (tmux-control--scrollback-request scrollback-buffer target
+                                        tmux-control-scrollback-lines
+                                        trailing))))
 
 (defun tmux-control-scrollback-refresh ()
   "Refresh the current tmux-control scrollback view."
   (interactive)
   (unless (derived-mode-p 'tmux-control-scrollback-mode)
     (user-error "Not in tmux-control scrollback mode"))
-  (let* ((line (line-number-at-pos))
-         (column (current-column))
-         (at-end (eobp))
-         (text (tmux-control--capture-pane tmux-control--host
-                                           tmux-control--socket-name
-                                           tmux-control--scrollback-target
-                                           tmux-control-scrollback-lines
-                                           tmux-control--capture-trailing-p))
-         (inhibit-read-only t))
-    (when-let* ((window (get-buffer-window (current-buffer))))
-      (set-window-margins window 0 0))
-    (erase-buffer)
-    (insert (tmux-control--prepare-scrollback-text text))
-    (unless (bolp)
-      (insert "\n"))
-    (if at-end
-        (progn
-          (goto-char (point-max))
-          (when (get-buffer-window (current-buffer))
-            (recenter -1)))
-      (goto-char (point-min))
-      (forward-line (1- line))
-      (move-to-column column))))
+  (let ((line (line-number-at-pos))
+        (column (current-column))
+        (at-end (eobp)))
+    (tmux-control--scrollback-request (current-buffer)
+                                      tmux-control--scrollback-target
+                                      tmux-control-scrollback-lines
+                                      tmux-control--capture-trailing-p
+                                      (unless at-end line)
+                                      (unless at-end column))))
 
 (defun tmux-control-live ()
   "Return from scrollback view to the live interactive tmux pane."
@@ -2724,7 +2789,10 @@ the matching pane's render buffer instead, so every pane updates at once."
     ;; state change (a resize, a seed, a pane switch) that follows it.
     (tmux-control--flush-output-batch)
     (cond
-     ((string-prefix-p "%begin " line)
+     ;; Reply blocks never nest, so a %begin while already collecting is
+     ;; pane CONTENT (a capture of a control-mode transcript), not protocol.
+     ((and (string-prefix-p "%begin " line)
+           (not tmux-control--collecting-command))
       (let ((entry (pop tmux-control--command-queue)))
         (setq tmux-control--current-command-kind
               (or (car-safe entry) :ignore)))
@@ -2732,16 +2800,30 @@ the matching pane's render buffer instead, so every pane updates at once."
         (setq tmux-control--command-watchdog-warned nil)
         (tmux-control--message "tmux replied after the delay -- recovered"))
       (setq tmux-control--collecting-command t)
+      ;; %begin <time> <number> <flags>: the number also appears on the
+      ;; matching %end/%error (the time may differ between the two).
+      (setq tmux-control--command-block-number
+            (nth 2 (split-string line " ")))
       (setq tmux-control--command-output nil))
-     ((string-prefix-p "%end " line)
+     ;; %end/%error close the block only when their command number matches
+     ;; the %begin's; otherwise a captured line that merely LOOKS like one
+     ;; falls through to be collected as content below.
+     ((and (string-prefix-p "%end " line)
+           (tmux-control--block-terminator-p line))
       (tmux-control--finish-command-output))
-     ((string-prefix-p "%error " line)
-      (setq tmux-control--collecting-command nil)
-      (setq tmux-control--command-output nil)
-      (tmux-control--message
-       (format "tmux command failed (%s)"
-               tmux-control--current-command-kind))
-      (setq tmux-control--current-command-kind :ignore))
+     ((and (string-prefix-p "%error " line)
+           (tmux-control--block-terminator-p line))
+      (let ((kind tmux-control--current-command-kind))
+        (setq tmux-control--collecting-command nil)
+        (setq tmux-control--command-output nil)
+        (setq tmux-control--current-command-kind :ignore)
+        ;; A closure query still gets called -- with nil -- so an async
+        ;; consumer (a scrollback capture, say) can show the failure
+        ;; instead of waiting forever.
+        (if (functionp kind)
+            (funcall kind nil)
+          (tmux-control--message
+           (format "tmux command failed (%s)" kind)))))
      ((or (string= line "%exit") (string-prefix-p "%exit " line))
       ;; tmux is closing the control connection (the session was killed,
       ;; the server exited, or the client was detached).  The process
@@ -2821,64 +2903,91 @@ the matching pane's render buffer instead, so every pane updates at once."
       (tmux-control--refresh-windows)
       (tmux-control--refresh-pane-window-map))))))
 
+(defun tmux-control--block-terminator-p (line)
+  "Return non-nil when %end/%error LINE closes the current reply block.
+True only while collecting a block AND when LINE's command number
+matches the block's %begin (the timestamp differs between %begin and
+its %end; the number does not).  Outside a block the answer is always
+nil: a stray terminator-shaped line then matches no other clause of
+the protocol dispatch and is simply ignored."
+  (and tmux-control--collecting-command
+       (equal (nth 2 (split-string line " "))
+              tmux-control--command-block-number)))
+
+(defun tmux-control--query (command callback)
+  "Send control-mode COMMAND; call CALLBACK with its reply.
+CALLBACK receives the reply's lines in order, or nil when tmux answers
+with %error.  It runs from the process filter in the controller buffer,
+so it should capture any other buffer it needs lexically.  The query
+rides the regular command queue over the existing connection -- no
+out-of-band tmux or ssh process -- so it works identically for local
+and remote sessions."
+  (tmux-control--send-command command callback))
+
 (defun tmux-control--finish-command-output ()
-  "Handle the end of a tmux command reply."
-  (pcase tmux-control--current-command-kind
-    (:pane-id
-     (let ((pane (cl-find-if (lambda (line)
-                               (string-match-p "\\`%[0-9]+\\'" line))
-                             tmux-control--command-output)))
-       (when pane
-         (setq tmux-control--active-pane pane)
-         (tmux-control--seed-screen)
-         (tmux-control--refresh-alt-screen-option)
-         (tmux-control--refresh-pane-size))))
-    (:pane-size
-     (let ((size (tmux-control--parse-pane-size tmux-control--command-output)))
-       (when (and size
-                  (tmux-control--apply-eat-size (car size) (cdr size)))
-         ;; The grid changed under already-rendered output, so repaint
-         ;; the visible screen at the corrected width.
-         (tmux-control--seed-screen))))
-    (:windows
-     (tmux-control--update-windows tmux-control--command-output))
-    (:pane-window
-     (tmux-control--update-pane-window-map tmux-control--command-output))
-    (:alt-screen-opt
-     (let ((res (tmux-control--interpret-alt-screen-reply
-                 tmux-control--command-output nil)))
-       (if (eq res :inherit)
-           ;; Empty reply means the window inherits the option; resolve it
-           ;; from the global-window default.
-           (tmux-control--send-command "show-options -gwv alternate-screen"
-                                       :alt-screen-opt-global)
-         (setq tmux-control--alt-screen-honored (cdr res)))))
-    (:alt-screen-opt-global
-     (setq tmux-control--alt-screen-honored
-           (cdr (tmux-control--interpret-alt-screen-reply
-                 tmux-control--command-output t))))
-    (:version
-     (setq tmux-control--capture-trailing-p
-           (tmux-control--capture-n-supported-p
-            (car (cl-remove-if #'string-empty-p
-                               (mapcar #'string-trim
-                                       tmux-control--command-output))))))
-    (:cursor-pos
-     (setq tmux-control--seed-cursor
-           (tmux-control--parse-cursor-pos tmux-control--command-output))
-     (setq tmux-control--seed-cursor-visible
-           (tmux-control--parse-cursor-visible tmux-control--command-output)))
-    (:capture
-     (tmux-control--write-terminal
-      (tmux-control--screen-seed-sequence
-       (mapconcat #'identity
-                  (nreverse tmux-control--command-output)
-                  "\n")
-       tmux-control--seed-cursor
-       tmux-control--seed-cursor-visible))))
-  (setq tmux-control--collecting-command nil)
-  (setq tmux-control--current-command-kind :ignore)
-  (setq tmux-control--command-output nil))
+  "Handle the end of a tmux command reply.
+The reply state is snapshotted and RESET before the handler runs: a
+handler -- a query callback in particular -- may directly or indirectly
+pump the process (`accept-process-output', `sit-for'), re-entering the
+filter; if the buffer still looked mid-block, the next %begin would be
+swallowed as content and the reply queue would desynchronize."
+  (let ((kind tmux-control--current-command-kind)
+        (output tmux-control--command-output))
+    (setq tmux-control--collecting-command nil)
+    (setq tmux-control--current-command-kind :ignore)
+    (setq tmux-control--command-output nil)
+    (pcase kind
+      ;; A function kind is a one-shot `tmux-control--query' callback; it
+      ;; receives the reply lines in order.
+      ((pred functionp)
+       (funcall kind (reverse output)))
+      (:pane-id
+       (let ((pane (cl-find-if (lambda (line)
+                                 (string-match-p "\\`%[0-9]+\\'" line))
+                               output)))
+         (when pane
+           (setq tmux-control--active-pane pane)
+           (tmux-control--seed-screen)
+           (tmux-control--refresh-alt-screen-option)
+           (tmux-control--refresh-pane-size))))
+      (:pane-size
+       (let ((size (tmux-control--parse-pane-size output)))
+         (when (and size
+                    (tmux-control--apply-eat-size (car size) (cdr size)))
+           ;; The grid changed under already-rendered output, so repaint
+           ;; the visible screen at the corrected width.
+           (tmux-control--seed-screen))))
+      (:windows
+       (tmux-control--update-windows output))
+      (:pane-window
+       (tmux-control--update-pane-window-map output))
+      (:alt-screen-opt
+       (let ((res (tmux-control--interpret-alt-screen-reply output nil)))
+         (if (eq res :inherit)
+             ;; Empty reply means the window inherits the option; resolve it
+             ;; from the global-window default.
+             (tmux-control--send-command "show-options -gwv alternate-screen"
+                                         :alt-screen-opt-global)
+           (setq tmux-control--alt-screen-honored (cdr res)))))
+      (:alt-screen-opt-global
+       (setq tmux-control--alt-screen-honored
+             (cdr (tmux-control--interpret-alt-screen-reply output t))))
+      (:version
+       (setq tmux-control--capture-trailing-p
+             (tmux-control--capture-n-supported-p
+              (car (cl-remove-if #'string-empty-p
+                                 (mapcar #'string-trim output))))))
+      (:cursor-pos
+       (setq tmux-control--seed-cursor
+             (tmux-control--parse-cursor-pos output))
+       (setq tmux-control--seed-cursor-visible
+             (tmux-control--parse-cursor-visible output)))
+      (:capture
+       (tmux-control--write-terminal
+        (tmux-control--screen-seed-sequence
+         (mapconcat #'identity (nreverse output) "\n")
+         tmux-control--seed-cursor
+         tmux-control--seed-cursor-visible))))))
 
 (defun tmux-control--seed-screen ()
   "Seed the Eat buffer with the current tmux pane contents.

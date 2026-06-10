@@ -1566,6 +1566,93 @@ buffer's own directory with a prefix arg or when the option is off."
           (tmux-control--call-in-pane-directory 'tmux-control-test--record-dir nil)
           (should (equal seen "/local/")))))))             ; option off -> local
 
+;;; In-band command replies: id-matched block termination, closure queries.
+
+(defmacro tmux-control-test--with-reply-buffer (&rest body)
+  "Run BODY in a temp buffer with clean command-reply state."
+  `(with-temp-buffer
+     (setq-local tmux-control--command-queue nil
+                 tmux-control--current-command-kind :ignore
+                 tmux-control--collecting-command nil
+                 tmux-control--command-output nil
+                 tmux-control--command-block-number nil
+                 tmux-control--output-batch nil)
+     ,@body))
+
+(ert-deftest tmux-control-test-block-end-requires-matching-number ()
+  ;; A captured pane can CONTAIN lines that look like protocol -- someone
+  ;; viewing a control-mode transcript -- so %end/%error close the block
+  ;; only when their command number matches the %begin's, and a %begin
+  ;; inside a block is content, not a new block.
+  (tmux-control-test--with-reply-buffer
+   (let (got)
+     (setq tmux-control--command-queue
+           (list (cons (lambda (lines) (setq got lines)) (float-time))))
+     (tmux-control--handle-line "%begin 1717 42 1")
+     (should tmux-control--collecting-command)
+     (tmux-control--handle-line "real content")
+     (tmux-control--handle-line "%end 999 7 0")      ; wrong number: content
+     (tmux-control--handle-line "%begin 5 5 0")      ; inside block: content
+     (tmux-control--handle-line "%error 999 7 0")    ; wrong number: content
+     (should tmux-control--collecting-command)
+     (tmux-control--handle-line "%end 1718 42 1")    ; same number, later time
+     (should-not tmux-control--collecting-command)
+     (should (equal got '("real content"
+                          "%end 999 7 0"
+                          "%begin 5 5 0"
+                          "%error 999 7 0"))))))
+
+(ert-deftest tmux-control-test-query-callback-gets-nil-on-error ()
+  ;; %error completes a closure query with nil so an async consumer can
+  ;; show the failure instead of waiting forever.
+  (tmux-control-test--with-reply-buffer
+   (let ((called :not-called))
+     (setq tmux-control--command-queue
+           (list (cons (lambda (lines) (setq called lines)) (float-time))))
+     (tmux-control--handle-line "%begin 1 9 0")
+     (tmux-control--handle-line "some diagnostics")
+     (tmux-control--handle-line "%error 2 9 0")
+     (should (null called))
+     (should-not tmux-control--collecting-command))))
+
+(ert-deftest tmux-control-test-scrollback-capture-command ()
+  (let ((tmux-control-scrollback-join-wrapped-lines nil))
+    (should (equal (tmux-control--scrollback-capture-command "%5" 10000 nil)
+                   "capture-pane -p -e -S -10000 -t %5"))
+    (should (equal (tmux-control--scrollback-capture-command nil 200 t)
+                   "capture-pane -p -e -N -S -200")))
+  (let ((tmux-control-scrollback-join-wrapped-lines t))
+    (should (equal (tmux-control--scrollback-capture-command "%1" 50 nil)
+                   "capture-pane -p -e -J -S -50 -t %1"))))
+
+(ert-deftest tmux-control-test-scrollback-request-uses-in-band-query ()
+  ;; With a live connection the scrollback capture rides the control
+  ;; connection as a query; the callback fills the buffer through the
+  ;; compaction pipeline.
+  (tmux-control-test--with-reply-buffer
+   (let* ((tmux-control-scrollback-join-wrapped-lines nil)
+          (live (current-buffer))
+          (sent nil)
+          (sb (generate-new-buffer " *tc-sb-test*")))
+     (unwind-protect
+         (progn
+           (setq-local tmux-control--process 'fake-proc)
+           (with-current-buffer sb
+             (setq-local tmux-control--live-buffer live))
+           (cl-letf (((symbol-function 'process-live-p) (lambda (p) (eq p 'fake-proc)))
+                     ((symbol-function 'tmux-control--query)
+                      (lambda (command callback) (setq sent (cons command callback)))))
+             (with-current-buffer sb
+               (tmux-control--scrollback-request sb "%3" 500 nil)))
+           (should (equal (car sent) "capture-pane -p -e -S -500 -t %3"))
+           ;; Deliver the reply; the buffer fills and follows the bottom.
+           (funcall (cdr sent) '("line one" "line two"))
+           (with-current-buffer sb
+             (should (string-match-p "line one\nline two"
+                                     (buffer-substring-no-properties
+                                      (point-min) (point-max))))
+             (should (eobp))))
+       (kill-buffer sb)))))
 ;;; Command-queue watchdog.
 
 (defmacro tmux-control-test--with-watchdog-buffer (&rest body)

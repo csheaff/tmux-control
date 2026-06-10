@@ -280,6 +280,11 @@ with the number, so a very large value over a busy repainting pane can make the
 view take a moment to appear.  Raise it if you routinely scroll back further and
 can accept the extra cost; it is capped by the pane's own tmux `history-limit`.
 
+The capture itself rides the **live control connection** — no separate `tmux`
+or `ssh` process — and arrives asynchronously: the view opens immediately and
+fills when the reply lands, so a remote session's network round trip never
+freezes Emacs.
+
 Scrollback joins soft-wrapped tmux lines by default; disable that with:
 
 ```elisp
