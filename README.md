@@ -1,5 +1,7 @@
 # tmux-control
 
+[![CI](https://github.com/csheaff/tmux-control/actions/workflows/ci.yml/badge.svg)](https://github.com/csheaff/tmux-control/actions/workflows/ci.yml)
+
 `tmux-control` turns Emacs into a **control-mode client for a tmux pane** —
 the [iTerm2 tmux-integration](https://iterm2.com/documentation-tmux-integration.html)
 idea, but in Emacs.

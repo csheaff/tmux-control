@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        emacs-version: ['29.1', '30.1']
+        tmux: ['distro', '3.6a']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs-version }}
+
+      - name: Install eat (pinned)
+        run: |
+          git clone --depth 1 --branch v0.9.4 https://codeberg.org/akib/emacs-eat.git "$HOME/eat"
+          # Compile eat's terminfo so a real terminal can run in integration tests.
+          sudo apt-get update -q && sudo apt-get install -y -q ncurses-bin
+          make -C "$HOME/eat" terminfo
+
+      - name: Install tmux (distro)
+        if: matrix.tmux == 'distro'
+        run: sudo apt-get install -y -q tmux && tmux -V
+
+      - name: Install tmux (built from source)
+        if: matrix.tmux != 'distro'
+        run: |
+          sudo apt-get install -y -q libevent-dev libncurses-dev bison
+          curl -fsSL "https://github.com/tmux/tmux/releases/download/${{ matrix.tmux }}/tmux-${{ matrix.tmux }}.tar.gz" | tar xz
+          cd "tmux-${{ matrix.tmux }}" && ./configure --prefix="$HOME/.local" && make -j2 && make install
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/tmux" -V
+
+      - name: Byte-compile (warnings are errors)
+        run: make compile EAT_DIR="$HOME/eat"
+
+      - name: Unit tests (source)
+        run: make test EAT_DIR="$HOME/eat"
+
+      - name: Unit tests (byte-compiled)
+        run: make test-elc EAT_DIR="$HOME/eat"
+
+      - name: Integration tests (live tmux render oracle)
+        run: make test-integration EAT_DIR="$HOME/eat"
