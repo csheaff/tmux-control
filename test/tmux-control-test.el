@@ -1587,7 +1587,7 @@ buffer's own directory with a prefix arg or when the option is off."
   (tmux-control-test--with-reply-buffer
    (let (got)
      (setq tmux-control--command-queue
-           (list (lambda (lines) (setq got lines))))
+           (list (cons (lambda (lines) (setq got lines)) (float-time))))
      (tmux-control--handle-line "%begin 1717 42 1")
      (should tmux-control--collecting-command)
      (tmux-control--handle-line "real content")
@@ -1608,7 +1608,7 @@ buffer's own directory with a prefix arg or when the option is off."
   (tmux-control-test--with-reply-buffer
    (let ((called :not-called))
      (setq tmux-control--command-queue
-           (list (lambda (lines) (setq called lines))))
+           (list (cons (lambda (lines) (setq called lines)) (float-time))))
      (tmux-control--handle-line "%begin 1 9 0")
      (tmux-control--handle-line "some diagnostics")
      (tmux-control--handle-line "%error 2 9 0")
@@ -1653,6 +1653,245 @@ buffer's own directory with a prefix arg or when the option is off."
                                       (point-min) (point-max))))
              (should (eobp))))
        (kill-buffer sb)))))
+;;; Command-queue watchdog.
+
+(defmacro tmux-control-test--with-watchdog-buffer (&rest body)
+  "Run BODY in a temp buffer with watchdog state and a live mock process."
+  `(with-temp-buffer
+     (setq-local tmux-control--command-queue nil
+                 tmux-control--command-watchdog-timer nil
+                 tmux-control--command-watchdog-warned nil
+                 tmux-control--current-command-kind :ignore
+                 tmux-control--collecting-command nil
+                 tmux-control--command-output nil
+                 tmux-control--output-batch nil
+                 tmux-control--process nil)
+     (cl-letf (((symbol-function 'process-live-p) (lambda (_) t)))
+       (unwind-protect
+           (progn ,@body)
+         (when tmux-control--command-watchdog-timer
+           (cancel-timer tmux-control--command-watchdog-timer))))))
+
+(ert-deftest tmux-control-test-command-watchdog-warns-once-when-stuck ()
+  ;; An overdue head entry produces exactly one warning per stuck episode,
+  ;; leaves the queue untouched (replies pair strictly in order), and keeps
+  ;; the watchdog armed so recovery or drain is still noticed.
+  (tmux-control-test--with-watchdog-buffer
+   (let ((tmux-control-command-timeout 10))
+     (setq tmux-control--command-queue
+           (list (cons :capture (- (float-time) 60))))
+     (tmux-control--command-watchdog-check (current-buffer))
+     (should tmux-control--command-watchdog-warned)
+     (should (string-match-p "connection may be stuck" (buffer-string)))
+     (should (= 1 (length tmux-control--command-queue)))
+     (should tmux-control--command-watchdog-timer)
+     (cancel-timer tmux-control--command-watchdog-timer)
+     (setq tmux-control--command-watchdog-timer nil)
+     ;; Still stuck at the next check: no second warning.
+     (tmux-control--command-watchdog-check (current-buffer))
+     (should (= 1 (cl-count-if
+                   (lambda (line)
+                     (string-match-p "connection may be stuck" line))
+                   (split-string (buffer-string) "\n")))))))
+
+(ert-deftest tmux-control-test-command-watchdog-rearms-for-fresh-head ()
+  ;; A head entry younger than the timeout neither warns nor pops; the
+  ;; check just re-arms for the remaining wait.
+  (tmux-control-test--with-watchdog-buffer
+   (let ((tmux-control-command-timeout 10))
+     (setq tmux-control--command-queue
+           (list (cons :ignore (- (float-time) 2))))
+     (tmux-control--command-watchdog-check (current-buffer))
+     (should-not tmux-control--command-watchdog-warned)
+     (should-not (string-match-p "stuck" (buffer-string)))
+     (should tmux-control--command-watchdog-timer))))
+
+(ert-deftest tmux-control-test-command-watchdog-clears-on-drain ()
+  ;; A drained queue ends the episode: the flag resets and the watchdog
+  ;; does not re-arm.
+  (tmux-control-test--with-watchdog-buffer
+   (let ((tmux-control-command-timeout 10))
+     (setq tmux-control--command-watchdog-warned t)
+     (tmux-control--command-watchdog-check (current-buffer))
+     (should-not tmux-control--command-watchdog-warned)
+     (should-not tmux-control--command-watchdog-timer))))
+
+(ert-deftest tmux-control-test-begin-reply-pairs-kind-and-recovers ()
+  ;; A %begin reply takes its kind from the queue entry cons and, after a
+  ;; warned episode, announces recovery and clears the flag.
+  (tmux-control-test--with-watchdog-buffer
+   (setq tmux-control--command-queue
+         (list (cons :capture (float-time))))
+   (setq tmux-control--command-watchdog-warned t)
+   (tmux-control--handle-line "%begin 1717171717 42 1")
+   (should (eq tmux-control--current-command-kind :capture))
+   (should-not tmux-control--command-queue)
+   (should-not tmux-control--command-watchdog-warned)
+   (should (string-match-p "recovered" (buffer-string)))))
+;;; Process-filter fuzz: chunking invariance.
+;;
+;; The filter may receive the control-mode stream torn at ANY character
+;; boundary -- mid-line, mid-octal-escape, between the bytes of an escaped
+;; multibyte character (a real bug once: a box-drawing char split across two
+;; %output messages rendered as raw octal).  Feeding one fixed transcript in
+;; many different chunkings must produce byte-identical terminal output and
+;; identical client state, with no errors.
+
+(defconst tmux-control-test--fuzz-transcript
+  (concat
+   "%begin 1 1 0\n"
+   "%0\n"
+   "%end 1 1 0\n"
+   "%output %0 plain hello\n"
+   ;; Control bytes arrive octal-escaped on the wire (decoded by
+   ;; `tmux-control--decode-output').
+   "%output %0 color \\033[31mRED\\033[0m ok\n"
+   ;; Intact multibyte arrives as real characters: the wire carries raw
+   ;; UTF-8 and the process coding already decoded it.
+   "%output %0 box ┌─┐ done\n"
+   ;; A multibyte char SPLIT across two %output messages: each half is
+   ;; invalid UTF-8 on its own, so process decoding leaves raw eight-bit
+   ;; chars for `tmux-control--utf8-decode-stream' to reassemble (a real
+   ;; bug once: the halves rendered as octal).
+   (format "%%output %%0 split-pair %s\n"
+           (decode-coding-string "\342\224" 'utf-8))
+   (format "%%output %%0 %s joined\n"
+           (decode-coding-string "\200" 'utf-8))
+   ;; A CR-terminated line: the filter must strip the trailing \r.
+   "%output %0 cr-line\r\n"
+   ;; Output for a non-active pane is dropped in single-pane mode.
+   "%output %1 other-pane-dropped\n"
+   "%window-pane-changed @1 %1\n"
+   "%output %1 now-active\n"
+   "%output %0 dropped-now\n"
+   "%layout-change @1 c5d2,80x24,0,0,1\n"
+   "%session-window-changed $1 @2\n"
+   "%window-add @3\n"
+   "%window-renamed @3 build\n"
+   "%unknown-notification future tmux says hi\n"
+   "%pause %1\n"
+   "%continue %1\n"
+   "%begin 2 2 0\n"
+   "reply line one\n"
+   "%output %0 not-output-while-collecting\n"
+   "%end 2 2 0\n"
+   "%exit\n")
+  "A control-mode session transcript exercising every hot filter path.
+Models the stream as the filter sees it: after the process coding system
+has decoded the wire, so intact UTF-8 is characters, a multibyte char
+tmux split across messages is raw eight-bit chars, and control bytes are
+octal text.")
+
+(defun tmux-control-test--lcg-chunks (string seed)
+  "Split STRING into chunks of pseudo-random length 1..9, driven by SEED.
+A tiny linear congruential generator keeps the chunking deterministic
+across Emacs versions, unlike a seeded `random'."
+  (let ((s seed) (chunks '()) (i 0) (n (length string)))
+    (while (< i n)
+      (setq s (mod (+ (* 1103515245 s) 12345) 2147483648))
+      (let ((len (min (- n i) (1+ (mod s 9)))))
+        (push (substring string i (+ i len)) chunks)
+        (setq i (+ i len))))
+    (nreverse chunks)))
+
+(defun tmux-control-test--run-filter-chunked (chunks)
+  "Feed CHUNKS through the real filter against stubbed side effects.
+Returns a plist of observable state: :fed (concatenated terminal
+output), :calls (side-effect invocations in order), :active-pane,
+:accumulator, and :messages (the buffer text)."
+  (with-temp-buffer
+    (let ((proc (make-pipe-process :name "tc-fuzz" :buffer (current-buffer)
+                                   :noquery t))
+          (fed '())
+          (calls '()))
+      (unwind-protect
+          (progn
+            (setq-local tmux-control--accumulator ""
+                        tmux-control--output-batch nil
+                        tmux-control--utf8-carry ""
+                        tmux-control--collecting-command nil
+                        tmux-control--current-command-kind :ignore
+                        tmux-control--command-queue nil
+                        tmux-control--command-output nil
+                        tmux-control--active-pane nil
+                        tmux-control--tiled nil
+                        tmux-control--retile-pending nil
+                        tmux-control--panes nil
+                        tmux-control--self-reseed-pending 0
+                        tmux-control--self-reseed-until 0
+                        ;; A stand-in terminal: `--feed-terminal' runs for
+                        ;; real (UTF-8 carry included); only the Eat API
+                        ;; calls below it are stubbed.
+                        tmux-control--terminal 'tc-fuzz-term
+                        tmux-control--display-dirty nil)
+            (cl-letf (((symbol-function 'eat-term-live-p)
+                       (lambda (_) t))
+                      ((symbol-function 'eat-term-process-output)
+                       (lambda (_term s) (push s fed)))
+                      ((symbol-function 'tmux-control--seed-screen)
+                       (lambda () (push 'seed calls)))
+                      ((symbol-function 'tmux-control--refresh-alt-screen-option)
+                       (lambda () (push 'alt calls)))
+                      ((symbol-function 'tmux-control--refresh-pane-size)
+                       (lambda () (push 'size calls)))
+                      ((symbol-function 'tmux-control--refresh-windows)
+                       (lambda () (push 'windows calls)))
+                      ((symbol-function 'tmux-control--refresh-pane-window-map)
+                       (lambda () (push 'pane-map calls)))
+                      ((symbol-function 'tmux-control--refresh-active-pane)
+                       (lambda (&rest _) (push 'active calls)))
+                      ((symbol-function 'tmux-control--handle-pause)
+                       (lambda (pane) (push (cons 'pause pane) calls)))
+                      ((symbol-function 'tmux-control--note-pane-activity)
+                       (lambda (_) nil))
+                      ((symbol-function 'tmux-control--note-session-activity)
+                       (lambda () nil))
+                      ((symbol-function 'tmux-control--current-sync-windows)
+                       (lambda () nil))
+                      ((symbol-function 'tmux-control--flush-display)
+                       (lambda (&rest _) nil)))
+              (dolist (chunk chunks)
+                (tmux-control--filter proc chunk)))
+            (list :fed (apply #'concat (nreverse fed))
+                  :calls (nreverse calls)
+                  :active-pane tmux-control--active-pane
+                  :accumulator tmux-control--accumulator
+                  :messages (buffer-substring-no-properties
+                             (point-min) (point-max))))
+        (delete-process proc)))))
+
+(ert-deftest tmux-control-test-filter-fuzz-chunking-invariance ()
+  ;; The same transcript, torn at arbitrary character boundaries by 12
+  ;; deterministic chunkings (plus a line-by-line feed), must yield exactly
+  ;; the state of feeding it whole.
+  (let ((reference (tmux-control-test--run-filter-chunked
+                    (list tmux-control-test--fuzz-transcript))))
+    ;; Sanity: the reference itself decoded the escapes, reassembled the
+    ;; split multibyte char, stripped the CR, and routed panes.
+    (should (string-match-p "box ┌─┐ done" (plist-get reference :fed)))
+    (should (string-match-p "split-pair ─ joined" (plist-get reference :fed)))
+    (should (string-match-p "cr-line" (plist-get reference :fed)))
+    (should-not (string-match-p "cr-line\r" (plist-get reference :fed)))
+    (should (string-match-p "now-active" (plist-get reference :fed)))
+    (should-not (string-match-p "dropped" (plist-get reference :fed)))
+    (should-not (string-match-p "not-output-while-collecting"
+                                (plist-get reference :fed)))
+    (should (equal (plist-get reference :accumulator) ""))
+    (dolist (chunks (append
+                     ;; Line-by-line, and one character at a time -- the
+                     ;; latter exercises every possible tear point.
+                     (list (mapcar (lambda (l) (concat l "\n"))
+                                   (split-string
+                                    tmux-control-test--fuzz-transcript "\n" t))
+                           (mapcar #'string
+                                   (string-to-list
+                                    tmux-control-test--fuzz-transcript)))
+                     (mapcar (lambda (seed)
+                               (tmux-control-test--lcg-chunks
+                                tmux-control-test--fuzz-transcript seed))
+                             (number-sequence 1 12))))
+      (should (equal (tmux-control-test--run-filter-chunked chunks)
+                     reference)))))
 
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

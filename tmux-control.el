@@ -156,6 +156,23 @@ For the Claude Code TUI, for example:
             \"\\\\`[─━]\\\\{10,\\\\}\\\\\\='\" \"\\\\`❯\\\\\\='\"))"
   :type '(repeat regexp))
 
+(defcustom tmux-control-command-timeout 10
+  "Seconds to wait for tmux to reply to a control-mode command.
+
+Replies on the control connection are matched to commands strictly in
+order, so a single reply that never arrives -- a hung server, a
+half-dead SSH link -- would otherwise wedge the whole command queue
+silently: every later command waits behind it forever, and the client
+just stops reacting with no indication why.  When the oldest pending
+command has waited longer than this, a warning naming the wait is
+surfaced in the session buffer and the echo area, pointing at
+`tmux-control-reconnect'.  The queue is left untouched (a late reply
+must still match its command), so this detects and reports the wedge
+rather than guessing at recovery.
+
+nil disables the watchdog."
+  :type '(choice (const :tag "Disabled" nil) number))
+
 (defcustom tmux-control-wheel-enters-scrollback t
   "Non-nil means scrolling up with the mouse wheel enters scrollback view.
 
@@ -289,7 +306,11 @@ is treated as stale and cleared, so a self-initiated reseed that produced no
 (defvar-local tmux-control--socket-name nil)
 (defvar-local tmux-control--session nil)
 (defvar-local tmux-control--scrollback-target nil)
-(defvar-local tmux-control--command-queue nil)
+(defvar-local tmux-control--command-queue nil
+  "Pending control-mode command entries, oldest first.
+Each entry is a cons (KIND . SEND-TIME): the reply-handler kind enqueued
+by `tmux-control--send-command' and the `float-time' it was sent, read
+by the command watchdog to spot a connection that has stopped replying.")
 (defvar-local tmux-control--current-command-kind :ignore)
 (defvar-local tmux-control--collecting-command nil)
 (defvar-local tmux-control--command-output nil)
@@ -299,6 +320,12 @@ A %end or %error line closes the block only when its number matches;
 a captured pane whose CONTENT contains a line starting with \"%end \"
 (someone viewing a control-mode transcript, say) must not terminate
 the block early.")
+(defvar-local tmux-control--command-watchdog-timer nil
+  "Pending watchdog timer for the command queue, or nil.")
+(defvar-local tmux-control--command-watchdog-warned nil
+  "Non-nil after the watchdog has warned about the current stuck episode.
+Cleared when a reply arrives or the queue drains, so one wedge produces
+one warning rather than one per check interval.")
 (defvar-local tmux-control--seed-cursor nil
   "Most recent (X . Y) cursor position queried for a screen seed.
 X and Y are tmux's 0-indexed cursor column and row on the visible
@@ -557,7 +584,10 @@ session (tmux attaches if it exists, otherwise creates it)."
       ;; positional reply queue stays aligned and later replies -- notably the
       ;; `#{pane_id}' query that drives the initial screen seed -- are matched
       ;; to the correct handler instead of being shifted onto the wrong one.
-      (setq tmux-control--command-queue (list :ignore))
+      ;; Arming the watchdog here also flags a connection that never
+      ;; produces its startup reply (a hung server, a stalled SSH link).
+      (setq tmux-control--command-queue (list (cons :ignore (float-time))))
+      (tmux-control--arm-command-watchdog)
       (process-put tmux-control--process 'adjust-window-size-function
                    #'tmux-control--adjust-window-size)
       (setf (eat-term-parameter tmux-control--terminal 'eat--process)
@@ -1860,6 +1890,10 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
     (setq tmux-control--current-command-kind :ignore)
     (setq tmux-control--collecting-command nil)
     (setq tmux-control--command-output nil)
+    (when tmux-control--command-watchdog-timer
+      (cancel-timer tmux-control--command-watchdog-timer))
+    (setq tmux-control--command-watchdog-timer nil)
+    (setq tmux-control--command-watchdog-warned nil)
     (setq tmux-control--seed-cursor nil)
     (setq tmux-control--seed-cursor-visible :unknown)
     (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
@@ -2759,8 +2793,12 @@ the matching pane's render buffer instead, so every pane updates at once."
      ;; pane CONTENT (a capture of a control-mode transcript), not protocol.
      ((and (string-prefix-p "%begin " line)
            (not tmux-control--collecting-command))
-      (setq tmux-control--current-command-kind
-            (or (pop tmux-control--command-queue) :ignore))
+      (let ((entry (pop tmux-control--command-queue)))
+        (setq tmux-control--current-command-kind
+              (or (car-safe entry) :ignore)))
+      (when tmux-control--command-watchdog-warned
+        (setq tmux-control--command-watchdog-warned nil)
+        (tmux-control--message "tmux replied after the delay -- recovered"))
       (setq tmux-control--collecting-command t)
       ;; %begin <time> <number> <flags>: the number also appears on the
       ;; matching %end/%error (the time may differ between the two).
@@ -2867,10 +2905,11 @@ the matching pane's render buffer instead, so every pane updates at once."
 
 (defun tmux-control--block-terminator-p (line)
   "Return non-nil when %end/%error LINE closes the current reply block.
-True while collecting only if LINE's command number matches the block's
-\(the timestamp differs between %begin and %end, the number does not).
-Outside a block any terminator-shaped line is stray; accept it so state
-can't wedge, unless no block was ever opened."
+True only while collecting a block AND when LINE's command number
+matches the block's %begin (the timestamp differs between %begin and
+its %end; the number does not).  Outside a block the answer is always
+nil: a stray terminator-shaped line then matches no other clause of
+the protocol dispatch and is simply ignored."
   (and tmux-control--collecting-command
        (equal (nth 2 (split-string line " "))
               tmux-control--command-block-number)))
@@ -2886,68 +2925,69 @@ and remote sessions."
   (tmux-control--send-command command callback))
 
 (defun tmux-control--finish-command-output ()
-  "Handle the end of a tmux command reply."
-  (pcase tmux-control--current-command-kind
-    ;; A function kind is a one-shot `tmux-control--query' callback; it
-    ;; receives the reply lines in order.
-    ((pred functionp)
-     (funcall tmux-control--current-command-kind
-              (reverse tmux-control--command-output)))
-    (:pane-id
-     (let ((pane (cl-find-if (lambda (line)
-                               (string-match-p "\\`%[0-9]+\\'" line))
-                             tmux-control--command-output)))
-       (when pane
-         (setq tmux-control--active-pane pane)
-         (tmux-control--seed-screen)
-         (tmux-control--refresh-alt-screen-option)
-         (tmux-control--refresh-pane-size))))
-    (:pane-size
-     (let ((size (tmux-control--parse-pane-size tmux-control--command-output)))
-       (when (and size
-                  (tmux-control--apply-eat-size (car size) (cdr size)))
-         ;; The grid changed under already-rendered output, so repaint
-         ;; the visible screen at the corrected width.
-         (tmux-control--seed-screen))))
-    (:windows
-     (tmux-control--update-windows tmux-control--command-output))
-    (:pane-window
-     (tmux-control--update-pane-window-map tmux-control--command-output))
-    (:alt-screen-opt
-     (let ((res (tmux-control--interpret-alt-screen-reply
-                 tmux-control--command-output nil)))
-       (if (eq res :inherit)
-           ;; Empty reply means the window inherits the option; resolve it
-           ;; from the global-window default.
-           (tmux-control--send-command "show-options -gwv alternate-screen"
-                                       :alt-screen-opt-global)
-         (setq tmux-control--alt-screen-honored (cdr res)))))
-    (:alt-screen-opt-global
-     (setq tmux-control--alt-screen-honored
-           (cdr (tmux-control--interpret-alt-screen-reply
-                 tmux-control--command-output t))))
-    (:version
-     (setq tmux-control--capture-trailing-p
-           (tmux-control--capture-n-supported-p
-            (car (cl-remove-if #'string-empty-p
-                               (mapcar #'string-trim
-                                       tmux-control--command-output))))))
-    (:cursor-pos
-     (setq tmux-control--seed-cursor
-           (tmux-control--parse-cursor-pos tmux-control--command-output))
-     (setq tmux-control--seed-cursor-visible
-           (tmux-control--parse-cursor-visible tmux-control--command-output)))
-    (:capture
-     (tmux-control--write-terminal
-      (tmux-control--screen-seed-sequence
-       (mapconcat #'identity
-                  (nreverse tmux-control--command-output)
-                  "\n")
-       tmux-control--seed-cursor
-       tmux-control--seed-cursor-visible))))
-  (setq tmux-control--collecting-command nil)
-  (setq tmux-control--current-command-kind :ignore)
-  (setq tmux-control--command-output nil))
+  "Handle the end of a tmux command reply.
+The reply state is snapshotted and RESET before the handler runs: a
+handler -- a query callback in particular -- may directly or indirectly
+pump the process (`accept-process-output', `sit-for'), re-entering the
+filter; if the buffer still looked mid-block, the next %begin would be
+swallowed as content and the reply queue would desynchronize."
+  (let ((kind tmux-control--current-command-kind)
+        (output tmux-control--command-output))
+    (setq tmux-control--collecting-command nil)
+    (setq tmux-control--current-command-kind :ignore)
+    (setq tmux-control--command-output nil)
+    (pcase kind
+      ;; A function kind is a one-shot `tmux-control--query' callback; it
+      ;; receives the reply lines in order.
+      ((pred functionp)
+       (funcall kind (reverse output)))
+      (:pane-id
+       (let ((pane (cl-find-if (lambda (line)
+                                 (string-match-p "\\`%[0-9]+\\'" line))
+                               output)))
+         (when pane
+           (setq tmux-control--active-pane pane)
+           (tmux-control--seed-screen)
+           (tmux-control--refresh-alt-screen-option)
+           (tmux-control--refresh-pane-size))))
+      (:pane-size
+       (let ((size (tmux-control--parse-pane-size output)))
+         (when (and size
+                    (tmux-control--apply-eat-size (car size) (cdr size)))
+           ;; The grid changed under already-rendered output, so repaint
+           ;; the visible screen at the corrected width.
+           (tmux-control--seed-screen))))
+      (:windows
+       (tmux-control--update-windows output))
+      (:pane-window
+       (tmux-control--update-pane-window-map output))
+      (:alt-screen-opt
+       (let ((res (tmux-control--interpret-alt-screen-reply output nil)))
+         (if (eq res :inherit)
+             ;; Empty reply means the window inherits the option; resolve it
+             ;; from the global-window default.
+             (tmux-control--send-command "show-options -gwv alternate-screen"
+                                         :alt-screen-opt-global)
+           (setq tmux-control--alt-screen-honored (cdr res)))))
+      (:alt-screen-opt-global
+       (setq tmux-control--alt-screen-honored
+             (cdr (tmux-control--interpret-alt-screen-reply output t))))
+      (:version
+       (setq tmux-control--capture-trailing-p
+             (tmux-control--capture-n-supported-p
+              (car (cl-remove-if #'string-empty-p
+                                 (mapcar #'string-trim output))))))
+      (:cursor-pos
+       (setq tmux-control--seed-cursor
+             (tmux-control--parse-cursor-pos output))
+       (setq tmux-control--seed-cursor-visible
+             (tmux-control--parse-cursor-visible output)))
+      (:capture
+       (tmux-control--write-terminal
+        (tmux-control--screen-seed-sequence
+         (mapconcat #'identity (nreverse output) "\n")
+         tmux-control--seed-cursor
+         tmux-control--seed-cursor-visible))))))
 
 (defun tmux-control--seed-screen ()
   "Seed the Eat buffer with the current tmux pane contents.
@@ -3322,9 +3362,70 @@ so every reply stays matched to the right handler on one queue."
         (when (process-live-p tmux-control--process)
           (setq tmux-control--command-queue
                 (append tmux-control--command-queue
-                        (list (or kind :ignore))))
+                        (list (cons (or kind :ignore) (float-time)))))
+          (tmux-control--arm-command-watchdog)
           (process-send-string tmux-control--process
                                (concat command "\n")))))))
+
+(defun tmux-control--arm-command-watchdog ()
+  "Schedule a check that the oldest pending command gets its reply in time.
+No-op when `tmux-control-command-timeout' is nil or a check is already
+scheduled.  Must run in the controller buffer."
+  (when (and tmux-control-command-timeout
+             (null tmux-control--command-watchdog-timer))
+    (setq tmux-control--command-watchdog-timer
+          (run-at-time tmux-control-command-timeout nil
+                       #'tmux-control--command-watchdog-check
+                       (current-buffer)))))
+
+(defun tmux-control--command-watchdog-check (buffer)
+  "Warn when BUFFER's oldest pending command has gone unanswered too long.
+Replies are matched to commands strictly in order, so the queue is never
+popped here -- a late reply must still meet its own entry.  The check
+re-arms itself while commands remain pending on a live connection: for
+the remaining wait when the head entry is still fresh, or for a full
+interval after warning so a recovery can be noticed and the episode
+flag reset."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq tmux-control--command-watchdog-timer nil)
+      (let ((head (car tmux-control--command-queue)))
+        (cond
+         ((null head)
+          (setq tmux-control--command-watchdog-warned nil))
+         ;; The watchdog can be disabled after this check was armed.
+         ((not (numberp tmux-control-command-timeout))
+          (setq tmux-control--command-watchdog-warned nil))
+         ((not (process-live-p tmux-control--process))
+          ;; The sentinel already reports a dead connection; a stuck-queue
+          ;; warning on top would be noise.  Stop watching.
+          (setq tmux-control--command-watchdog-warned nil))
+         (t
+          ;; `cdr-safe' tolerates a bare-symbol entry from a buffer that
+          ;; predates timestamped entries (a live upgrade); with no send
+          ;; time it counts as fresh and simply drains.
+          (let ((age (- (float-time) (or (cdr-safe head) (float-time)))))
+            (if (< age tmux-control-command-timeout)
+                ;; The original head was answered and a younger command is
+                ;; at the front now; wait out its remaining time.
+                (setq tmux-control--command-watchdog-timer
+                      (run-at-time (- tmux-control-command-timeout age) nil
+                                   #'tmux-control--command-watchdog-check
+                                   buffer))
+              (unless tmux-control--command-watchdog-warned
+                (setq tmux-control--command-watchdog-warned t)
+                (let ((text (format "no reply from tmux for %ds (%d command%s pending) -- connection may be stuck; M-x tmux-control-reconnect to recover"
+                                    (round age)
+                                    (length tmux-control--command-queue)
+                                    (if (cdr tmux-control--command-queue) "s" ""))))
+                  (tmux-control--message text)
+                  (message "tmux-control: %s" text)))
+              ;; Keep watching so a drain after the warning resets the
+              ;; episode (and a still-stuck queue stays detectable).
+              (setq tmux-control--command-watchdog-timer
+                    (run-at-time tmux-control-command-timeout nil
+                                 #'tmux-control--command-watchdog-check
+                                 buffer))))))))))
 
 (defun tmux-control--adjust-window-size (process windows)
   "Resize tmux and Eat for PROCESS according to WINDOWS."
