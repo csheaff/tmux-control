@@ -173,6 +173,22 @@ rather than guessing at recovery.
 nil disables the watchdog."
   :type '(choice (const :tag "Disabled" nil) number))
 
+(defcustom tmux-control-window-buffers t
+  "Non-nil gives each visited tmux window its own render buffer.
+
+Switching windows then swaps buffers instead of repainting one buffer in
+place, so each window keeps its accumulated Emacs-side scrollback across
+switches -- and a visited window keeps STREAMING while you look at
+another, so flipping back shows everything it printed in the meantime,
+not just its current screen.  Memory grows only with windows you have
+actually visited; never-visited windows cost nothing.
+
+When nil, the single live buffer repaints in place on every switch (the
+historical behavior): cheaper, but a switch discards the previous
+window's scrollback and anything printed while it was in the
+background."
+  :type 'boolean)
+
 (defcustom tmux-control-wheel-enters-scrollback t
   "Non-nil means scrolling up with the mouse wheel enters scrollback view.
 
@@ -352,15 +368,28 @@ requests the alternate screen, so Eat's alternate-display state is a
 phantom and must be ignored.  Refreshed over the control connection
 whenever the active pane changes.")
 
+;; Per-window render buffers (`tmux-control-window-buffers').  The connect
+;; buffer keeps the process and session state and renders its own tmux
+;; window; every other window the user visits gets a sibling render buffer
+;; that routes through it, and a window switch swaps buffers instead of
+;; repainting in place -- so each window keeps its scrollback, and visited
+;; windows keep streaming in the background.
+(defvar-local tmux-control--window-buffers nil
+  "On the connect (controller) buffer: alist (WINDOW-ID . RENDER-BUFFER).
+WINDOW-ID is tmux's stable @id string.  Includes the connect buffer
+itself under its own window id once that id is known.")
+(defvar-local tmux-control--window-id nil
+  "The tmux @window-id this buffer renders, or nil before it is known.")
+
 ;; Multi-pane tiling (experimental).  In tiling mode the controller buffer
 ;; (the process buffer) stops rendering and instead fans the session's
 ;; %output out to one render buffer per pane, tiled into Emacs windows to
 ;; match tmux's window layout.  See the "Multi-pane tiling" section below.
 (defvar-local tmux-control--controller nil
   "Controller buffer owning the shared tmux process, or nil.
-Set in a tiled pane render buffer so its commands (input, select-pane)
-route through the controller's single command queue and process.  nil in
-the controller buffer itself and in an ordinary single-pane client.")
+Set in a tiled pane render buffer -- and in a per-window render buffer --
+so its commands (input, select-pane) route through the controller's
+single command queue and process.  nil in the controller buffer itself.")
 (defvar-local tmux-control--tiled nil
   "Non-nil in a controller buffer whose window is rendered as tiled panes.")
 (defvar-local tmux-control--panes nil
@@ -651,7 +680,10 @@ even when `tmux-control-connect' would otherwise pop a new window."
   (let ((buffer (tmux-control--session-live-buffer host session))
         (display-buffer-overriding-action '((display-buffer-same-window))))
     (if buffer
-        (pop-to-buffer buffer)
+        ;; Show the session as it currently is: its current window's render
+        ;; buffer when per-window buffers are on, not necessarily the
+        ;; controller.
+        (pop-to-buffer (tmux-control--session-display-buffer buffer))
       (tmux-control-connect host socket-name session))))
 
 (defun tmux-control--select-session-inline (host socket sessions current)
@@ -738,18 +770,21 @@ tmux's own list order, connecting the target on demand."
 ;; tiles one cell per connected session and sizes each session to its cell.
 
 (defun tmux-control--live-session-buffers ()
-  "Return the live single-pane tmux-control session buffers, sorted by name.
-Excludes tiling pane buffers (which have a controller and no process of
-their own) and tiled controllers (which render nothing)."
+  "Return one displayable buffer per live tmux-control session, sorted by name.
+Each session is represented by its current window's render buffer when
+per-window buffers are on (the controller, otherwise).  Excludes tiling
+pane buffers and tiled controllers (which render nothing)."
   (sort
-   (seq-filter
-    (lambda (b)
-      (and (buffer-live-p b)
-           (buffer-local-value 'tmux-control--session b)
-           (not (buffer-local-value 'tmux-control--controller b))
-           (not (buffer-local-value 'tmux-control--tiled b))
-           (process-live-p (buffer-local-value 'tmux-control--process b))))
-    (buffer-list))
+   (mapcar
+    #'tmux-control--session-display-buffer
+    (seq-filter
+     (lambda (b)
+       (and (buffer-live-p b)
+            (buffer-local-value 'tmux-control--session b)
+            (not (buffer-local-value 'tmux-control--controller b))
+            (not (buffer-local-value 'tmux-control--tiled b))
+            (process-live-p (buffer-local-value 'tmux-control--process b))))
+     (buffer-list)))
    (lambda (a b) (string< (buffer-name a) (buffer-name b)))))
 
 (defun tmux-control--flock-grid (buffers)
@@ -1127,7 +1162,11 @@ to the new window's panes, so only the single-pane view reseeds here."
     (tmux-control--send-command
      (format "select-window -t %s:%s" tmux-control--session index))
     (unless ctrl
-      (tmux-control--refresh-active-pane t))))
+      ;; With per-window buffers the echoed %session-window-changed swaps
+      ;; the displayed buffer; repainting in place would be wasted work.
+      (if tmux-control-window-buffers
+          (tmux-control--quiet-activity)
+        (tmux-control--refresh-active-pane t)))))
 
 (defun tmux-control--switch-window (verb)
   "Switch the live view to another window via tmux command VERB.
@@ -1148,7 +1187,10 @@ window, so any other client attached to the session follows along."
     (tmux-control--send-command
      (format "%s -t %s" verb tmux-control--session))
     (unless ctrl
-      (tmux-control--refresh-active-pane t))))
+      ;; See `tmux-control--do-select-window' on the per-window-buffers case.
+      (if tmux-control-window-buffers
+          (tmux-control--quiet-activity)
+        (tmux-control--refresh-active-pane t)))))
 
 ;;;###autoload
 (defun tmux-control-next-window ()
@@ -1235,37 +1277,41 @@ is left untouched."
 
 (defun tmux-control--refresh-windows ()
   "Asynchronously refresh the cached window list that feeds the tab bar."
-  (when (and tmux-control-window-tab-bar
+  (when (and (or tmux-control-window-tab-bar tmux-control-window-buffers)
              (process-live-p tmux-control--process))
     (tmux-control--send-command
-     (format "list-windows -t %s -F '#{window_index}\t#{window_name}\t#{window_active}\t#{window_bell_flag}'"
+     (format "list-windows -t %s -F '#{window_index}\t#{window_name}\t#{window_active}\t#{window_bell_flag}\t#{window_id}'"
              tmux-control--session)
      :windows)))
 
 (defun tmux-control--refresh-pane-window-map ()
-  "Asynchronously refresh the pane-id -> window-index map for activity routing."
-  (when (and tmux-control-window-tab-bar
+  "Asynchronously refresh the pane-id -> window map for output routing."
+  (when (and (or tmux-control-window-tab-bar tmux-control-window-buffers)
              (process-live-p tmux-control--process))
     (tmux-control--send-command
-     (format "list-panes -s -t %s -F '#{pane_id}\t#{window_index}'"
+     (format "list-panes -s -t %s -F '#{pane_id}\t#{window_index}\t#{window_id}'"
              tmux-control--session)
      :pane-window)))
 
 (defun tmux-control--update-windows (lines)
   "Parse a list-windows reply LINES into `tmux-control--windows'.
 Records the active window as the current one and clears its activity marker,
-then refreshes the header line."
-  (let (parsed active)
+then refreshes the header line.  With per-window buffers on, also claims the
+active window for the controller buffer the first time its id is learned --
+the controller renders its own window, so a switch back to it swaps here."
+  (let (parsed active active-id)
     (dolist (line lines)
-      (when (string-match "\\`\\([0-9]+\\)\t\\(.*\\)\t\\([01]\\)\t\\([01]\\)\\'" line)
+      (when (string-match "\\`\\([0-9]+\\)\t\\(.*\\)\t\\([01]\\)\t\\([01]\\)\\(?:\t\\(@[0-9]+\\)\\)?\\'" line)
         (let ((idx (match-string 1 line))
-              (act (string= (match-string 3 line) "1")))
+              (act (string= (match-string 3 line) "1"))
+              (id (match-string 5 line)))
           (push (list :index idx
                       :name (match-string 2 line)
                       :active act
-                      :bell (string= (match-string 4 line) "1"))
+                      :bell (string= (match-string 4 line) "1")
+                      :id id)
                 parsed)
-          (when act (setq active idx)))))
+          (when act (setq active idx active-id id)))))
     ;; Reply line order is not guaranteed (the filter collects command output
     ;; in reverse); sort by numeric index so tabs read left-to-right 0,1,2,...
     (setq tmux-control--windows
@@ -1277,14 +1323,26 @@ then refreshes the header line."
       (setq tmux-control--current-window active)
       (when (hash-table-p tmux-control--activity)
         (remhash active tmux-control--activity)))
+    ;; The controller doubles as the render buffer for the window it was
+    ;; connected on; bind it to that window's id once known.
+    (when (and tmux-control-window-buffers
+               active-id
+               (null tmux-control--controller)   ; we are the controller
+               (null tmux-control--window-id))
+      (setq tmux-control--window-id active-id)
+      (tmux-control--register-window-buffer active-id (current-buffer)))
     (force-mode-line-update)))
 
 (defun tmux-control--update-pane-window-map (lines)
-  "Parse a list-panes reply LINES into `tmux-control--pane-window'."
+  "Parse a list-panes reply LINES into `tmux-control--pane-window'.
+Each value is a cons (WINDOW-INDEX . WINDOW-ID); the id may be nil on a
+reply from before the format carried it."
   (let ((map (make-hash-table :test 'equal)))
     (dolist (line lines)
-      (when (string-match "\\`\\(%[0-9]+\\)\t\\([0-9]+\\)\\'" line)
-        (puthash (match-string 1 line) (match-string 2 line) map)))
+      (when (string-match "\\`\\(%[0-9]+\\)\t\\([0-9]+\\)\\(?:\t\\(@[0-9]+\\)\\)?\\'" line)
+        (puthash (match-string 1 line)
+                 (cons (match-string 2 line) (match-string 3 line))
+                 map)))
     (setq tmux-control--pane-window map)))
 
 (defun tmux-control--quiet-activity (&optional secs)
@@ -1306,8 +1364,18 @@ path costs nothing then, and during the quiet period after a full repaint
              tmux-control--current-window
              (> (float-time) tmux-control--activity-quiet-until)
              (hash-table-p tmux-control--pane-window))
-    (let ((win (gethash pane tmux-control--pane-window)))
-      (when (and win (not (equal win tmux-control--current-window)))
+    (let* ((entry (gethash pane tmux-control--pane-window))
+           (win (car-safe entry))
+           (win-id (cdr-safe entry)))
+      (when (and win
+                 (not (equal win tmux-control--current-window))
+                 ;; A background window whose render buffer is on screen
+                 ;; (another Emacs window or frame) is being watched, not
+                 ;; waiting -- don't flag it.
+                 (not (and win-id
+                           (when-let* ((buf (tmux-control--window-buffer
+                                             win-id)))
+                             (get-buffer-window buf t)))))
         (unless (hash-table-p tmux-control--activity)
           (setq tmux-control--activity (make-hash-table :test 'equal)))
         (unless (gethash win tmux-control--activity)
@@ -1324,7 +1392,11 @@ flagged one in its strip."
   (when (and tmux-control-session-activity
              (not tmux-control--session-activity)
              (> (float-time) tmux-control--activity-quiet-until)
-             (not (get-buffer-window (current-buffer) 'visible)))
+             ;; "Visible" means whichever buffer represents the session on
+             ;; screen -- the current window's render buffer when per-window
+             ;; buffers are on, not necessarily this controller.
+             (not (get-buffer-window (tmux-control--session-display-buffer)
+                                     'visible)))
     (setq tmux-control--session-activity t)
     (force-mode-line-update t)))
 
@@ -1341,7 +1413,7 @@ flagged one in its strip."
       (lambda (_event)
         (interactive "e")
         (let ((display-buffer-overriding-action '((display-buffer-same-window))))
-          (pop-to-buffer buffer))))
+          (pop-to-buffer (tmux-control--session-display-buffer buffer)))))
     (put-text-property 0 (length tab) 'keymap map tab)
     tab))
 
@@ -1351,10 +1423,10 @@ Tests the activity flag first so most buffers are rejected by one cheap
 check, and sorts only the (usually few) flagged buffers -- not the whole
 buffer list -- so it is cheap to call from the header-line :eval on every
 redisplay."
-  (let ((self (current-buffer))
+  (let ((self-ctrl (tmux-control--wb-controller))
         flagged)
     (dolist (b (buffer-list))
-      (when (and (not (eq b self))
+      (when (and (not (eq b self-ctrl))
                  (buffer-local-value 'tmux-control--session-activity b)
                  (buffer-local-value 'tmux-control--session b)
                  (not (buffer-local-value 'tmux-control--controller b))
@@ -1367,11 +1439,15 @@ redisplay."
   "Header-line segment naming other connected sessions with unseen output.
 Empty when none (so an idle setup shows no extra chrome) and in the tiled
 view.  Rendered in the visible session's header line; clears this session's
-own flag as a side effect, since you are looking at it."
+own flag (held on its controller) as a side effect, since you are looking
+at it."
   (if (or (not tmux-control-session-activity) tmux-control--tiled)
       ""
-    (when tmux-control--session-activity
-      (setq tmux-control--session-activity nil))
+    (let ((ctrl (tmux-control--wb-controller)))
+      (when (and (buffer-live-p ctrl)
+                 (buffer-local-value 'tmux-control--session-activity ctrl))
+        (with-current-buffer ctrl
+          (setq tmux-control--session-activity nil))))
     (mapconcat #'tmux-control--session-strip-tab
                (tmux-control--flagged-other-session-buffers) "")))
 
@@ -1389,9 +1465,15 @@ own flag as a side effect, since you are looking at it."
 Empty in a tiled view (each pane already carries its own mode-line label) and
 before the first window list arrives.  With NO-KEYMAP the tabs are not
 clickable -- used for the read-only scrollback header, which renders the live
-buffer's tabs purely for orientation."
-  (if (or tmux-control--tiled (null tmux-control--windows))
-      ""
+buffer's tabs purely for orientation.  In a per-window render buffer the
+window list and activity state live on the controller; render from there."
+  (if (and tmux-control--controller
+           (buffer-live-p tmux-control--controller)
+           (null tmux-control--windows))
+      (with-current-buffer tmux-control--controller
+        (tmux-control--window-tab-bar no-keymap))
+    (if (or tmux-control--tiled (null tmux-control--windows))
+        ""
     (mapconcat
      (lambda (w)
        (let* ((idx (plist-get w :index))
@@ -1416,7 +1498,7 @@ buffer's tabs purely for orientation."
                               (tmux-control--tab-keymap idx) tab))
          tab))
      tmux-control--windows
-     "")))
+     ""))))
 
 (defun tmux-control--header-line ()
   "Compose the live buffer's header line.
@@ -1894,6 +1976,17 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
       (cancel-timer tmux-control--command-watchdog-timer))
     (setq tmux-control--command-watchdog-timer nil)
     (setq tmux-control--command-watchdog-warned nil)
+    ;; A (re)connect starts the per-window buffer registry fresh; stale
+    ;; sibling buffers from a previous connection eat output for window ids
+    ;; that may no longer exist.
+    (let ((self (current-buffer)))
+      (dolist (entry tmux-control--window-buffers)
+        (let ((buf (cdr entry)))
+          (when (and (buffer-live-p buf) (not (eq buf self)))
+            (let ((kill-buffer-query-functions nil))
+              (kill-buffer buf))))))
+    (setq tmux-control--window-buffers nil)
+    (setq tmux-control--window-id nil)
     (setq tmux-control--seed-cursor nil)
     (setq tmux-control--seed-cursor-visible :unknown)
     (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
@@ -2707,7 +2800,11 @@ Lines are compared by their width-insensitive match keys."
         (if tmux-control--tiled
             (tmux-control--flush-tiled-panes)
           (tmux-control--flush-output-batch)
-          (tmux-control--flush-display sync-windows))
+          (tmux-control--flush-display sync-windows)
+          ;; Per-window render buffers stream in the background; flush
+          ;; whichever of them accumulated output this chunk.
+          (when tmux-control-window-buffers
+            (tmux-control--flush-window-buffers)))
         ;; A %layout-change seen this chunk asked for a re-tile.  Debounce it
         ;; off the filter -- re-tiling makes blocking (possibly SSH) tmux
         ;; queries, so running it inline would freeze Emacs on every layout
@@ -2760,11 +2857,28 @@ the matching pane's render buffer instead, so every pane updates at once."
               (push decoded tmux-control--output-batch)))))
     (tmux-control--note-pane-activity pane)
     (tmux-control--note-session-activity)
-    (unless tmux-control--active-pane
-      (setq tmux-control--active-pane pane))
-    (when (equal pane tmux-control--active-pane)
-      (push (tmux-control--decode-output payload)
-            tmux-control--output-batch))))
+    ;; Per-window render buffers: route the pane's output to its window's
+    ;; buffer when that window has been visited, so it keeps accumulating
+    ;; in the background.  The controller is registered for its own window,
+    ;; so its pane routes here too once the map is known.
+    (let ((wbuf (and tmux-control-window-buffers
+                     (hash-table-p tmux-control--pane-window)
+                     (when-let* ((entry (gethash pane
+                                                 tmux-control--pane-window))
+                                 (id (cdr-safe entry)))
+                       (tmux-control--window-buffer id)))))
+      (cond
+       ((and wbuf (not (eq wbuf (current-buffer))))
+        (when (equal pane (buffer-local-value 'tmux-control--active-pane wbuf))
+          (let ((decoded (tmux-control--decode-output payload)))
+            (with-current-buffer wbuf
+              (push decoded tmux-control--output-batch)))))
+       (t
+        (unless tmux-control--active-pane
+          (setq tmux-control--active-pane pane))
+        (when (equal pane tmux-control--active-pane)
+          (push (tmux-control--decode-output payload)
+                tmux-control--output-batch)))))))
 
 (defun tmux-control--handle-line (line)
   "Handle one tmux control protocol LINE."
@@ -2841,17 +2955,30 @@ the matching pane's render buffer instead, so every pane updates at once."
       nil)
      (tmux-control--collecting-command
       (push line tmux-control--command-output))
-     ((string-match "\\`%window-pane-changed [^ ]+ \\(%[0-9]+\\)\\'" line)
+     ((string-match "\\`%window-pane-changed \\([^ ]+\\) \\(%[0-9]+\\)\\'" line)
       ;; The window's active pane changed (a split, a select-pane, a closed
       ;; pane).  In single-pane mode only the active pane is mirrored, so
       ;; follow it: repaint from its current screen.  In tiling mode every
       ;; pane is already shown, so just record the pointer (no reseed, no
       ;; flicker); the matching Emacs window can be focused on demand.
-      (setq tmux-control--active-pane (match-string 1 line))
-      (unless tmux-control--tiled
-        (tmux-control--seed-screen)
-        (tmux-control--refresh-alt-screen-option)
-        (tmux-control--refresh-pane-size)))
+      (let* ((win-id (match-string 1 line))
+             (pane (match-string 2 line))
+             (wbuf (and tmux-control-window-buffers
+                        (not tmux-control--tiled)
+                        (tmux-control--window-buffer win-id))))
+        (cond
+         ((and wbuf (not (eq wbuf (current-buffer))))
+          ;; A visited background window changed its active pane: retarget
+          ;; and repaint THAT buffer; the controller's own view is untouched.
+          (with-current-buffer wbuf
+            (setq tmux-control--active-pane pane))
+          (tmux-control--seed-window-buffer wbuf win-id))
+         (t
+          (setq tmux-control--active-pane pane)
+          (unless tmux-control--tiled
+            (tmux-control--seed-screen)
+            (tmux-control--refresh-alt-screen-option)
+            (tmux-control--refresh-pane-size))))))
      ((string-prefix-p "%layout-change " line)
       ;; The window's pane structure or sizes changed (a split, a resize, a
       ;; closed pane).  In tiling mode re-derive the tiling; in single-pane
@@ -2885,12 +3012,21 @@ the matching pane's render buffer instead, so every pane updates at once."
       (if tmux-control--tiled
           (setq tmux-control--retile-pending t)
         (tmux-control--refresh-windows)
-        (if (and (> tmux-control--self-reseed-pending 0)
-                 (<= (float-time) tmux-control--self-reseed-until))
-            (setq tmux-control--self-reseed-pending
-                  (1- tmux-control--self-reseed-pending))
-          (setq tmux-control--self-reseed-pending 0)
-          (tmux-control--refresh-active-pane))))
+        (if (and tmux-control-window-buffers
+                 (string-match "\\`%session-window-changed [^ ]+ \\(@[0-9]+\\)\\'"
+                               line))
+            ;; Per-window buffers: a switch -- ours or another client's --
+            ;; just swaps the displayed buffer.  The swap is idempotent, so
+            ;; our own echoed switch needs no self-reseed accounting.
+            (progn
+              (tmux-control--quiet-activity)
+              (tmux-control--display-window-buffer (match-string 1 line)))
+          (if (and (> tmux-control--self-reseed-pending 0)
+                   (<= (float-time) tmux-control--self-reseed-until))
+              (setq tmux-control--self-reseed-pending
+                    (1- tmux-control--self-reseed-pending))
+            (setq tmux-control--self-reseed-pending 0)
+            (tmux-control--refresh-active-pane)))))
      ((and (not tmux-control--tiled)
            (or (string-prefix-p "%window-add " line)
                (string-prefix-p "%window-close " line)
@@ -2898,6 +3034,18 @@ the matching pane's render buffer instead, so every pane updates at once."
                (string-prefix-p "%unlinked-window-close " line)
                (string-prefix-p "%window-renamed " line)
                (string-prefix-p "%unlinked-window-renamed " line)))
+      ;; A closed window's render buffer goes with it.  A displayed one is
+      ;; first swapped to the controller; the %session-window-changed that
+      ;; follows a current-window close then swaps to the real new window.
+      (when (and tmux-control-window-buffers
+                 (string-match "\\`%\\(?:unlinked-\\)?window-close \\(@[0-9]+\\)\\'"
+                               line))
+        (when-let* ((buf (tmux-control--window-buffer (match-string 1 line))))
+          (unless (eq buf (current-buffer))
+            (dolist (win (get-buffer-window-list buf nil t))
+              (set-window-buffer win (current-buffer)))
+            (let ((kill-buffer-query-functions nil))
+              (kill-buffer buf)))))
       ;; A window was created, closed, or renamed: refresh the tab bar and the
       ;; pane->window map for the activity marker.
       (tmux-control--refresh-windows)
@@ -3026,6 +3174,15 @@ tmux to continue so live output resumes from the present."
     (let ((buf (cdr (assoc pane tmux-control--panes))))
       (when (buffer-live-p buf)
         (tmux-control--seed-pane-buffer-sync buf))))
+   ;; A pane mirrored by a sibling window render buffer resyncs there.
+   ((when-let* ((entry (and tmux-control-window-buffers
+                            (hash-table-p tmux-control--pane-window)
+                            (gethash pane tmux-control--pane-window)))
+                (id (cdr-safe entry))
+                (buf (tmux-control--window-buffer id)))
+      (unless (eq buf (current-buffer))
+        (tmux-control--seed-window-buffer buf id)
+        t)))
    ((equal pane tmux-control--active-pane)
     (tmux-control--seed-screen)))
   ;; tmux's command parser rejects a bare "%0:continue" argument, so quote it.
@@ -3464,6 +3621,18 @@ redraws stay aligned."
         (tmux-control--keep-cursor-visible
          (eat--synchronize-scroll-windows)))))
   (tmux-control--send-command (format "refresh-client -C %dx%d" width height))
+  ;; refresh-client sizes the CLIENT, so tmux resizes every window to it;
+  ;; keep the sibling window render buffers' grids in step so background
+  ;; output renders at the size tmux is actually emitting for.
+  (when tmux-control-window-buffers
+    (let ((self (current-buffer)))
+      (with-current-buffer (tmux-control--wb-controller)
+        (dolist (entry tmux-control--window-buffers)
+          (let ((buf (cdr entry)))
+            (when (and (buffer-live-p buf)
+                       (not (eq buf self)))
+              (with-current-buffer buf
+                (tmux-control--apply-eat-size width height))))))))
   (tmux-control--refresh-pane-size))
 
 (defun tmux-control--apply-eat-size (width height)
@@ -3561,13 +3730,20 @@ by the `:pane-size' branch of `tmux-control--finish-command-output'."
       (setq tmux-control--process nil))))
 
 (defun tmux-control--kill-process ()
-  "Delete the tmux control process and any tiled pane buffers."
+  "Delete the tmux control process and any dependent render buffers."
   (when tmux-control--panes
     (dolist (np tmux-control--panes)
       (when (buffer-live-p (cdr np))
         (let ((kill-buffer-query-functions nil))
           (kill-buffer (cdr np)))))
     (setq tmux-control--panes nil))
+  (let ((self (current-buffer)))
+    (dolist (entry tmux-control--window-buffers)
+      (let ((buf (cdr entry)))
+        (when (and (buffer-live-p buf) (not (eq buf self)))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buf))))))
+  (setq tmux-control--window-buffers nil)
   (when (process-live-p tmux-control--process)
     (delete-process tmux-control--process)))
 
@@ -3578,6 +3754,229 @@ by the `:pane-size' branch of `tmux-control--finish-command-output'."
     (insert (propertize (format "\n[tmux-control] %s\n" message)
                         'face 'font-lock-comment-face))))
 
+
+;;;; Per-window render buffers (window scrollback persistence)
+;;
+;; With `tmux-control-window-buffers' on, each tmux window the user visits
+;; gets its own render buffer -- an ordinary `tmux-control-mode' buffer
+;; with its own Eat terminal, exactly like a tiled pane buffer but scoped
+;; to a window's active pane.  The connect buffer keeps the process and
+;; all session state (it is the controller) and doubles as the render
+;; buffer for its own window.  A window switch swaps buffers in the
+;; selected Emacs window instead of repainting one buffer in place, so
+;; every visited window keeps its accumulated scrollback -- and keeps
+;; STREAMING while in the background, because the control client receives
+;; %output for every pane of every window anyway.
+
+(defun tmux-control--wb-controller ()
+  "Return the controller buffer for the current tmux-control buffer."
+  (or tmux-control--controller (current-buffer)))
+
+(defun tmux-control--window-id-for-index (index)
+  "Return the @window-id for window INDEX from the cached window list.
+Must run in the controller buffer; nil when not yet known."
+  (let ((entry (cl-find-if (lambda (w) (equal (plist-get w :index) index))
+                           tmux-control--windows)))
+    (plist-get entry :id)))
+
+(defun tmux-control--window-buffer (window-id)
+  "Return the live render buffer for WINDOW-ID, or nil.
+Must run in the controller buffer."
+  (let ((buf (cdr (assoc window-id tmux-control--window-buffers))))
+    (and (buffer-live-p buf) buf)))
+
+(defun tmux-control--register-window-buffer (window-id buffer)
+  "Record BUFFER as WINDOW-ID's render buffer on the controller."
+  (setq tmux-control--window-buffers
+        (cons (cons window-id buffer)
+              (assoc-delete-all window-id tmux-control--window-buffers))))
+
+(defun tmux-control--session-display-buffer (&optional ctrl)
+  "Return the buffer currently representing CTRL's session on screen.
+That is the current window's render buffer when per-window buffers are
+on and one exists, else the controller itself."
+  (let ((ctrl (or ctrl (tmux-control--wb-controller))))
+    (with-current-buffer ctrl
+      (or (and tmux-control-window-buffers
+               tmux-control--current-window
+               (tmux-control--window-buffer
+                (tmux-control--window-id-for-index
+                 tmux-control--current-window)))
+          ctrl))))
+
+(defun tmux-control--make-window-buffer (window-id ctrl)
+  "Create a render buffer for tmux window WINDOW-ID routed through CTRL.
+Mirrors `tmux-control--make-pane-buffer': an ordinary `tmux-control-mode'
+buffer with its own terminal, no process of its own, commands routed via
+CTRL.  The buffer starts empty; `tmux-control--seed-window-buffer' fills
+it asynchronously over the control connection."
+  (with-current-buffer ctrl
+    (let* ((host tmux-control--host)
+           (name (format "*tmux-control:%s:%s:%s*"
+                         (if (and host (not (string-empty-p host)))
+                             host "local")
+                         tmux-control--session window-id))
+           (process tmux-control--process)
+           (socket tmux-control--socket-name)
+           (session tmux-control--session)
+           (trailing tmux-control--capture-trailing-p)
+           (fallback tmux-control--fallback-target)
+           (size (and tmux-control--terminal
+                      (eat-term-live-p tmux-control--terminal)
+                      (eat-term-size tmux-control--terminal)))
+           (buffer (get-buffer-create name)))
+      (with-current-buffer buffer
+        (let ((inhibit-read-only t)) (erase-buffer))
+        (tmux-control-mode)
+        (setq-local emulation-mode-map-alists
+                    (cons tmux-control--emulation-mode-map-alist
+                          (delq tmux-control--emulation-mode-map-alist
+                                emulation-mode-map-alists)))
+        (setq tmux-control--keys-active t
+              tmux-control--controller ctrl
+              tmux-control--process process
+              tmux-control--host host
+              tmux-control--socket-name socket
+              tmux-control--session session
+              tmux-control--capture-trailing-p trailing
+              tmux-control--fallback-target fallback
+              tmux-control--window-id window-id
+              tmux-control--live-buffer buffer
+              tmux-control--active-pane nil
+              tmux-control--accumulator ""
+              tmux-control--output-batch nil
+              tmux-control--display-dirty nil
+              tmux-control--utf8-carry ""
+              tmux-control--alt-screen-honored t
+              tmux-control--seed-cursor nil
+              tmux-control--seed-cursor-visible :unknown)
+        (setq tmux-control--terminal (eat-term-make buffer (point-min)))
+        (setq eat-terminal tmux-control--terminal)
+        (when size
+          (eat-term-resize tmux-control--terminal (car size) (cdr size)))
+        (eat-semi-char-mode)
+        (setf (eat-term-parameter tmux-control--terminal 'input-function)
+              #'tmux-control--send-input)
+        (setf (eat-term-parameter tmux-control--terminal 'set-cursor-function)
+              (if (fboundp 'eat--set-cursor) #'eat--set-cursor #'ignore))
+        (setf (eat-term-parameter tmux-control--terminal 'grab-mouse-function)
+              (if (fboundp 'eat--grab-mouse) #'eat--grab-mouse #'ignore))
+        (setf (eat-term-parameter tmux-control--terminal 'ring-bell-function)
+              (if (fboundp 'eat--bell) #'eat--bell #'ignore))
+        (setf (eat-term-parameter tmux-control--terminal
+                                  'manipulate-selection-function)
+              (if (fboundp 'eat--manipulate-kill-ring)
+                  #'eat--manipulate-kill-ring #'ignore))
+        (setf (eat-term-parameter tmux-control--terminal 'eat--process) process)
+        (setf (eat-term-parameter tmux-control--terminal 'eat--input-process)
+              process)
+        (setf (eat-term-parameter tmux-control--terminal 'eat--output-process)
+              process)
+        (when (or tmux-control-window-tab-bar tmux-control-session-activity)
+          (setq-local header-line-format
+                      '(:eval (tmux-control--header-line))))
+        (add-hook 'kill-buffer-hook
+                  #'tmux-control--window-buffer-killed nil t)
+        (tmux-control--disable-line-numbers))
+      (with-current-buffer ctrl
+        (tmux-control--register-window-buffer window-id buffer))
+      buffer)))
+
+(defun tmux-control--window-buffer-killed ()
+  "Deregister a killed window render buffer from its controller."
+  (when (and tmux-control--window-id
+             (buffer-live-p tmux-control--controller))
+    (let ((id tmux-control--window-id)
+          (buf (current-buffer)))
+      (with-current-buffer tmux-control--controller
+        (setq tmux-control--window-buffers
+              (cl-remove-if (lambda (e) (eq (cdr e) buf))
+                            tmux-control--window-buffers))
+        (ignore id)))))
+
+(defun tmux-control--seed-window-buffer (buffer window-id)
+  "Resolve WINDOW-ID's active pane and seed BUFFER from it, asynchronously.
+A closure-query chain over the control connection: find the window's
+active pane, fetch its cursor, capture its screen -- never blocking
+Emacs, and ordered by tmux itself."
+  (let ((ctrl (tmux-control--wb-controller)))
+    (with-current-buffer ctrl
+      (tmux-control--query
+       (format "list-panes -t %s -F \"#{pane_active}\t#{pane_id}\""
+               window-id)
+       (lambda (lines)
+         (let ((pane (cl-loop for l in (or lines '())
+                              when (string-match "\\`1\t\\(%[0-9]+\\)\\'" l)
+                              return (match-string 1 l))))
+           (when (and pane (buffer-live-p buffer))
+             (with-current-buffer buffer
+               (setq tmux-control--active-pane pane))
+             (with-current-buffer ctrl
+               (tmux-control--query
+                (format "display-message -p -t %s \"#{cursor_x},#{cursor_y},#{cursor_flag}\"" pane)
+                (lambda (cursor-lines)
+                  (let ((cur (and cursor-lines
+                                  (tmux-control--parse-cursor-pos cursor-lines)))
+                        (vis (if cursor-lines
+                                 (tmux-control--parse-cursor-visible cursor-lines)
+                               :unknown)))
+                    (with-current-buffer ctrl
+                      (tmux-control--query
+                       (format "capture-pane -p -e%s -t %s"
+                               (if (buffer-local-value
+                                    'tmux-control--capture-trailing-p buffer)
+                                   " -N" "")
+                               pane)
+                       (lambda (cap-lines)
+                         (when (and cap-lines (buffer-live-p buffer))
+                           (with-current-buffer buffer
+                             (tmux-control--write-terminal
+                              (tmux-control--screen-seed-sequence
+                               (string-join cap-lines "\n")
+                               cur vis))
+                             (tmux-control--flush-display
+                              (tmux-control--current-sync-windows))))))))))))))))))
+
+(defun tmux-control--flush-window-buffers ()
+  "Flush each sibling window render buffer's batched output and redisplay.
+Runs in the controller buffer at the end of a filter chunk, mirroring
+`tmux-control--flush-tiled-panes'; the controller's own batch was already
+flushed by the regular single-pane path."
+  (dolist (entry tmux-control--window-buffers)
+    (let ((buf (cdr entry)))
+      (when (and (buffer-live-p buf)
+                 (not (eq buf (current-buffer))))
+        (with-current-buffer buf
+          (when tmux-control--output-batch
+            (let ((sync (tmux-control--current-sync-windows)))
+              (tmux-control--flush-output-batch)
+              (tmux-control--flush-display sync))))))))
+
+(defun tmux-control--display-window-buffer (window-id)
+  "Show WINDOW-ID's render buffer in place of the session's current view.
+Creates and seeds the buffer on first visit.  Runs in any buffer of the
+session; swaps every Emacs window currently showing the session's
+display buffer (or the controller) over to the new one."
+  (let* ((ctrl (tmux-control--wb-controller))
+         (old (tmux-control--session-display-buffer ctrl))
+         (new (or (with-current-buffer ctrl
+                    (tmux-control--window-buffer window-id))
+                  ;; The controller renders its own window.
+                  (and (equal window-id
+                              (buffer-local-value 'tmux-control--window-id
+                                                  ctrl))
+                       ctrl)
+                  (let ((b (tmux-control--make-window-buffer window-id ctrl)))
+                    (tmux-control--seed-window-buffer b window-id)
+                    b))))
+    (unless (eq old new)
+      (dolist (win (get-buffer-window-list old nil t))
+        (set-window-buffer win new))
+      (when (buffer-live-p new)
+        (with-current-buffer new
+          (when (get-buffer-window new t)
+            (tmux-control--resize-to-window)))))
+    new))
 
 ;;;; Multi-pane tiling (experimental)
 ;;
