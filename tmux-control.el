@@ -3284,12 +3284,18 @@ flag reset."
         (cond
          ((null head)
           (setq tmux-control--command-watchdog-warned nil))
+         ;; The watchdog can be disabled after this check was armed.
+         ((not (numberp tmux-control-command-timeout))
+          (setq tmux-control--command-watchdog-warned nil))
          ((not (process-live-p tmux-control--process))
           ;; The sentinel already reports a dead connection; a stuck-queue
           ;; warning on top would be noise.  Stop watching.
           (setq tmux-control--command-watchdog-warned nil))
          (t
-          (let ((age (- (float-time) (cdr head))))
+          ;; `cdr-safe' tolerates a bare-symbol entry from a buffer that
+          ;; predates timestamped entries (a live upgrade); with no send
+          ;; time it counts as fresh and simply drains.
+          (let ((age (- (float-time) (or (cdr-safe head) (float-time)))))
             (if (< age tmux-control-command-timeout)
                 ;; The original head was answered and a younger command is
                 ;; at the front now; wait out its remaining time.
