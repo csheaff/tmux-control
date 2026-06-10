@@ -102,20 +102,30 @@ error) and never pause."
   "Non-nil means join soft-wrapped pane lines in scrollback captures."
   :type 'boolean)
 
-(defcustom tmux-control-compact-scrollback t
+(defcustom tmux-control-compact-scrollback nil
   "Non-nil means compact repeated full-screen redraws in the scrollback view.
 
-A TUI that repaints by reprinting its whole screen -- common under tmux with
-`alternate-screen' disabled -- leaves many near-identical copies of its screen
-in pane history.  When enabled (the default), tmux-control auto-detects the
-repeated frame and collapses it to a single copy plus whatever changed between
-repaints, so scrolling back shows the progression instead of dozens of copies.
-The collapse is conservative: with no repeating frame it changes nothing, so a
-session without a repainting TUI is shown verbatim.  Collapsing a repeat does
-trim trailing whitespace from the surrounding lines.
+A TUI that repaints by reprinting its whole screen -- which happens under tmux
+with `alternate-screen' disabled -- leaves many near-identical copies of its
+screen in pane history.  When enabled, tmux-control auto-detects the repeated
+frame and collapses it to a single copy plus whatever changed between repaints,
+so scrolling back shows the progression instead of dozens of copies.
 
-For a specific TUI you can override the auto-detected frame boundary and drop
-volatile per-frame lines with `tmux-control-scrollback-frame-start-regexp' and
+Off by default, so scrollback is shown VERBATIM -- exactly as tmux captured it.
+Two reasons that is the right default for most setups: tmux keeps
+`alternate-screen' ON by default, so full-screen TUIs use the alternate screen
+and never flow into scrollback as repeated frames in the first place; and on
+dense, evolving output (an agent streaming a long answer, where each \"frame\"
+grows rather than repeats) the collapse can elide more than intended and read
+as garbled.  Verbatim is always faithful.
+
+Turn it on if you run `alternate-screen off' and want repeated redraws
+suppressed.  In the pager you can also toggle it for the current view with
+\\<tmux-control-scrollback-mode-map>\\[tmux-control-scrollback-toggle-compaction],
+so it is easy to flip on when a particular history is repetitive and off when a
+collapse looks wrong.  For a specific TUI you can override the auto-detected
+frame boundary and drop volatile per-frame lines with
+`tmux-control-scrollback-frame-start-regexp' and
 `tmux-control-scrollback-chrome-regexps'."
   :type 'boolean)
 
@@ -1524,7 +1534,11 @@ orientation) and appends a scroll-mode hint, so entering scrollback does not
 look like the tabs vanished.  Falls back to a plain info line when the tab bar
 is disabled or no live buffer is available."
   (let* ((live tmux-control--live-buffer)
-         (cmode (if tmux-control-compact-scrollback "c:verbatim" "c:compact"))
+         ;; Show the CURRENT mode, then what `c' switches to, so it never
+         ;; reads as if verbatim were active while compaction is on.
+         (cmode (if tmux-control-compact-scrollback
+                    "compacted·c:verbatim"
+                  "verbatim·c:compact"))
          (tabs (and tmux-control-window-tab-bar
                     (buffer-live-p live)
                     (with-current-buffer live

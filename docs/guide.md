@@ -301,25 +301,36 @@ Scrollback joins soft-wrapped tmux lines by default; disable that with:
 (setq tmux-control-scrollback-join-wrapped-lines nil)
 ```
 
-### Compacting repeated TUI redraws
+### Compacting repeated TUI redraws (opt-in)
 
 Some TUIs repaint by reprinting their whole screen instead of using the
-alternate screen — common when tmux runs with `alternate-screen off`, which
-keeps full-screen apps on the normal screen so their history is preserved.
-Each repaint is then appended to the pane history, so scrolling back would
-otherwise show the same screen many times over.
+alternate screen — which happens when tmux runs with `alternate-screen off`,
+keeping full-screen apps on the normal screen so their history is preserved.
+Each repaint is then appended to the pane history, so scrolling back shows the
+same screen many times over.
 
-`tmux-control` collapses those repeats **automatically**: it detects the
-repeated frame in the captured history and shows it once, followed by whatever
-changed between repaints (a spinner, a token count, an evolving prompt), so you
-see the progression instead of dozens of copies.  It is conservative — with no
-repeating frame the text is left untouched (plain scrollback is verbatim);
-collapsing a repeat trims trailing whitespace from the surrounding lines.  Turn
-it off with:
+`tmux-control` can collapse those repeats: it detects the repeated frame in the
+captured history and shows it once, followed by whatever changed between
+repaints (a spinner, a token count, an evolving prompt), so you see the
+progression instead of dozens of copies.
+
+It is **off by default** — scrollback is shown verbatim, exactly as tmux
+captured it. That is the right default for most setups: tmux keeps
+`alternate-screen` *on* by default, so full-screen TUIs use the alternate
+screen and never flow into scrollback as repeats in the first place; and on
+dense, evolving output (an agent streaming a long answer, where each "frame"
+grows rather than repeats) the collapse can elide more than intended. Verbatim
+is always faithful. Turn compaction on if you run `alternate-screen off` and
+want repeats suppressed:
 
 ```elisp
-(setq tmux-control-compact-scrollback nil)
+(setq tmux-control-compact-scrollback t)
 ```
+
+You can also flip it for the current view from inside the pager with **`c`**
+(`tmux-control-scrollback-toggle-compaction`) — handy to switch on when a
+particular history is repetitive, and off the moment a collapse looks wrong.
+The header line shows which mode a press will switch to.
 
 For a particular TUI you can fine-tune the result: pin the frame boundary with
 `tmux-control-scrollback-frame-start-regexp` (when auto-detection picks a poor
