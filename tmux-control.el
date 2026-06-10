@@ -1534,7 +1534,11 @@ orientation) and appends a scroll-mode hint, so entering scrollback does not
 look like the tabs vanished.  Falls back to a plain info line when the tab bar
 is disabled or no live buffer is available."
   (let* ((live tmux-control--live-buffer)
-         (cmode (if tmux-control-compact-scrollback "c:verbatim" "c:compact"))
+         ;; Show the CURRENT mode, then what `c' switches to, so it never
+         ;; reads as if verbatim were active while compaction is on.
+         (cmode (if tmux-control-compact-scrollback
+                    "compacted·c:verbatim"
+                  "verbatim·c:compact"))
          (tabs (and tmux-control-window-tab-bar
                     (buffer-live-p live)
                     (with-current-buffer live
