@@ -2319,5 +2319,59 @@ output), :calls (side-effect invocations in order), :active-pane,
           (kill-buffer sb)
           (kill-buffer live))))))
 
+(ert-deftest tmux-control-test-pinned-size-warns-once-and-recovers ()
+  ;; tmux silently refusing our size requests (window-size manual after any
+  ;; resize-window, or a competing client) must be surfaced: one probe+warn
+  ;; per episode, episode cleared when a reconciliation matches again.
+  (with-temp-buffer
+    (let ((queries '()))
+      (cl-letf (((symbol-function 'tmux-control--query)
+                 (lambda (cmd cb) (push cmd queries) (funcall cb '("manual"))))
+                ((symbol-function 'message) #'ignore))
+        (setq-local tmux-control--session "s"
+                    tmux-control--current-window "0"
+                    tmux-control--window-id "@7" ; the displayed window
+                    tmux-control--requested-client-size (cons 124 37)
+                    tmux-control--size-pin-warned nil)
+        ;; Mismatched WINDOW width: probe fires -- targeting the displayed
+        ;; window by stable @id, as a -w window option -- and the warning
+        ;; names the pin in-buffer.
+        (tmux-control--maybe-warn-pinned-size (cons 100 20))
+        (should tmux-control--size-pin-warned)
+        (should (= 1 (length queries)))
+        (should (string-match-p "show-options -wqv -t @7 window-size"
+                                (car queries)))
+        (should (string-match-p "window-size manual" (buffer-string)))
+        ;; Still mismatched: no second probe, no second warning.
+        (tmux-control--maybe-warn-pinned-size (cons 100 20))
+        (should (= 1 (length queries)))
+        ;; tmux follows again: the episode ends.
+        (tmux-control--maybe-warn-pinned-size (cons 124 36))
+        (should-not tmux-control--size-pin-warned)))))
+
+(ert-deftest tmux-control-test-adopt-window-size-unpins ()
+  ;; The recovery command unpins the rendered window and resizes to the
+  ;; Emacs window, clearing the warning episode.
+  (with-temp-buffer
+    (let ((sent '()) (resized nil))
+      (cl-letf (((symbol-function 'tmux-control--ensure-live) #'ignore)
+                ((symbol-function 'tmux-control--resize-to-window)
+                 (lambda () (setq resized t)))
+                ((symbol-function 'tmux-control--send-command)
+                 (lambda (cmd &optional _kind) (push cmd sent)))
+                ((symbol-function 'message) #'ignore))
+        (setq-local tmux-control--session "s"
+                    tmux-control--window-id "@2"
+                    tmux-control--current-window "0"
+                    tmux-control--windows
+                    '((:index "0" :name "a" :id "@1")
+                      (:index "1" :name "b" :id "@2"))
+                    tmux-control--size-pin-warned t)
+        (tmux-control-adopt-window-size)
+        ;; Targets the window THIS buffer renders (@2 -> index 1).
+        (should (equal (car sent) "set-option -w -t s:1 window-size latest"))
+        (should resized)
+        (should-not tmux-control--size-pin-warned)))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

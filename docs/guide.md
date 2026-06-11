@@ -373,6 +373,37 @@ backlog.  It engages only on a genuinely **low-bandwidth** link — Emacs reads
 the socket eagerly, so a fast client (even a high-latency-but-fat-pipe SSH one)
 keeps up and never triggers it.  Off by default; needs tmux 3.2+.
 
+## Window sizing, and sharing a session with another client
+
+tmux sizes each window from its attached clients according to the
+`window-size` option (default **latest**: the most recently active client
+wins).  tmux-control asks for the size of your Emacs window on every layout
+change, so normally the tmux *window* follows Emacs exactly (in a split
+window the active pane is its share of that — the renderer always matches
+the pane).  Two situations break the following, and both used to fail
+*silently*:
+
+- **A pinned window.**  Any `resize-window` — yours, a script's, another
+  tool's — sets that window's `window-size` to `manual` as a side effect,
+  after which tmux ignores every client size request.  The view then keeps
+  reconciling to a grid that never matches your Emacs window (content
+  wrapped for a different width reads as mangled).
+- **A competing client.**  With the session also attached in another
+  terminal (iTerm2, say), `latest` means whichever client acted last sizes
+  the window — every hand-off makes the TUI reflow and repaint.
+
+tmux-control now notices when tmux did not follow a size request, probes the
+window's `window-size` in-band, and tells you which case you are in — once,
+in the session buffer and the echo area.  **`M-x
+tmux-control-adopt-window-size`** resolves either: it sets the rendered
+window's `window-size` back to `latest` and resizes it to your Emacs window
+on the spot.
+
+When you *want* long-term cohabitation with another client, consider
+`set-option -g window-size smallest` on that server (both clients see the
+same content, letterboxed to the smaller one) — or keep the other client
+detached while working from Emacs.
+
 ## A connection that stops replying
 
 Replies on the control connection are matched to commands strictly in order,
