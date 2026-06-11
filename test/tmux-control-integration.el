@@ -561,5 +561,57 @@ window's pane -- the view must not stay on the old window."
         (kill-buffer buf))
       (tmux-control-it--tmux-ok "kill-server"))))
 
+(ert-deftest tmux-control-it-select-pane-recovers-desynced-view ()
+  "Selecting a pane converges the view even when the session is ALREADY
+current on the pane's window while the frame shows another window's buffer.
+The desync is one hand-display away (`switch-to-buffer' on a render buffer,
+a window-configuration restore); from it, the bare select-pane changes
+nothing tmux notifies about, so nothing visibly happened -- the live field
+report, reproduced end to end: jump to w1, display w0's buffer by hand,
+select w1's pane again, and the view must come back to w1."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-n" "w0" "-x" "80" "-y" "24")
+  (tmux-control-it--tmux "new-window" "-t" "t:" "-n" "w1")
+  (tmux-control-it--tmux "select-window" "-t" "t:0")
+  (tmux-control-it--tmux "send-keys" "-t" "t:0" "echo PANE_OF_W0" "Enter")
+  (tmux-control-it--tmux "send-keys" "-t" "t:1" "echo PANE_OF_W1" "Enter")
+  (let* ((tmux-control-window-buffers t)
+         (buf (tmux-control-connect nil tmux-control-it--socket "t")))
+    (cl-flet ((shows-w1 ()
+                (tmux-control-it--pump-until
+                 8 (lambda ()
+                     (let ((shown (window-buffer (selected-window))))
+                       (and (not (eq shown buf))
+                            (with-current-buffer shown
+                              (string-match-p
+                               "PANE_OF_W1"
+                               (buffer-substring-no-properties
+                                (point-min) (point-max))))))))))
+      (unwind-protect
+          (progn
+            (tmux-control-it--pump 1.5)
+            (let ((target (string-trim
+                           (tmux-control-it--tmux
+                            "list-panes" "-t" "t:1" "-F" "#{pane_id}"))))
+              ;; A legitimate jump first: view, pointer, and tmux all on w1.
+              (with-current-buffer buf
+                (tmux-control-select-pane target))
+              (should (shows-w1))
+              ;; Out-of-band: the user displays w0's render buffer by hand.
+              ;; tmux still says current window 1; the display pointer still
+              ;; says w1's buffer.
+              (set-window-buffer (selected-window) buf)
+              ;; Select w1's pane again.  tmux is already there -- no
+              ;; notification will come -- so the command itself must bring
+              ;; the view back.
+              (with-current-buffer buf
+                (tmux-control-select-pane target))
+              (should (shows-w1))))
+        (when (buffer-live-p buf)
+          (with-current-buffer buf (ignore-errors (tmux-control-disconnect)))
+          (kill-buffer buf))
+        (tmux-control-it--tmux-ok "kill-server")))))
+
 (provide 'tmux-control-integration)
 ;;; tmux-control-integration.el ends here

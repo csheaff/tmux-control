@@ -2143,5 +2143,82 @@ output), :calls (side-effect invocations in order), :active-pane,
         (should (equal window-selected "1"))
         (should (equal (car sent) "select-pane -t %5"))))))
 
+(ert-deftest tmux-control-test-display-swap-recovers-desynced-pointer ()
+  ;; The swap keys off the windows REALLY showing session buffers, not the
+  ;; display pointer.  Displaying a render buffer by hand (`switch-to-buffer',
+  ;; a window-config restore) desyncs the pointer from the frame; a
+  ;; pointer-keyed swap then either hunted for an "old" buffer no window was
+  ;; showing, or -- when the pointer already claimed the target -- declined
+  ;; to swap at all.  Field report: with the pointer stuck on the other
+  ;; window's buffer, every switch toward it was a silent no-op.
+  (with-temp-buffer
+    (let* ((tmux-control-window-buffers t)
+           (ctrl (current-buffer))
+           (buf-b (generate-new-buffer " *tc-desync-b*"))
+           (win (selected-window))
+           (orig (window-buffer win)))
+      (unwind-protect
+          (progn
+            (setq-local tmux-control--window-id "@1")
+            (setq-local tmux-control--windows
+                        '((:index "0" :name "a" :id "@1")
+                          (:index "1" :name "b" :active t :id "@2")))
+            (tmux-control--register-window-buffer "@1" ctrl)
+            (with-current-buffer buf-b
+              (setq-local tmux-control--window-id "@2"
+                          tmux-control--controller ctrl))
+            (tmux-control--register-window-buffer "@2" buf-b)
+            ;; Out-of-band display: the frame shows the controller while the
+            ;; pointer still claims B is on screen.
+            (set-window-buffer win ctrl)
+            (setq-local tmux-control--session-display buf-b)
+            ;; Swapping "to" B -- which the pointer believes needs nothing --
+            ;; must still converge the frame on B.
+            (tmux-control--display-window-buffer "@2")
+            (should (eq (window-buffer win) buf-b))
+            (should (eq (tmux-control--session-display-buffer ctrl) buf-b))
+            ;; And the view keeps following normal swaps afterwards.
+            (tmux-control--display-window-buffer "@1")
+            (should (eq (window-buffer win) ctrl)))
+        (set-window-buffer win orig)
+        (kill-buffer buf-b)))))
+
+(ert-deftest tmux-control-test-select-pane-jumps-from-viewed-window ()
+  ;; The cross-window jump triggers off the window the invoking buffer
+  ;; renders, not only off tmux's current window.  With the session already
+  ;; current on the pane's window but the frame showing another window's
+  ;; buffer (an out-of-band display), the bare select-pane changes nothing
+  ;; tmux would notify about -- the command itself must route through the
+  ;; window switch so the view converges.
+  (with-temp-buffer
+    (let ((sent '()) (window-selected nil))
+      (cl-letf (((symbol-function 'tmux-control--ensure-live) #'ignore)
+                ((symbol-function 'tmux-control--do-select-window)
+                 (lambda (idx) (setq window-selected idx)))
+                ((symbol-function 'tmux-control--send-command)
+                 (lambda (cmd &optional _kind) (push cmd sent))))
+        (setq-local tmux-control--session "s"
+                    tmux-control--window-id "@1" ; this buffer renders w0
+                    tmux-control--current-window "1" ; tmux sits on w1
+                    tmux-control--pane-window (make-hash-table :test 'equal))
+        (puthash "%0" (cons "0" "@1") tmux-control--pane-window)
+        (puthash "%5" (cons "1" "@2") tmux-control--pane-window)
+        ;; Pane of the session's current window but NOT of the rendered one:
+        ;; the regression -- must jump, not send a bare invisible select-pane.
+        (tmux-control-select-pane "%5")
+        (should (equal window-selected "1"))
+        (should (equal (car sent) "select-pane -t %5"))
+        ;; Pane of the rendered window while the session is current
+        ;; elsewhere: still a jump (the current-window clause).
+        (setq window-selected nil)
+        (tmux-control-select-pane "%0")
+        (should (equal window-selected "0"))
+        ;; Pane of the window both rendered and current: plain select-pane.
+        (setq-local tmux-control--current-window "0")
+        (setq window-selected nil)
+        (tmux-control-select-pane "%0")
+        (should-not window-selected)
+        (should (equal (car sent) "select-pane -t %0"))))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

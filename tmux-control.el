@@ -392,12 +392,15 @@ itself under its own window id once that id is known.")
   "The tmux @window-id this buffer renders, or nil before it is known.")
 (defvar-local tmux-control--session-display nil
   "On the controller: the render buffer the live view last swapped to.
-The authoritative \"what is the session showing\" pointer.  It must NOT
-be derived from `tmux-control--current-window' at swap time: that index
-updates via a separate, slower :windows reply, so during rapid switches
-\(the window preview menu, two fast `C-c C-n') the next swap would look
-for a buffer that is no longer on screen, find no window, and silently
-strand the view on the previous window.")
+What `tmux-control--session-display-buffer' readers (the session
+switcher, `tmux-control--connect-or-switch') treat as the session's
+on-screen buffer.  It tracks swaps, not the frame: a render buffer
+displayed by hand leaves it stale until the next swap.  The swap itself
+\(`tmux-control--display-window-buffer') therefore keys off the windows
+really showing the session's buffers -- never off this pointer, nor off
+`tmux-control--current-window', whose index updates via a separate,
+slower :windows reply and lags rapid switches (the window preview menu,
+two fast `C-c C-n').")
 
 ;; Multi-pane tiling (experimental).  In tiling mode the controller buffer
 ;; (the process buffer) stops rendering and instead fans the session's
@@ -1615,10 +1618,16 @@ to it directly.
 
 A pane in another window is a real jump: tmux's `select-pane' alone
 sets that window's active pane WITHOUT switching the session's current
-window, so the session is switched to the pane's window first (the tab
-bar, other clients, and the per-window view all follow), then the pane
-is focused within it.  A pane of the current window just becomes the
-active pane, and the view repaints on it.
+window -- and when the session is already current there, it produces no
+notification a display swap could follow -- so the session is switched
+to the pane's window first (the tab bar, other clients, and the
+per-window view all follow), then the pane is focused within it.  The
+jump triggers when the pane's window differs from the window of the
+buffer the command ran in OR from the session's current window: the two
+disagree after a render buffer is displayed by hand, and either
+mismatch makes the bare command invisible.  A pane of the window that
+is both on screen and current just becomes the active pane, and the
+view repaints on it.
 
 The window hop relies on the pane->window map, which is fetched
 asynchronously at connect; in the brief moment before it arrives (or
@@ -1628,12 +1637,17 @@ unmapped pane falls back to the bare `select-pane'."
   (interactive (list nil))
   (tmux-control--ensure-live)
   (let* ((pane (or pane (tmux-control--read-pane)))
+         (viewed tmux-control--window-id)
          (ctrl (tmux-control--wb-controller))
-         (idx (with-current-buffer ctrl
-                (and (hash-table-p tmux-control--pane-window)
-                     (car-safe (gethash pane tmux-control--pane-window)))))
+         (entry (with-current-buffer ctrl
+                  (and (hash-table-p tmux-control--pane-window)
+                       (gethash pane tmux-control--pane-window))))
+         (idx (car-safe entry))
+         (wid (cdr-safe entry))
          (current (buffer-local-value 'tmux-control--current-window ctrl)))
-    (when (and idx current (not (equal idx current)))
+    (when (and idx
+               (or (and current (not (equal idx current)))
+                   (and wid viewed (not (equal wid viewed)))))
       (tmux-control--do-select-window idx))
     (tmux-control--send-command (format "select-pane -t %s" pane))))
 
@@ -4052,10 +4066,16 @@ flushed by the regular single-pane path."
 (defun tmux-control--display-window-buffer (window-id)
   "Show WINDOW-ID's render buffer in place of the session's current view.
 Creates and seeds the buffer on first visit.  Runs in any buffer of the
-session; swaps every Emacs window currently showing the session's
-display buffer (or the controller) over to the new one."
+session; swaps every Emacs window currently showing ANY of the session's
+render buffers (or the controller) over to the new one.  The swap is
+keyed off what is really on screen, never off the display pointer: the
+two disagree once a render buffer is displayed by hand (a plain
+`switch-to-buffer', `winner-undo', a window-configuration restore), and
+a pointer-keyed swap then either hunted for an \"old\" buffer no window
+was showing, or believed the target already on screen -- both silent
+no-ops that strand the view until something happens to resync them."
   (let* ((ctrl (tmux-control--wb-controller))
-         (old (tmux-control--session-display-buffer ctrl))
+         (prior (buffer-local-value 'tmux-control--session-display ctrl))
          (new (or (with-current-buffer ctrl
                     (tmux-control--window-buffer window-id))
                   ;; The controller renders its own window.
@@ -4065,17 +4085,27 @@ display buffer (or the controller) over to the new one."
                        ctrl)
                   (let ((b (tmux-control--make-window-buffer window-id ctrl)))
                     (tmux-control--seed-window-buffer b window-id)
-                    b))))
-    (unless (eq old new)
-      (dolist (win (get-buffer-window-list old nil t))
-        (set-window-buffer win new))
-      (when (buffer-live-p new)
-        (with-current-buffer new
-          (when (get-buffer-window new t)
-            (tmux-control--resize-to-window)))))
-    ;; Record the swap unconditionally: this pointer is what the NEXT swap
-    ;; (and flock/switcher) read, and it must track the session's current
-    ;; window even when no Emacs window was showing the live view.
+                    b)))
+         (swapped nil))
+    (dolist (buf (cons ctrl (mapcar #'cdr (buffer-local-value
+                                           'tmux-control--window-buffers
+                                           ctrl))))
+      (when (and (buffer-live-p buf) (not (eq buf new)))
+        (dolist (win (get-buffer-window-list buf nil t))
+          ;; `set-window-buffer' rejects strongly dedicated windows (side
+          ;; windows, previews); they opted out of buffer reuse.
+          (unless (eq (window-dedicated-p win) t)
+            (set-window-buffer win new)
+            (setq swapped t)))))
+    (when (and (buffer-live-p new)
+               (or swapped (not (eq prior new)))
+               (get-buffer-window new t))
+      (with-current-buffer new
+        (tmux-control--resize-to-window)))
+    ;; Record the swap unconditionally: `tmux-control--session-display-buffer'
+    ;; readers (the flock switcher, connect-or-switch) find the session's
+    ;; on-screen buffer through this pointer, and it must track the session's
+    ;; current window even when no Emacs window was showing the live view.
     (with-current-buffer ctrl
       (setq tmux-control--session-display new))
     new))
