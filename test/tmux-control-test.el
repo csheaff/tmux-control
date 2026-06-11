@@ -2261,7 +2261,8 @@ output), :calls (side-effect invocations in order), :active-pane,
                             tmux-control--controller ctrl)
                 (tmux-control--flush-display (list (selected-window))))
               (should (= anchored 1)))
-          (kill-buffer ctrl))))))
+          (when (buffer-live-p ctrl)
+            (kill-buffer ctrl)))))))
 
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
