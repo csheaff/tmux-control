@@ -340,6 +340,10 @@ is treated as stale and cleared, so a self-initiated reseed that produced no
 (defvar-local tmux-control--socket-name nil)
 (defvar-local tmux-control--session nil)
 (defvar-local tmux-control--scrollback-target nil)
+(defvar-local tmux-control--scrollback-size nil
+  "(WIDTH . HEIGHT) the scrollback view was last captured for, or nil.")
+(defvar-local tmux-control--scrollback-resize-timer nil
+  "Debounce timer for re-capturing scrollback after a window resize.")
 (defvar-local tmux-control--command-queue nil
   "Pending control-mode command entries, oldest first.
 Each entry is a cons (KIND . SEND-TIME): the reply-handler kind enqueued
@@ -1836,6 +1840,16 @@ the live interactive pane."
          (live-buffer (current-buffer))
          (scrollback-buffer-name (format "*%s-scrollback*" (buffer-name)))
          (scrollback-buffer (get-buffer-create scrollback-buffer-name)))
+    ;; Size the pane to the window the pager is about to use BEFORE
+    ;; capturing, so the capture is wrapped to the width it will be read
+    ;; at.  Normally a no-op -- the live view keeps the pane sized to this
+    ;; same window -- but the pane lags when the frame was resized while
+    ;; the live view was not on screen (e.g. inside a previous pager), and
+    ;; the capture would arrive at the stale width.  Same connection, in
+    ;; order: tmux re-wraps before it serves the capture.
+    (when (and (process-live-p tmux-control--process)
+               (get-buffer-window live-buffer t))
+      (tmux-control--resize-to-window))
     (with-current-buffer scrollback-buffer
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -1863,6 +1877,13 @@ the live interactive pane."
     (when-let* ((window (get-buffer-window scrollback-buffer)))
       (set-window-margins window 0 0))
     (with-current-buffer scrollback-buffer
+      ;; Record the size this capture is for, so the resize follower
+      ;; (`tmux-control--scrollback-follow-resize') re-captures only on a
+      ;; real change.  The pane already matches: the live view sized it to
+      ;; this same Emacs window.
+      (when-let* ((window (get-buffer-window scrollback-buffer t)))
+        (setq tmux-control--scrollback-size
+              (tmux-control--scrollback-window-size window)))
       (tmux-control--scrollback-request scrollback-buffer target
                                         tmux-control-scrollback-lines
                                         trailing))))
@@ -1881,6 +1902,66 @@ the live interactive pane."
                                       tmux-control--capture-trailing-p
                                       (unless at-end line)
                                       (unless at-end column))))
+
+(defun tmux-control--scrollback-window-size (window)
+  "Return WINDOW's terminal dimensions as (WIDTH . HEIGHT).
+The same measure the live view sizes tmux to, so scrollback and live
+agree on the pane size for the Emacs window they share."
+  (cons (max 1 (window-max-chars-per-line window))
+        (max 1 (with-selected-window window
+                 (floor (window-screen-lines))))))
+
+(defun tmux-control--scrollback-follow-resize (frame)
+  "Re-capture scrollback views on FRAME whose window changed size.
+The raw rows scrollback shows fit exactly the width they were captured
+for; when the window resizes they would stay at the old width (narrower
+text in a widened window, soft-wrap overflow in a narrowed one).  tmux
+re-wraps pane history whenever the pane resizes, so ask tmux for the
+new size and capture again.  Debounced: a drag-resize fires many size
+changes for one gesture.  Installed on `window-size-change-functions'."
+  (dolist (window (window-list frame 'never))
+    (let ((buffer (window-buffer window)))
+      (when (buffer-local-value 'tmux-control--scrollback-target buffer)
+        (with-current-buffer buffer
+          (when (derived-mode-p 'tmux-control-scrollback-mode)
+            (let ((size (tmux-control--scrollback-window-size window)))
+              (cond
+               ((null tmux-control--scrollback-size)
+                (setq tmux-control--scrollback-size size))
+               ((not (equal size tmux-control--scrollback-size))
+                (setq tmux-control--scrollback-size size)
+                (when (timerp tmux-control--scrollback-resize-timer)
+                  (cancel-timer tmux-control--scrollback-resize-timer))
+                (setq tmux-control--scrollback-resize-timer
+                      (run-with-timer
+                       0.3 nil
+                       #'tmux-control--scrollback-resize-recapture
+                       buffer)))))))))))
+
+(defun tmux-control--scrollback-resize-recapture (buffer)
+  "Resize tmux to scrollback BUFFER's window and capture again.
+The resize and the capture ride the same control connection in order,
+so the capture is guaranteed to see the re-wrapped history.  Resizing
+through the live buffer also keeps its renderer (and the sibling
+window buffers) in step, so returning to the live view needs no second
+resize.  A dead connection skips both: the post-mortem pager stays a
+static snapshot."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq tmux-control--scrollback-resize-timer nil)
+      (when-let* ((window (get-buffer-window buffer t))
+                  (live tmux-control--live-buffer))
+        (when (and (buffer-live-p live)
+                   (process-live-p
+                    (buffer-local-value 'tmux-control--process live)))
+          (let ((size (tmux-control--scrollback-window-size window)))
+            (setq tmux-control--scrollback-size size)
+            (with-current-buffer live
+              (tmux-control--resize (car size) (cdr size))))
+          (tmux-control-scrollback-refresh))))))
+
+(add-hook 'window-size-change-functions
+          #'tmux-control--scrollback-follow-resize)
 
 (defun tmux-control-scrollback-toggle-compaction ()
   "Toggle redraw-compaction in this scrollback view and re-render.
