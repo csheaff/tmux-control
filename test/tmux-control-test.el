@@ -1622,6 +1622,12 @@ buffer's own directory with a prefix arg or when the option is off."
      (should-not tmux-control--collecting-command))))
 
 (ert-deftest tmux-control-test-scrollback-capture-command ()
+  ;; The DEFAULT is raw rows, no -J: tmux re-wraps pane history to the
+  ;; pane's current width, so an unjoined capture always fits the window,
+  ;; while joining resurrects rows at the width they were painted before a
+  ;; resize (field report: wide window -> half screen -> scrollback showed
+  ;; pre-resize rows Emacs-wrapped into fragments and phantom blanks).
+  (should-not (default-value 'tmux-control-scrollback-join-wrapped-lines))
   (let ((tmux-control-scrollback-join-wrapped-lines nil))
     (should (equal (tmux-control--scrollback-capture-command "%5" 10000 nil)
                    "capture-pane -p -e -S -10000 -t %5"))

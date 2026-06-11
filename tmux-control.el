@@ -98,8 +98,16 @@ error) and never pause."
   :type '(choice (const :tag "Off (stream everything)" nil)
                  (integer :tag "Seconds behind before pausing")))
 
-(defcustom tmux-control-scrollback-join-wrapped-lines t
-  "Non-nil means join soft-wrapped pane lines in scrollback captures."
+(defcustom tmux-control-scrollback-join-wrapped-lines nil
+  "Non-nil means join soft-wrapped pane lines in scrollback captures.
+Joining (`capture-pane -J') glues rows tmux wrapped back into single
+logical lines, which copy cleanly and re-flow to any window width.  Off
+by default because tmux already re-wraps pane history to the pane's
+CURRENT width, so a raw capture always fits the live view's window
+exactly -- while joining resurrects rows at the width they were
+PAINTED: after a frame resize, a TUI's full-width rows (content, box
+padding, border) come back at the old width, and Emacs wraps them into
+fragments, phantom blank lines, and stranded border glyphs."
   :type 'boolean)
 
 (defcustom tmux-control-compact-scrollback nil
