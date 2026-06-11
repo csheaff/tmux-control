@@ -1599,15 +1599,28 @@ See `tmux-control-select-pane' to jump to a pane by name."
         (user-error "No such pane"))))
 
 (defun tmux-control-select-pane (&optional pane)
-  "Switch the live view to another pane in the current window.
-Interactively, complete over the window's panes -- a Claude Code agent
-team shows each teammate as a pane, labelled by its command and title --
-and focus the chosen one.  With PANE (a pane id) given non-interactively,
-switch to it directly.  Switching sets the window's active pane, which
-tmux reports so the view repaints on it."
+  "Switch the live view to another pane, by name.
+Interactively, complete over the SESSION's panes -- an agent team shows
+each teammate as a pane, labelled by its command and title -- and focus
+the chosen one.  With PANE (a pane id) given non-interactively, switch
+to it directly.
+
+A pane in another window is a real jump: tmux's `select-pane' alone
+sets that window's active pane WITHOUT switching the session's current
+window, so the session is switched to the pane's window first (the tab
+bar, other clients, and the per-window view all follow), then the pane
+is focused within it.  A pane of the current window just becomes the
+active pane, and the view repaints on it."
   (interactive (list nil))
   (tmux-control--ensure-live)
-  (let ((pane (or pane (tmux-control--read-pane))))
+  (let* ((pane (or pane (tmux-control--read-pane)))
+         (ctrl (tmux-control--wb-controller))
+         (idx (with-current-buffer ctrl
+                (and (hash-table-p tmux-control--pane-window)
+                     (car-safe (gethash pane tmux-control--pane-window)))))
+         (current (buffer-local-value 'tmux-control--current-window ctrl)))
+    (when (and idx current (not (equal idx current)))
+      (tmux-control--do-select-window idx))
     (tmux-control--send-command (format "select-pane -t %s" pane))))
 
 (defun tmux-control--remote-file-method (host)

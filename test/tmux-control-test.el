@@ -2111,5 +2111,34 @@ output), :calls (side-effect invocations in order), :active-pane,
         (set-window-buffer win orig)
         (kill-buffer buf-b)))))
 
+(ert-deftest tmux-control-test-select-pane-crosses-windows ()
+  ;; The pane picker lists the whole session's panes, but tmux's bare
+  ;; `select-pane' cannot move the session to another window -- so choosing
+  ;; a pane that lives elsewhere must switch the window first, then focus
+  ;; the pane.  (Regression: the old single-buffer client followed
+  ;; %window-pane-changed unconditionally, which made the bare command
+  ;; LOOK like a cross-window jump; per-window buffers routed the change
+  ;; to the other window's buffer and the view stayed put.)
+  (with-temp-buffer
+    (let ((sent '()) (window-selected nil))
+      (cl-letf (((symbol-function 'tmux-control--ensure-live) #'ignore)
+                ((symbol-function 'tmux-control--do-select-window)
+                 (lambda (idx) (setq window-selected idx)))
+                ((symbol-function 'tmux-control--send-command)
+                 (lambda (cmd &optional _kind) (push cmd sent))))
+        (setq-local tmux-control--session "s"
+                    tmux-control--current-window "0"
+                    tmux-control--pane-window (make-hash-table :test 'equal))
+        (puthash "%0" (cons "0" "@1") tmux-control--pane-window)
+        (puthash "%5" (cons "1" "@2") tmux-control--pane-window)
+        ;; Same-window pane: no window switch, just select-pane.
+        (tmux-control-select-pane "%0")
+        (should-not window-selected)
+        (should (equal (car sent) "select-pane -t %0"))
+        ;; Cross-window pane: switch the window, then focus the pane.
+        (tmux-control-select-pane "%5")
+        (should (equal window-selected "1"))
+        (should (equal (car sent) "select-pane -t %5"))))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
