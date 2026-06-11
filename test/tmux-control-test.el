@@ -1622,6 +1622,12 @@ buffer's own directory with a prefix arg or when the option is off."
      (should-not tmux-control--collecting-command))))
 
 (ert-deftest tmux-control-test-scrollback-capture-command ()
+  ;; The DEFAULT is raw rows, no -J: tmux re-wraps pane history to the
+  ;; pane's current width, so an unjoined capture always fits the window,
+  ;; while joining resurrects rows at the width they were painted before a
+  ;; resize (field report: wide window -> half screen -> scrollback showed
+  ;; pre-resize rows Emacs-wrapped into fragments and phantom blanks).
+  (should-not (default-value 'tmux-control-scrollback-join-wrapped-lines))
   (let ((tmux-control-scrollback-join-wrapped-lines nil))
     (should (equal (tmux-control--scrollback-capture-command "%5" 10000 nil)
                    "capture-pane -p -e -S -10000 -t %5"))
@@ -2263,6 +2269,55 @@ output), :calls (side-effect invocations in order), :active-pane,
               (should (= anchored 1)))
           (when (buffer-live-p ctrl)
             (kill-buffer ctrl)))))))
+
+(ert-deftest tmux-control-test-scrollback-recapture-on-resize ()
+  ;; Raw scrollback rows fit only the width they were captured for, so a
+  ;; window resize must re-capture: ask tmux for the new size FIRST, then
+  ;; capture -- both ride the one connection in order, so the capture sees
+  ;; the re-wrapped history.  (Field report: wide -> half -> wide again
+  ;; left the view hard-wrapped at the narrow width.)
+  (let ((calls '()))
+    (cl-letf (((symbol-function 'tmux-control--resize)
+               (lambda (w h) (push (list 'resize w h) calls)))
+              ((symbol-function 'tmux-control--scrollback-request)
+               (lambda (&rest _) (push 'capture calls)))
+              ((symbol-function 'process-live-p)
+               (lambda (p) (eq p 'fake-proc))))
+      (let ((live (generate-new-buffer " *tc-sb-live*"))
+            (sb (generate-new-buffer " *tc-sb-view*"))
+            (win (selected-window))
+            (orig (window-buffer)))
+        (unwind-protect
+            (progn
+              (with-current-buffer live
+                (setq-local tmux-control--process 'fake-proc))
+              (with-current-buffer sb
+                (tmux-control-scrollback-mode)
+                (setq-local tmux-control--scrollback-target "%1"
+                            tmux-control--live-buffer live
+                            ;; A size no real window has, so the follower
+                            ;; sees a change.
+                            tmux-control--scrollback-size '(9999 . 9999)))
+              (set-window-buffer win sb)
+              ;; A size change from the recorded one arms the debounce.
+              (tmux-control--scrollback-follow-resize (selected-frame))
+              (with-current-buffer sb
+                (should (timerp tmux-control--scrollback-resize-timer))
+                (cancel-timer tmux-control--scrollback-resize-timer))
+              ;; The recapture resizes tmux BEFORE capturing again.
+              (tmux-control--scrollback-resize-recapture sb)
+              (let ((order (reverse calls)))
+                (should (eq (car (car order)) 'resize))
+                (should (eq (car (last order)) 'capture)))
+              ;; An unchanged size arms nothing.
+              (setq calls '())
+              (tmux-control--scrollback-follow-resize (selected-frame))
+              (with-current-buffer sb
+                (should-not tmux-control--scrollback-resize-timer))
+              (should-not calls))
+          (set-window-buffer win orig)
+          (kill-buffer sb)
+          (kill-buffer live))))))
 
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

@@ -295,10 +295,17 @@ or `ssh` process — and arrives asynchronously: the view opens immediately and
 fills when the reply lands, so a remote session's network round trip never
 freezes Emacs.
 
-Scrollback joins soft-wrapped tmux lines by default; disable that with:
+Scrollback shows pane rows exactly as tmux wraps them at the pane's current
+width — tmux re-wraps history when the pane resizes, so the capture always
+fits the window.  Resizing the window while in scrollback re-captures
+automatically: tmux is asked for the new size and the view re-fills with
+history re-wrapped to it.  Set `tmux-control-scrollback-join-wrapped-lines` to join
+wrapped rows into single logical lines instead (long commands copy as one
+line, and the text re-flows if you widen the window) — at the cost that rows
+painted before a resize come back at their old width and wrap as fragments:
 
 ```elisp
-(setq tmux-control-scrollback-join-wrapped-lines nil)
+(setq tmux-control-scrollback-join-wrapped-lines t)
 ```
 
 ### Compacting repeated TUI redraws (opt-in)
