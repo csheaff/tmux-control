@@ -2026,5 +2026,51 @@ output), :calls (side-effect invocations in order), :active-pane,
       (should (eq (default-value 'tmux-control-compact-scrollback)
                   global-before)))))
 
+(ert-deftest tmux-control-test-display-swap-survives-stale-window-index ()
+  ;; THE menu-switch race: rapid successive switches deliver the second
+  ;; %session-window-changed before the :windows reply has updated
+  ;; `tmux-control--current-window'.  The swap must track the displayed
+  ;; buffer explicitly, not derive it from that stale index -- deriving it
+  ;; found no window showing the (wrong) "old" buffer and silently left the
+  ;; view stranded on the previous window.
+  (with-temp-buffer
+    (let* ((tmux-control-window-buffers t)
+           (ctrl (current-buffer))
+           (buf-b (generate-new-buffer " *tc-race-b*"))
+           (buf-c (generate-new-buffer " *tc-race-c*"))
+           (win (selected-window))
+           (orig (window-buffer win)))
+      (unwind-protect
+          (progn
+            (setq-local tmux-control--window-id "@1")
+            ;; Window list STALE throughout: current-window says index 0
+            ;; (the controller's own window) the whole time.
+            (setq-local tmux-control--current-window "0")
+            (setq-local tmux-control--windows
+                        '((:index "0" :name "a" :active t :id "@1")
+                          (:index "1" :name "b" :id "@2")
+                          (:index "2" :name "c" :id "@3")))
+            (tmux-control--register-window-buffer "@1" ctrl)
+            (dolist (pair `(("@2" . ,buf-b) ("@3" . ,buf-c)))
+              (with-current-buffer (cdr pair)
+                (setq-local tmux-control--window-id (car pair)
+                            tmux-control--controller ctrl))
+              (tmux-control--register-window-buffer (car pair) (cdr pair)))
+            (set-window-buffer win ctrl)
+            ;; First switch: ctrl -> B.
+            (tmux-control--display-window-buffer "@2")
+            (should (eq (window-buffer win) buf-b))
+            ;; Second switch lands while current-window is STILL "0":
+            ;; must swap B -> C anyway.
+            (tmux-control--display-window-buffer "@3")
+            (should (eq (window-buffer win) buf-c))
+            (should (eq (tmux-control--session-display-buffer ctrl) buf-c))
+            ;; And back to the controller's own window.
+            (tmux-control--display-window-buffer "@1")
+            (should (eq (window-buffer win) ctrl)))
+        (set-window-buffer win orig)
+        (kill-buffer buf-b)
+        (kill-buffer buf-c)))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

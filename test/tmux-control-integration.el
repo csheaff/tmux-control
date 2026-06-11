@@ -473,5 +473,53 @@ clears it."
         (kill-buffer buf))
       (tmux-control-it--tmux-ok "kill-server"))))
 
+(ert-deftest tmux-control-it-rapid-window-switching-converges ()
+  "Back-to-back window switches (the preview menu's pattern) converge on the
+last window selected.  Regression: the swap derived the displayed buffer
+from the cached window index, which updates via a slower separate reply, so
+the second of two quick switches found no window showing its notion of the
+view and stranded the display on the previous window."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-n" "w0" "-x" "80" "-y" "24")
+  (tmux-control-it--tmux "new-window" "-t" "t:" "-n" "w1")
+  (tmux-control-it--tmux "new-window" "-t" "t:" "-n" "w2")
+  (tmux-control-it--tmux "select-window" "-t" "t:0")
+  (tmux-control-it--tmux "send-keys" "-t" "t:0" "echo MARK_ZERO" "Enter")
+  (tmux-control-it--tmux "send-keys" "-t" "t:1" "echo MARK_ONE" "Enter")
+  (tmux-control-it--tmux "send-keys" "-t" "t:2" "echo MARK_TWO" "Enter")
+  (let* ((tmux-control-window-buffers t)
+         (buf (tmux-control-connect nil tmux-control-it--socket "t")))
+    (unwind-protect
+        (progn
+          (tmux-control-it--pump 1.5)
+          ;; Burst: three switches with NO pumping between sends, so the
+          ;; notifications and :windows replies interleave like a user
+          ;; flicking through the menu over a remote link.
+          (with-current-buffer buf
+            (tmux-control--do-select-window "1")
+            (tmux-control--do-select-window "2")
+            (tmux-control--do-select-window "1"))
+          ;; The display must converge on window 1's buffer.
+          (should (tmux-control-it--pump-until
+                   8 (lambda ()
+                       (let ((shown (window-buffer (selected-window))))
+                         (and (string-match-p ":@" (buffer-name shown))
+                              (with-current-buffer shown
+                                (and (equal tmux-control--window-id
+                                            (with-current-buffer buf
+                                              (tmux-control--window-id-for-index "1")))
+                                     (string-match-p
+                                      "MARK_ONE"
+                                      (buffer-substring-no-properties
+                                       (point-min) (point-max))))))))))
+          ;; And the session's display pointer agrees with what is shown.
+          (should (eq (tmux-control--session-display-buffer buf)
+                      (window-buffer (selected-window)))))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf (ignore-errors (tmux-control-disconnect)))
+        (kill-buffer buf))
+      (tmux-control-it--tmux-ok "kill-server"))))
+
 (provide 'tmux-control-integration)
 ;;; tmux-control-integration.el ends here

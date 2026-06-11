@@ -390,6 +390,14 @@ WINDOW-ID is tmux's stable @id string.  Includes the connect buffer
 itself under its own window id once that id is known.")
 (defvar-local tmux-control--window-id nil
   "The tmux @window-id this buffer renders, or nil before it is known.")
+(defvar-local tmux-control--session-display nil
+  "On the controller: the render buffer the live view last swapped to.
+The authoritative \"what is the session showing\" pointer.  It must NOT
+be derived from `tmux-control--current-window' at swap time: that index
+updates via a separate, slower :windows reply, so during rapid switches
+\(the window preview menu, two fast `C-c C-n') the next swap would look
+for a buffer that is no longer on screen, find no window, and silently
+strand the view on the previous window.")
 
 ;; Multi-pane tiling (experimental).  In tiling mode the controller buffer
 ;; (the process buffer) stops rendering and instead fans the session's
@@ -2025,6 +2033,7 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
               (kill-buffer buf))))))
     (setq tmux-control--window-buffers nil)
     (setq tmux-control--window-id nil)
+    (setq tmux-control--session-display nil)
     (setq tmux-control--seed-cursor nil)
     (setq tmux-control--seed-cursor-visible :unknown)
     (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
@@ -3080,6 +3089,8 @@ the matching pane's render buffer instead, so every pane updates at once."
                                line))
         (when-let* ((buf (tmux-control--window-buffer (match-string 1 line))))
           (unless (eq buf (current-buffer))
+            (when (eq tmux-control--session-display buf)
+              (setq tmux-control--session-display (current-buffer)))
             (dolist (win (get-buffer-window-list buf nil t))
               (set-window-buffer win (current-buffer)))
             (let ((kill-buffer-query-functions nil))
@@ -3831,11 +3842,15 @@ Must run in the controller buffer."
 
 (defun tmux-control--session-display-buffer (&optional ctrl)
   "Return the buffer currently representing CTRL's session on screen.
-That is the current window's render buffer when per-window buffers are
-on and one exists, else the controller itself."
+Prefers the controller's explicit display pointer (set by every swap, so
+it is correct even mid-burst when the cached window index lags); falls
+back to the current window's render buffer, then the controller itself."
   (let ((ctrl (or ctrl (tmux-control--wb-controller))))
     (with-current-buffer ctrl
       (or (and tmux-control-window-buffers
+               (buffer-live-p tmux-control--session-display)
+               tmux-control--session-display)
+          (and tmux-control-window-buffers
                tmux-control--current-window
                (tmux-control--window-buffer
                 (tmux-control--window-id-for-index
@@ -3892,6 +3907,12 @@ it asynchronously over the control connection."
         (setq eat-terminal tmux-control--terminal)
         (when size
           (eat-term-resize tmux-control--terminal (car size) (cdr size)))
+        ;; A first visit takes two control-connection round trips to paint
+        ;; (noticeable over SSH); show a notice instead of a silent blank.
+        ;; The seed's screen-clear replaces it.
+        (tmux-control--feed-terminal
+         "\033[2m[tmux-control] loading window…\033[0m")
+        (tmux-control--flush-display nil)
         (eat-semi-char-mode)
         (setf (eat-term-parameter tmux-control--terminal 'input-function)
               #'tmux-control--send-input)
@@ -3932,46 +3953,45 @@ it asynchronously over the control connection."
 
 (defun tmux-control--seed-window-buffer (buffer window-id)
   "Resolve WINDOW-ID's active pane and seed BUFFER from it, asynchronously.
-A closure-query chain over the control connection: find the window's
-active pane, fetch its cursor, capture its screen -- never blocking
-Emacs, and ordered by tmux itself."
+A closure-query chain over the control connection -- never blocking
+Emacs, and ordered by tmux itself.  Two round trips, not three: the
+active pane and its cursor come back in one list-panes reply (this is
+the first-visit latency a remote user sees as a blank window, so every
+round trip counts), then the capture paints the screen."
   (let ((ctrl (tmux-control--wb-controller)))
     (with-current-buffer ctrl
       (tmux-control--query
-       (format "list-panes -t %s -F \"#{pane_active}\t#{pane_id}\""
+       (format "list-panes -t %s -F \"#{pane_active}\t#{pane_id}\t#{cursor_x},#{cursor_y},#{cursor_flag}\""
                window-id)
        (lambda (lines)
-         (let ((pane (cl-loop for l in (or lines '())
-                              when (string-match "\\`1\t\\(%[0-9]+\\)\\'" l)
-                              return (match-string 1 l))))
+         (let (pane cur vis)
+           (cl-loop for l in (or lines '())
+                    when (string-match
+                          "\\`1\t\\(%[0-9]+\\)\t\\(.*\\)\\'" l)
+                    do (setq pane (match-string 1 l))
+                       (let ((cline (list (match-string 2 l))))
+                         (setq cur (tmux-control--parse-cursor-pos cline)
+                               vis (tmux-control--parse-cursor-visible cline)))
+                    and return nil)
            (when (and pane (buffer-live-p buffer))
              (with-current-buffer buffer
                (setq tmux-control--active-pane pane))
              (with-current-buffer ctrl
                (tmux-control--query
-                (format "display-message -p -t %s \"#{cursor_x},#{cursor_y},#{cursor_flag}\"" pane)
-                (lambda (cursor-lines)
-                  (let ((cur (and cursor-lines
-                                  (tmux-control--parse-cursor-pos cursor-lines)))
-                        (vis (if cursor-lines
-                                 (tmux-control--parse-cursor-visible cursor-lines)
-                               :unknown)))
-                    (with-current-buffer ctrl
-                      (tmux-control--query
-                       (format "capture-pane -p -e%s -t %s"
-                               (if (buffer-local-value
-                                    'tmux-control--capture-trailing-p buffer)
-                                   " -N" "")
-                               pane)
-                       (lambda (cap-lines)
-                         (when (and cap-lines (buffer-live-p buffer))
-                           (with-current-buffer buffer
-                             (tmux-control--write-terminal
-                              (tmux-control--screen-seed-sequence
-                               (string-join cap-lines "\n")
-                               cur vis))
-                             (tmux-control--flush-display
-                              (tmux-control--current-sync-windows))))))))))))))))))
+                (format "capture-pane -p -e%s -t %s"
+                        (if (buffer-local-value
+                             'tmux-control--capture-trailing-p buffer)
+                            " -N" "")
+                        pane)
+                (lambda (cap-lines)
+                  (when (and cap-lines (buffer-live-p buffer))
+                    (with-current-buffer buffer
+                      (tmux-control--write-terminal
+                       (tmux-control--screen-seed-sequence
+                        (string-join cap-lines "\n")
+                        cur (or vis :unknown)))
+                      (tmux-control--flush-display
+                       (tmux-control--current-sync-windows))))))))))))))
 
 (defun tmux-control--flush-window-buffers ()
   "Flush each sibling window render buffer's batched output and redisplay.
@@ -4012,6 +4032,11 @@ display buffer (or the controller) over to the new one."
         (with-current-buffer new
           (when (get-buffer-window new t)
             (tmux-control--resize-to-window)))))
+    ;; Record the swap unconditionally: this pointer is what the NEXT swap
+    ;; (and flock/switcher) read, and it must track the session's current
+    ;; window even when no Emacs window was showing the live view.
+    (with-current-buffer ctrl
+      (setq tmux-control--session-display new))
     new))
 
 ;;;; Multi-pane tiling (experimental)
