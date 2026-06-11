@@ -1185,10 +1185,24 @@ to the new window's panes, so only the single-pane view reseeds here."
     (tmux-control--send-command
      (format "select-window -t %s:%s" tmux-control--session index))
     (unless ctrl
-      ;; With per-window buffers the echoed %session-window-changed swaps
-      ;; the displayed buffer; repainting in place would be wasted work.
       (if tmux-control-window-buffers
-          (tmux-control--quiet-activity)
+          (progn
+            (tmux-control--quiet-activity)
+            ;; The target is KNOWN here (menu pick, tab click, chooser), so
+            ;; swap the display NOW -- zero round trips -- instead of
+            ;; waiting for tmux to echo %session-window-changed.  The echo
+            ;; still arrives and re-runs the swap idempotently, and remains
+            ;; the only driver for switches we did not initiate.  Falls
+            ;; through quietly when the window list has not delivered an id
+            ;; for INDEX yet; the echo then does the swap as before.
+            (when-let* ((idx (if (integerp index)
+                                 (number-to-string index)
+                               index))
+                        (id (and (stringp idx)
+                                 (with-current-buffer
+                                     (tmux-control--wb-controller)
+                                   (tmux-control--window-id-for-index idx)))))
+              (tmux-control--display-window-buffer id)))
         (tmux-control--refresh-active-pane t)))))
 
 (defun tmux-control--switch-window (verb)
