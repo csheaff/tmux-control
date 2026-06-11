@@ -3517,11 +3517,21 @@ cursor position and their cursor line is kept visible."
       (when (and sync-windows
                  (boundp 'eat--synchronize-scroll-function))
         (funcall eat--synchronize-scroll-function sync-windows)
-        ;; In a tiled pane, anchor to the top of the current terminal screen
-        ;; so a full-screen TUI (e.g. a Claude Code panel) shows from its top
-        ;; instead of being scrolled with its top cut off when tall
+        ;; In a TILED pane only, anchor to the top of the current terminal
+        ;; screen so a full-screen TUI (e.g. a Claude Code panel) shows from
+        ;; its top instead of being scrolled with its top cut off when tall
         ;; box-drawing glyphs make the rows overflow the body in pixels.
-        (when tmux-control--controller
+        ;; Only there: the anchor counts buffer LINES back from point-max,
+        ;; which lands above eat's display-beginning whenever a screen row
+        ;; is a wrapped continuation.  A per-window render buffer sets
+        ;; `tmux-control--controller' too, and inheriting the anchor made
+        ;; every output flush fight eat's keystroke-time scroll sync -- the
+        ;; view bounced between the two notions of "screen top" on each
+        ;; typed character.
+        (when (and tmux-control--controller
+                   (buffer-live-p tmux-control--controller)
+                   (buffer-local-value 'tmux-control--tiled
+                                       tmux-control--controller))
           (tmux-control--anchor-windows-to-screen-top sync-windows))
         (tmux-control--keep-cursor-visible sync-windows))
       (run-hooks 'eat-update-hook))))

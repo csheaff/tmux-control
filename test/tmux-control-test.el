@@ -2220,5 +2220,49 @@ output), :calls (side-effect invocations in order), :active-pane,
         (should-not window-selected)
         (should (equal (car sent) "select-pane -t %0"))))))
 
+(ert-deftest tmux-control-test-flush-anchors-only-tiled-panes ()
+  ;; The screen-top anchor exists for TILED panes.  It counts buffer lines
+  ;; back from point-max, which lands above eat's display-beginning whenever
+  ;; a screen row is a wrapped continuation -- so in a per-window render
+  ;; buffer (which also sets `tmux-control--controller') every output flush
+  ;; re-anchored the view away from where eat's keystroke-time scroll sync
+  ;; had just put it, and typing into a TUI bounced the screen up and down
+  ;; once per character (field report).  The anchor must run only when the
+  ;; buffer's controller is actually tiling.
+  (let ((anchored 0)
+        (eat--synchronize-scroll-function #'ignore))
+    (cl-letf (((symbol-function 'tmux-control--anchor-windows-to-screen-top)
+               (lambda (_) (cl-incf anchored)))
+              ((symbol-function 'eat-term-redisplay) #'ignore)
+              ((symbol-function 'eat-term-live-p) (lambda (_) t))
+              ((symbol-function 'tmux-control--keep-cursor-visible) #'ignore))
+      (let ((ctrl (generate-new-buffer " *tc-anchor-ctrl*")))
+        (unwind-protect
+            (progn
+              ;; Per-window render buffer: controller NOT tiled -> no anchor.
+              (with-temp-buffer
+                (setq-local tmux-control--terminal t
+                            tmux-control--display-dirty t
+                            tmux-control--controller ctrl)
+                (tmux-control--flush-display (list (selected-window))))
+              (should (= anchored 0))
+              ;; The controller buffer itself (no --controller): no anchor.
+              (with-temp-buffer
+                (setq-local tmux-control--terminal t
+                            tmux-control--display-dirty t)
+                (tmux-control--flush-display (list (selected-window))))
+              (should (= anchored 0))
+              ;; Tiled pane buffer: controller tiling -> anchored.
+              (with-current-buffer ctrl
+                (setq-local tmux-control--tiled t))
+              (with-temp-buffer
+                (setq-local tmux-control--terminal t
+                            tmux-control--display-dirty t
+                            tmux-control--controller ctrl)
+                (tmux-control--flush-display (list (selected-window))))
+              (should (= anchored 1)))
+          (when (buffer-live-p ctrl)
+            (kill-buffer ctrl)))))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
