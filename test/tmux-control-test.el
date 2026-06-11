@@ -2072,5 +2072,44 @@ output), :calls (side-effect invocations in order), :active-pane,
         (kill-buffer buf-b)
         (kill-buffer buf-c)))))
 
+(ert-deftest tmux-control-test-do-select-window-swaps-optimistically ()
+  ;; A menu/tab selection knows its target window, so the display swaps
+  ;; IMMEDIATELY -- zero round trips, no dependence on tmux echoing
+  ;; %session-window-changed.  (The echo re-runs the swap idempotently.)
+  (with-temp-buffer
+    (let* ((tmux-control-window-buffers t)
+           (ctrl (current-buffer))
+           (buf-b (generate-new-buffer " *tc-opt-b*"))
+           (win (selected-window))
+           (orig (window-buffer win))
+           (sent nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'tmux-control--ensure-live) #'ignore)
+                    ((symbol-function 'tmux-control--send-command)
+                     (lambda (cmd &optional _kind) (push cmd sent))))
+            (setq-local tmux-control--session "s"
+                        tmux-control--window-id "@1"
+                        tmux-control--current-window "0"
+                        tmux-control--windows
+                        '((:index "0" :name "a" :active t :id "@1")
+                          (:index "1" :name "b" :id "@2")))
+            (tmux-control--register-window-buffer "@1" ctrl)
+            (with-current-buffer buf-b
+              (setq-local tmux-control--window-id "@2"
+                          tmux-control--controller ctrl))
+            (tmux-control--register-window-buffer "@2" buf-b)
+            (set-window-buffer win ctrl)
+            ;; Select window 1: the swap happens NOW, before any reply.
+            (tmux-control--do-select-window "1")
+            (should (eq (window-buffer win) buf-b))
+            (should (cl-some (lambda (c) (string-match-p "select-window" c))
+                             sent))
+            ;; Unknown index (no id cached): no swap, no error; the echo
+            ;; will handle it.
+            (tmux-control--do-select-window "7")
+            (should (eq (window-buffer win) buf-b)))
+        (set-window-buffer win orig)
+        (kill-buffer buf-b)))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
