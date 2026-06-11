@@ -521,5 +521,45 @@ view and stranded the display on the previous window."
         (kill-buffer buf))
       (tmux-control-it--tmux-ok "kill-server"))))
 
+(ert-deftest tmux-control-it-select-pane-jumps-to-other-window ()
+  "`tmux-control-select-pane' given a pane id from ANOTHER window is a real
+jump: the session switches to that window, and the view shows the pane.
+\(Non-interactive here; the interactive picker resolves to the same call.)
+The field-reported topology: two windows, one pane each, target the other
+window's pane -- the view must not stay on the old window."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-n" "w0" "-x" "80" "-y" "24")
+  (tmux-control-it--tmux "new-window" "-t" "t:" "-n" "w1")
+  (tmux-control-it--tmux "select-window" "-t" "t:0")
+  (tmux-control-it--tmux "send-keys" "-t" "t:0" "echo PANE_OF_W0" "Enter")
+  (tmux-control-it--tmux "send-keys" "-t" "t:1" "echo PANE_OF_W1" "Enter")
+  (let* ((tmux-control-window-buffers t)
+         (buf (tmux-control-connect nil tmux-control-it--socket "t")))
+    (unwind-protect
+        (progn
+          (tmux-control-it--pump 1.5)
+          ;; Resolve window 1's pane id from tmux itself.
+          (let ((target
+                 (string-trim
+                  (tmux-control-it--tmux
+                   "list-panes" "-t" "t:1" "-F" "#{pane_id}"))))
+            (with-current-buffer buf
+              (tmux-control-select-pane target))
+            ;; The view converges on window 1's buffer showing its pane.
+            (should (tmux-control-it--pump-until
+                     8 (lambda ()
+                         (let ((shown (window-buffer (selected-window))))
+                           (and (not (eq shown buf))
+                                (with-current-buffer shown
+                                  (string-match-p
+                                   "PANE_OF_W1"
+                                   (buffer-substring-no-properties
+                                    (point-min) (point-max)))))))))))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf (ignore-errors (tmux-control-disconnect)))
+        (kill-buffer buf))
+      (tmux-control-it--tmux-ok "kill-server"))))
+
 (provide 'tmux-control-integration)
 ;;; tmux-control-integration.el ends here
