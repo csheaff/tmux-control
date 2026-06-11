@@ -3299,21 +3299,33 @@ swallowed as content and the reply queue would desynchronize."
            (tmux-control--refresh-alt-screen-option)
            (tmux-control--refresh-pane-size))))
       (:pane-size
-       (let ((size (tmux-control--parse-pane-size output)))
+       ;; The reply carries "PANExSIZE\tWINDOWxSIZE": the PANE size drives
+       ;; the renderer (in a split window the active pane is narrower than
+       ;; the window, and the grid must match the pane); the WINDOW size is
+       ;; what refresh-client actually negotiates, so the pin detection
+       ;; compares THAT against what we asked for -- comparing the pane
+       ;; would cry wolf on every split layout.
+       (let* ((val (car (cl-remove-if #'string-empty-p
+                                      (mapcar #'string-trim output))))
+              (parts (and val (split-string val "\t")))
+              (size (tmux-control--parse-pane-size
+                     (list (or (car parts) ""))))
+              (win-size (and (cadr parts)
+                             (tmux-control--parse-pane-size
+                              (list (cadr parts))))))
          (when (and size
                     (tmux-control--apply-eat-size (car size) (cdr size)))
            ;; The grid changed under already-rendered output, so repaint
            ;; the visible screen at the corrected width.
            (tmux-control--seed-screen))
-         ;; A pane that stays at another size than the one we just asked
-         ;; tmux for usually means the window's size is PINNED
-         ;; (window-size manual -- e.g. after any `resize-window', which
-         ;; tmux pins as a side effect) or owned by another attached
-         ;; client.  That failure is otherwise silent: the view keeps
-         ;; reconciling to a grid that never matches the Emacs window.
-         ;; Probe and say so, once per episode.
-         (when size
-           (tmux-control--maybe-warn-pinned-size size))))
+         ;; A WINDOW that stays at another size than the one we just asked
+         ;; tmux for means its size is PINNED (window-size manual -- e.g.
+         ;; after any `resize-window', which tmux pins as a side effect) or
+         ;; owned by another attached client.  That failure is otherwise
+         ;; silent: the view keeps reconciling to a grid that never matches
+         ;; the Emacs window.  Probe and say so, once per episode.
+         (when win-size
+           (tmux-control--maybe-warn-pinned-size win-size))))
       (:windows
        (tmux-control--update-windows output))
       (:pane-window
@@ -3937,17 +3949,19 @@ by the `:pane-size' branch of `tmux-control--finish-command-output'."
   (when (and tmux-control--active-pane
              (process-live-p tmux-control--process))
     (tmux-control--send-command
-     (format "display-message -p -t %s \"#{pane_width}x#{pane_height}\""
+     (format "display-message -p -t %s \"#{pane_width}x#{pane_height}\t#{window_width}x#{window_height}\""
              tmux-control--active-pane)
      :pane-size)))
 
 (defun tmux-control--maybe-warn-pinned-size (actual)
-  "Warn once when tmux keeps the pane at ACTUAL despite our size requests.
-Runs in the controller from the :pane-size reconciliation.  Compares
-widths only (heights legitimately differ by a status line), and probes
-the window's `window-size' option in-band before saying anything, so
-the warning names the actual cause: a pinned window (\"manual\" -- the
-side effect of any `resize-window') or a competing attached client.
+  "Warn once when tmux keeps the WINDOW at ACTUAL despite our size requests.
+ACTUAL is the window size from the :pane-size reconciliation reply (the
+window, not the pane: a split window's active pane is legitimately
+narrower than what refresh-client negotiates).  Compares widths only
+\(heights legitimately differ by a status line), and probes the
+displayed window's `window-size' option in-band before saying anything,
+so the warning names the actual cause: a pinned window (\"manual\" --
+the side effect of any `resize-window') or a competing attached client.
 Resolving it is one command: `tmux-control-adopt-window-size'."
   (let ((requested tmux-control--requested-client-size))
     (cond
@@ -3957,11 +3971,18 @@ Resolving it is one command: `tmux-control-adopt-window-size'."
       (setq tmux-control--size-pin-warned nil))
      ((not tmux-control--size-pin-warned)
       (setq tmux-control--size-pin-warned t)
-      (let ((buffer (current-buffer))
-            (target (format "%s:%s" tmux-control--session
-                            (or tmux-control--current-window ""))))
+      (let* ((buffer (current-buffer))
+             ;; Probe the window actually on screen, by stable @id when
+             ;; known -- the cached current-window INDEX can lag rapid
+             ;; switches and would misattribute the diagnosis.
+             (display-id (buffer-local-value
+                          'tmux-control--window-id
+                          (tmux-control--session-display-buffer buffer)))
+             (target (or display-id
+                         (format "%s:%s" tmux-control--session
+                                 (or tmux-control--current-window "")))))
         (tmux-control--query
-         (format "show-options -qv -t %s window-size" target)
+         (format "show-options -wqv -t %s window-size" target)
          (lambda (lines)
            (when (buffer-live-p buffer)
              (with-current-buffer buffer

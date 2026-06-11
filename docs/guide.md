@@ -378,8 +378,10 @@ keeps up and never triggers it.  Off by default; needs tmux 3.2+.
 tmux sizes each window from its attached clients according to the
 `window-size` option (default **latest**: the most recently active client
 wins).  tmux-control asks for the size of your Emacs window on every layout
-change, so normally the pane follows Emacs exactly.  Two situations break
-that, and both used to fail *silently*:
+change, so normally the tmux *window* follows Emacs exactly (in a split
+window the active pane is its share of that — the renderer always matches
+the pane).  Two situations break the following, and both used to fail
+*silently*:
 
 - **A pinned window.**  Any `resize-window` — yours, a script's, another
   tool's — sets that window's `window-size` to `manual` as a side effect,
