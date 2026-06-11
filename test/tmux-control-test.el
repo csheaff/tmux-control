@@ -829,18 +829,21 @@ each wrapped in an evolving prompt line and a status bar.")
                      ("2" . "2: editor pane"))))))
 
 (ert-deftest tmux-control-test-list-panes-parses ()
+  ;; Session-wide listing: pane id, window index+name, pane index, pane
+  ;; active, window active, command, title.
   (cl-letf (((symbol-function 'tmux-control--call)
              (lambda (&rest _)
-               (concat "%0\t0\t1\tbash\tclays-mbp\n"
-                       "%3\t1\t0\tnode\tcoder\n"
-                       "%2\t2\t0\tnode\tnode\n"
+               (concat "%0\t0\tcode\t0\t1\t1\tbash\tclays-mbp\n"
+                       ;; active pane of an INACTIVE window: not "[active]"
+                       "%3\t1\tagents\t0\t1\t0\tnode\tcoder\n"
+                       "%2\t1\tagents\t1\t0\t0\tnode\tnode\n"
                        "garbage-line"))))
     (should (equal (tmux-control--list-panes nil "main" "emacs")
-                   ;; index: command (title-when-distinct) [active]
-                   '(("%0" . "0: bash (clays-mbp) [active]")
-                     ("%3" . "1: node (coder)")
+                   ;; window:name.pane command (title-when-distinct) [active]
+                   '(("%0" . "0:code.0 bash (clays-mbp) [active]")
+                     ("%3" . "1:agents.0 node (coder)")
                      ;; title == command -> no redundant "(node)"
-                     ("%2" . "2: node"))))))
+                     ("%2" . "1:agents.1 node"))))))
 
 ;;; Window-management command construction.
 
@@ -2112,10 +2115,10 @@ output), :calls (side-effect invocations in order), :active-pane,
         (kill-buffer buf-b)))))
 
 (ert-deftest tmux-control-test-select-pane-crosses-windows ()
-  ;; The pane picker lists the whole session's panes, but tmux's bare
-  ;; `select-pane' cannot move the session to another window -- so choosing
-  ;; a pane that lives elsewhere must switch the window first, then focus
-  ;; the pane.  (Regression: the old single-buffer client followed
+  ;; `tmux-control-select-pane' can be handed (or complete to) a pane in
+  ;; another window, but tmux's bare `select-pane' cannot move the session
+  ;; there -- so the command must switch the window first, then focus the
+  ;; pane.  (Regression: the old single-buffer client followed
   ;; %window-pane-changed unconditionally, which made the bare command
   ;; LOOK like a cross-window jump; per-window buffers routed the change
   ;; to the other window's buffer and the view stayed put.)

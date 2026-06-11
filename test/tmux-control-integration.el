@@ -522,9 +522,10 @@ view and stranded the display on the previous window."
       (tmux-control-it--tmux-ok "kill-server"))))
 
 (ert-deftest tmux-control-it-select-pane-jumps-to-other-window ()
-  "Choosing a pane that lives in ANOTHER window via the pane picker is a real
+  "`tmux-control-select-pane' given a pane id from ANOTHER window is a real
 jump: the session switches to that window, and the view shows the pane.
-The field-reported topology: two windows, one pane each, pick the other
+\(Non-interactive here; the interactive picker resolves to the same call.)
+The field-reported topology: two windows, one pane each, target the other
 window's pane -- the view must not stay on the old window."
   (skip-unless (tmux-control-it--available-p))
   (tmux-control-it--tmux-ok "kill-server")

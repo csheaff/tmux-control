@@ -980,12 +980,14 @@ Queries tmux on HOST using SOCKET-NAME."
            (split-string (string-trim text) "\n" t)))))
 
 (defun tmux-control--list-panes (host socket-name target)
-  "Return an alist of (PANE-ID . LABEL) for the active window of TARGET.
-Queries tmux on HOST using SOCKET-NAME.  LABEL shows the pane index, its
-running command, its title when that differs, and whether it is active."
-  (let* ((fmt "#{pane_id}\t#{pane_index}\t#{pane_active}\t#{pane_current_command}\t#{pane_title}")
+  "Return an alist of (PANE-ID . LABEL) for every pane in session TARGET.
+Queries tmux on HOST using SOCKET-NAME, across ALL of the session's
+windows (an agent fleet shows every agent, whichever window it lives
+in).  LABEL shows the pane's window and index, its running command, its
+title when that differs, and whether it is the session's active pane."
+  (let* ((fmt "#{pane_id}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_active}\t#{window_active}\t#{pane_current_command}\t#{pane_title}")
          (args (append (when socket-name (list "-L" socket-name))
-                       (list "list-panes" "-t" target "-F" fmt)))
+                       (list "list-panes" "-s" "-t" target "-F" fmt)))
          (text (if (and host (not (string-empty-p host)))
                    (tmux-control--call
                     "ssh"
@@ -998,20 +1000,24 @@ running command, its title when that differs, and whether it is active."
           (mapcar
            (lambda (line)
              (when (string-match
-                    "\\`\\(%[0-9]+\\)\t\\([0-9]+\\)\t\\([01]\\)\t\\([^\t]*\\)\t\\(.*\\)\\'"
+                    "\\`\\(%[0-9]+\\)\t\\([0-9]+\\)\t\\([^\t]*\\)\t\\([0-9]+\\)\t\\([01]\\)\t\\([01]\\)\t\\([^\t]*\\)\t\\(.*\\)\\'"
                     line)
                (let* ((pane (match-string 1 line))
-                      (index (match-string 2 line))
-                      (active (string= (match-string 3 line) "1"))
-                      (cmd (match-string 4 line))
-                      (title (match-string 5 line))
-                      (label (format "%s: %s%s%s"
-                                     index cmd
+                      (widx (match-string 2 line))
+                      (wname (match-string 3 line))
+                      (pidx (match-string 4 line))
+                      (pane-active (string= (match-string 5 line) "1"))
+                      (win-active (string= (match-string 6 line) "1"))
+                      (cmd (match-string 7 line))
+                      (title (match-string 8 line))
+                      (label (format "%s:%s.%s %s%s%s"
+                                     widx wname pidx cmd
                                      (if (and (not (string-empty-p title))
                                               (not (equal title cmd)))
                                          (format " (%s)" title)
                                        "")
-                                     (if active " [active]" ""))))
+                                     (if (and pane-active win-active)
+                                         " [active]" ""))))
                  (cons pane label))))
            (split-string (string-trim text) "\n" t)))))
 
@@ -1588,7 +1594,9 @@ See `tmux-control-select-pane' to jump to a pane by name."
   (tmux-control--send-command "select-pane -t :.+"))
 
 (defun tmux-control--read-pane ()
-  "Read a pane id of the current window using completion over its panes."
+  "Read a pane id with completion over ALL of the session's panes.
+Each candidate is labelled with its window and index, so an agent
+fleet's panes are distinguishable across windows."
   (let* ((panes (tmux-control--list-panes tmux-control--host
                                           tmux-control--socket-name
                                           tmux-control--session))
@@ -1610,7 +1618,13 @@ sets that window's active pane WITHOUT switching the session's current
 window, so the session is switched to the pane's window first (the tab
 bar, other clients, and the per-window view all follow), then the pane
 is focused within it.  A pane of the current window just becomes the
-active pane, and the view repaints on it."
+active pane, and the view repaints on it.
+
+The window hop relies on the pane->window map, which is fetched
+asynchronously at connect; in the brief moment before it arrives (or
+with both `tmux-control-window-tab-bar' and
+`tmux-control-window-buffers' disabled, which leave it unfetched) an
+unmapped pane falls back to the bare `select-pane'."
   (interactive (list nil))
   (tmux-control--ensure-live)
   (let* ((pane (or pane (tmux-control--read-pane)))
