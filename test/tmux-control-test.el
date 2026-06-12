@@ -2387,12 +2387,13 @@ output), :calls (side-effect invocations in order), :active-pane,
               ;; Batch redisplay never runs, so window-old-buffer is not
               ;; maintained; pin the "buffer changed" answer explicitly.
               ((symbol-function 'window-old-buffer) (lambda (_) nil)))
-      (with-temp-buffer
-        (tmux-control-mode)
-        (setq-local tmux-control--terminal t)
-        (set-window-buffer (selected-window) (current-buffer))
-        (tmux-control--snap-to-live-screen (selected-window))
-        (should (equal synced (list (list (selected-window)))))))))
+      (save-window-excursion
+        (with-temp-buffer
+          (tmux-control-mode)
+          (setq-local tmux-control--terminal t)
+          (set-window-buffer (selected-window) (current-buffer))
+          (tmux-control--snap-to-live-screen (selected-window))
+          (should (equal synced (list (list (selected-window))))))))))
 
 (ert-deftest tmux-control-test-snap-skips-unchanged-and-tiled ()
   ;; The buffer-local `window-buffer-change-functions' hook also fires
@@ -2407,12 +2408,13 @@ output), :calls (side-effect invocations in order), :active-pane,
       ;; Same buffer as last redisplay: no snap.
       (cl-letf (((symbol-function 'window-old-buffer)
                  (lambda (w) (window-buffer w))))
-        (with-temp-buffer
-          (tmux-control-mode)
-          (setq-local tmux-control--terminal t)
-          (set-window-buffer (selected-window) (current-buffer))
-          (tmux-control--snap-to-live-screen (selected-window))
-          (should (= synced 0))))
+        (save-window-excursion
+          (with-temp-buffer
+            (tmux-control-mode)
+            (setq-local tmux-control--terminal t)
+            (set-window-buffer (selected-window) (current-buffer))
+            (tmux-control--snap-to-live-screen (selected-window))
+            (should (= synced 0)))))
       ;; Tiled pane buffer: tiling owns the arrangement.
       (cl-letf (((symbol-function 'window-old-buffer) (lambda (_) nil)))
         (let ((ctrl (generate-new-buffer " *tc-snap-ctrl*")))
@@ -2420,13 +2422,14 @@ output), :calls (side-effect invocations in order), :active-pane,
               (progn
                 (with-current-buffer ctrl
                   (setq-local tmux-control--tiled t))
-                (with-temp-buffer
-                  (tmux-control-mode)
-                  (setq-local tmux-control--terminal t
-                              tmux-control--controller ctrl)
-                  (set-window-buffer (selected-window) (current-buffer))
-                  (tmux-control--snap-to-live-screen (selected-window))
-                  (should (= synced 0))))
+                (save-window-excursion
+                  (with-temp-buffer
+                    (tmux-control-mode)
+                    (setq-local tmux-control--terminal t
+                                tmux-control--controller ctrl)
+                    (set-window-buffer (selected-window) (current-buffer))
+                    (tmux-control--snap-to-live-screen (selected-window))
+                    (should (= synced 0)))))
             (kill-buffer ctrl)))))))
 
 (ert-deftest tmux-control-test-scrollback-wheel-down-exits-at-bottom ()
@@ -2444,21 +2447,22 @@ output), :calls (side-effect invocations in order), :active-pane,
               ;; by the interactive rig.
               ((symbol-function 'window-end)
                (lambda (&rest _) (if at-bottom (point-max) (point-min)))))
-      (with-temp-buffer
-        (tmux-control-scrollback-mode)
-        (let ((inhibit-read-only t)) (insert "history line\n"))
-        (set-window-buffer (selected-window) (current-buffer))
-        ;; Bottom visible: return to live.
-        (tmux-control-scrollback-wheel-down
-         (list 'wheel-down (list (selected-window))))
-        (should (= lived 1))
-        (should (= dispatched 0))
-        ;; Bottom out of view: normal scroll.
-        (setq at-bottom nil)
-        (tmux-control-scrollback-wheel-down
-         (list 'wheel-down (list (selected-window))))
-        (should (= lived 1))
-        (should (= dispatched 1))))))
+      (save-window-excursion
+        (with-temp-buffer
+          (tmux-control-scrollback-mode)
+          (let ((inhibit-read-only t)) (insert "history line\n"))
+          (set-window-buffer (selected-window) (current-buffer))
+          ;; Bottom visible: return to live.
+          (tmux-control-scrollback-wheel-down
+           (list 'wheel-down (list (selected-window))))
+          (should (= lived 1))
+          (should (= dispatched 0))
+          ;; Bottom out of view: normal scroll.
+          (setq at-bottom nil)
+          (tmux-control-scrollback-wheel-down
+           (list 'wheel-down (list (selected-window))))
+          (should (= lived 1))
+          (should (= dispatched 1)))))))
 
 (ert-deftest tmux-control-test-window-buffer-mode-line-drops-process-status ()
   ;; A per-window render buffer owns no process (the controller does);
