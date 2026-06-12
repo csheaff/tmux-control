@@ -240,6 +240,7 @@ view):
 ## Key bindings
 
 - `C-c C-k` disconnects the Emacs control client.
+- `C-c C-r` reconnects it — see "Reconnecting" below.
 - `C-c C-l` refreshes the live view from tmux's current visible screen without
   sending input to the pane.
 - `C-c C-e` opens a normal Emacs scrollback view of the pane (movement/search/
@@ -436,6 +437,24 @@ When you *want* long-term cohabitation with another client, consider
 same content, letterboxed to the smaller one) — or keep the other client
 detached while working from Emacs.
 
+## Reconnecting
+
+The point of tmux is that the session outlives the client — and the client
+should lean on that.  When the control connection dies out from under you (a
+dropped SSH link, a closed laptop lid, a killed server process), the session
+buffer says so:
+
+    [tmux-control] connection lost (...) -- if the tmux session is still
+    running, C-c C-r reconnects
+
+`C-c C-r` (`tmux-control-reconnect`) re-establishes the connection in place,
+reusing the buffer's saved host, socket and session — nothing to re-enter,
+and the view reseeds from the running session exactly where it is now.  It
+works from the live view, a per-window render buffer, a tiled pane, or the
+scrollback pager.  Typing into a dead session offers the same reconnect, so
+the natural "is this thing on?" keystroke is itself the recovery path.  A
+deliberate `C-c C-k` disconnect stays quiet.
+
 ## A connection that stops replying
 
 Replies on the control connection are matched to commands strictly in order,
@@ -443,9 +462,9 @@ so a reply that never arrives — a hung server, a half-dead SSH link — would
 otherwise stall every later command silently.  A watchdog notices when the
 oldest pending command has waited longer than `tmux-control-command-timeout`
 (default 10 seconds) and says so in the session buffer and echo area, pointing
-at `M-x tmux-control-reconnect`.  It never guesses at recovery — a late reply
-still pairs with its own command, and the client announces when one arrives.
-Set the timeout to `nil` to disable the watchdog.
+at `C-c C-r` (`tmux-control-reconnect`).  It never guesses at recovery — a
+late reply still pairs with its own command, and the client announces when
+one arrives.  Set the timeout to `nil` to disable the watchdog.
 
 ## Development
 
