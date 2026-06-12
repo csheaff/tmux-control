@@ -2373,6 +2373,122 @@ output), :calls (side-effect invocations in order), :active-pane,
         (should resized)
         (should-not tmux-control--size-pin-warned)))))
 
+(ert-deftest tmux-control-test-snap-to-live-screen-on-arrival ()
+  ;; A window ARRIVING at a live render buffer is pointed at the live
+  ;; screen.  Emacs restores the window's remembered per-buffer point,
+  ;; which goes stale by however much the buffer streamed while it was
+  ;; off screen -- returning after a background flood landed the view
+  ;; thousands of lines up, on ancient scrollback (field report: Top L1
+  ;; of an 18k-line buffer).
+  (let ((synced '()))
+    (cl-letf (((symbol-function 'eat--synchronize-scroll)
+               (lambda (windows) (push windows synced)))
+              ((symbol-function 'eat-term-live-p) (lambda (_) t))
+              ;; Batch redisplay never runs, so window-old-buffer is not
+              ;; maintained; pin the "buffer changed" answer explicitly.
+              ((symbol-function 'window-old-buffer) (lambda (_) nil)))
+      (save-window-excursion
+        (with-temp-buffer
+          (tmux-control-mode)
+          (setq-local tmux-control--terminal t)
+          (set-window-buffer (selected-window) (current-buffer))
+          (tmux-control--snap-to-live-screen (selected-window))
+          (should (equal synced (list (list (selected-window))))))))))
+
+(ert-deftest tmux-control-test-snap-skips-unchanged-and-tiled ()
+  ;; The buffer-local `window-buffer-change-functions' hook also fires
+  ;; for windows whose buffer did NOT change (any change on the frame
+  ;; triggers it); those windows -- e.g. a live view the user scrolled
+  ;; up on purpose -- must not be yanked back to the bottom.  Tiled pane
+  ;; buffers are anchored by the tiling layer and are skipped too.
+  (let ((synced 0))
+    (cl-letf (((symbol-function 'eat--synchronize-scroll)
+               (lambda (_) (cl-incf synced)))
+              ((symbol-function 'eat-term-live-p) (lambda (_) t)))
+      ;; Same buffer as last redisplay: no snap.
+      (cl-letf (((symbol-function 'window-old-buffer)
+                 (lambda (w) (window-buffer w))))
+        (save-window-excursion
+          (with-temp-buffer
+            (tmux-control-mode)
+            (setq-local tmux-control--terminal t)
+            (set-window-buffer (selected-window) (current-buffer))
+            (tmux-control--snap-to-live-screen (selected-window))
+            (should (= synced 0)))))
+      ;; Tiled pane buffer: tiling owns the arrangement.
+      (cl-letf (((symbol-function 'window-old-buffer) (lambda (_) nil)))
+        (let ((ctrl (generate-new-buffer " *tc-snap-ctrl*")))
+          (unwind-protect
+              (progn
+                (with-current-buffer ctrl
+                  (setq-local tmux-control--tiled t))
+                (save-window-excursion
+                  (with-temp-buffer
+                    (tmux-control-mode)
+                    (setq-local tmux-control--terminal t
+                                tmux-control--controller ctrl)
+                    (set-window-buffer (selected-window) (current-buffer))
+                    (tmux-control--snap-to-live-screen (selected-window))
+                    (should (= synced 0)))))
+            (kill-buffer ctrl)))))))
+
+(ert-deftest tmux-control-test-scrollback-wheel-down-exits-at-bottom ()
+  ;; tmux copy-mode parity: scrolling back down to the bottom of the
+  ;; pager leaves scrollback -- the gesture that took you in takes you
+  ;; back out.  Above the bottom the event re-dispatches to the user's
+  ;; normal scrolling.
+  (let ((lived 0) (dispatched 0) (at-bottom t))
+    (cl-letf (((symbol-function 'tmux-control-live)
+               (lambda () (cl-incf lived)))
+              ((symbol-function 'tmux-control--dispatch-wheel)
+               (lambda (_) (cl-incf dispatched)))
+              ;; Batch windows never redisplay, so real visibility is
+              ;; unanswerable here; pin it.  The live behavior is covered
+              ;; by the interactive rig.
+              ((symbol-function 'window-end)
+               (lambda (&rest _) (if at-bottom (point-max) (point-min)))))
+      (save-window-excursion
+        (with-temp-buffer
+          (tmux-control-scrollback-mode)
+          (let ((inhibit-read-only t)) (insert "history line\n"))
+          (set-window-buffer (selected-window) (current-buffer))
+          ;; Bottom visible: return to live.
+          (tmux-control-scrollback-wheel-down
+           (list 'wheel-down (list (selected-window))))
+          (should (= lived 1))
+          (should (= dispatched 0))
+          ;; Bottom out of view: normal scroll.
+          (setq at-bottom nil)
+          (tmux-control-scrollback-wheel-down
+           (list 'wheel-down (list (selected-window))))
+          (should (= lived 1))
+          (should (= dispatched 1)))))))
+
+(ert-deftest tmux-control-test-window-buffer-mode-line-drops-process-status ()
+  ;; A per-window render buffer owns no process (the controller does);
+  ;; Eat's default ":%s" suffix would permanently show "no process" for
+  ;; a perfectly live view.  The mode indicator survives, the status goes.
+  (let ((ctrl (generate-new-buffer " *tc-ml-ctrl*"))
+        (made nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer ctrl
+            (tmux-control-mode)
+            (setq-local tmux-control--host nil
+                        tmux-control--socket-name "sock"
+                        tmux-control--session "mlsess"
+                        tmux-control--process nil
+                        tmux-control--capture-trailing-p nil
+                        tmux-control--fallback-target "mlsess:"
+                        tmux-control--terminal nil))
+          (setq made (tmux-control--make-window-buffer "@9" ctrl))
+          (with-current-buffer made
+            (should-not (member ":%s" mode-line-process))
+            ;; The eat mode indicator part survives.
+            (should (consp mode-line-process))))
+      (when (buffer-live-p made)
+        (let ((kill-buffer-query-functions nil)) (kill-buffer made)))
+      (kill-buffer ctrl))))
 (ert-deftest tmux-control-test-reconnect-reuses-saved-parameters ()
   ;; `tmux-control-reconnect' re-runs the connect with the buffer's own
   ;; saved host/socket/session -- nothing to re-enter after a dropped link.

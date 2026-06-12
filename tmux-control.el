@@ -38,6 +38,7 @@
 
 (require 'ansi-color)
 (require 'cl-lib)
+(require 'mwheel)
 (require 'seq)
 (require 'subr-x)
 (require 'eat)
@@ -550,7 +551,11 @@ the cross-session activity strip (see `tmux-control-session-activity').")
 (define-derived-mode tmux-control-mode eat-mode "tmux-control"
   "Major mode for tmux-control buffers."
   (tmux-control--disable-line-numbers)
-  (tmux-control--disable-margins))
+  (tmux-control--disable-margins)
+  ;; Arriving at a live buffer always shows the live screen, however the
+  ;; buffer got into the window; see `tmux-control--snap-to-live-screen'.
+  (add-hook 'window-buffer-change-functions
+            #'tmux-control--snap-to-live-screen nil t))
 
 (defvar tmux-control-scrollback-mode-map
   (let ((map (make-sparse-keymap)))
@@ -561,15 +566,42 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     (define-key map (kbd "C-c C-e") #'tmux-control-live)
     (define-key map (kbd "RET") #'tmux-control-live)
     (define-key map (kbd "q") #'tmux-control-live)
+    (define-key map [escape] #'tmux-control-live)
+    (define-key map [wheel-down] #'tmux-control-scrollback-wheel-down)
     (define-key map [remap eat-semi-char-mode] #'tmux-control-live)
     (define-key map [remap self-insert-command] #'tmux-control-live-self-insert)
     map)
   "Keymap for `tmux-control-scrollback-mode'.")
 
+(defvar tmux-control--scrollback-override-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [wheel-down] #'tmux-control-scrollback-wheel-down)
+    map)
+  "High-precedence keymap for the scrollback pager.
+A global minor mode that binds the wheel -- `pixel-scroll-precision-mode'
+in particular -- outranks the pager's own keymap, so the bottom-of-history
+exit would never fire for real wheel events.  An emulation map outranks
+the minor mode (the same reason the live buffer's wheel-up binding lives
+in `tmux-control--override-map').  Only wheel-down is bound: everything
+else, including wheel-up, falls through to the user's normal scrolling --
+and above the bottom the handler re-dispatches wheel-down there too.")
+
+(defvar-local tmux-control--scrollback-keys-active nil)
+
+(defvar tmux-control--scrollback-emulation-map-alist
+  `((tmux-control--scrollback-keys-active
+     . ,tmux-control--scrollback-override-map))
+  "Emulation map alist for scrollback pager buffers.")
+
 (define-derived-mode tmux-control-scrollback-mode special-mode
   "tmux-control-scrollback"
   "Major mode for tmux-control scrollback buffers."
   (setq-local truncate-lines nil)
+  (setq-local emulation-mode-map-alists
+              (cons tmux-control--scrollback-emulation-map-alist
+                    (delq tmux-control--scrollback-emulation-map-alist
+                          emulation-mode-map-alists)))
+  (setq tmux-control--scrollback-keys-active t)
   (tmux-control--disable-line-numbers)
   (tmux-control--disable-margins))
 
@@ -2061,6 +2093,37 @@ keystroke, rather than dropping it."
                tmux-control--terminal
                (eat-term-live-p tmux-control--terminal))
       (eat-self-input 1 event))))
+
+(defun tmux-control--dispatch-wheel (event)
+  "Scroll normally for wheel EVENT, honoring `pixel-scroll-precision-mode'.
+The pager binds wheel-down locally, which would otherwise shadow the
+user's configured wheel behavior; route the event back to it."
+  (if (and (bound-and-true-p pixel-scroll-precision-mode)
+           (fboundp 'pixel-scroll-precision))
+      (pixel-scroll-precision event)
+    (mwheel-scroll event)))
+
+(defun tmux-control-scrollback-wheel-down (event)
+  "Scroll the pager down; from the bottom, return to the live view.
+This is tmux's own copy-mode rule: scrolling back down to the bottom
+of history leaves scrollback and you are live again -- no key to
+remember, the gesture that took you in takes you back out.  Above the
+bottom, the wheel scrolls as it always did (EVENT is re-dispatched to
+the user's configured scrolling, pixel-precision included)."
+  (interactive "e")
+  (let ((window (posn-window (event-start event))))
+    (if (and (window-live-p window)
+             (with-current-buffer (window-buffer window)
+               (and (derived-mode-p 'tmux-control-scrollback-mode)
+                    ;; "At the bottom" must count a PARTIALLY visible last
+                    ;; line: pixel-precision scrolling routinely parks the
+                    ;; window with the final line a few pixels clipped, and
+                    ;; `pos-visible-in-window-p' answers nil there forever.
+                    (>= (window-end window t) (point-max)))))
+        (with-selected-window window
+          (with-current-buffer (window-buffer window)
+            (tmux-control-live)))
+      (tmux-control--dispatch-wheel event))))
 
 (defun tmux-control--alt-screen-effective-p (honored eat-alt-display-p)
   "Combine HONORED with EAT-ALT-DISPLAY-P into the effective alt-screen state.
@@ -3637,6 +3700,46 @@ pass and replayed by `tmux-control--flush-display'."
        (eat-term-live-p tmux-control--terminal)
        (eat--synchronize-scroll-windows)))
 
+(defun tmux-control--snap-to-live-screen (window)
+  "Point WINDOW, newly showing this buffer, at the live terminal screen.
+
+Emacs remembers a per-window point for every buffer a window has shown
+and restores it on `set-window-buffer' -- but a live render buffer keeps
+STREAMING while it is off screen, so the remembered point goes stale by
+exactly as much output as arrived in the meantime.  Returning to a
+window after an agent filled its buffer then landed the view thousands
+of lines above the live screen, on ancient scrollback.  tmux's own rule
+is the right one: arriving at a window always shows the live screen
+(history stays one wheel-up away).  Re-anchoring point onto the cursor
+also re-arms Eat's scroll-follow, which identifies a following window by
+its point sitting on the cursor.
+
+Runs from `window-buffer-change-functions' (buffer-local), so EVERY way
+a live buffer reaches a window -- the window-switch swap, returning from
+the scrollback pager, `switch-to-buffer', a window-configuration
+restore -- self-heals, with no per-call-site bookkeeping.  Tiled pane
+buffers are skipped: the tiling layer anchors its own windows
+(`tmux-control--anchor-windows-to-screen-top')."
+  (let ((buffer (window-buffer window)))
+    (when (and (buffer-live-p buffer)
+               ;; The buffer-local hook also fires for windows whose buffer
+               ;; did NOT change when some other window on the frame did;
+               ;; only a window actually ARRIVING at this buffer is snapped,
+               ;; so a deliberately scrolled-up live view is not yanked to
+               ;; the bottom by unrelated window traffic elsewhere.
+               (not (eq (window-old-buffer window) buffer)))
+      (with-current-buffer buffer
+        (when (and (derived-mode-p 'tmux-control-mode)
+                   tmux-control--terminal
+                   (eat-term-live-p tmux-control--terminal)
+                   (not (and tmux-control--controller
+                             (buffer-live-p tmux-control--controller)
+                             (buffer-local-value 'tmux-control--tiled
+                                                 tmux-control--controller)))
+                   (fboundp 'eat--synchronize-scroll))
+          (let ((eat-terminal tmux-control--terminal))
+            (eat--synchronize-scroll (list window))))))))
+
 (defun tmux-control--feed-terminal (output)
   "Process decoded terminal OUTPUT into Eat without redisplaying.
 
@@ -4281,6 +4384,11 @@ it asynchronously over the control connection."
               process)
         (setf (eat-term-parameter tmux-control--terminal 'eat--output-process)
               process)
+        ;; This buffer owns no process (the controller does), so Eat's
+        ;; default ":%s" mode-line suffix would permanently read
+        ;; "no process" -- alarming for a perfectly live view.  Keep the
+        ;; rest (the [semi-char] mode indicator), drop the status.
+        (setq mode-line-process (remove ":%s" mode-line-process))
         (when (or tmux-control-window-tab-bar tmux-control-session-activity)
           (setq-local header-line-format
                       '(:eval (tmux-control--header-line))))
