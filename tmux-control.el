@@ -38,6 +38,7 @@
 
 (require 'ansi-color)
 (require 'cl-lib)
+(require 'mwheel)
 (require 'seq)
 (require 'subr-x)
 (require 'eat)
