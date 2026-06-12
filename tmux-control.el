@@ -364,6 +364,13 @@ the block early.")
   "Non-nil after the watchdog has warned about the current stuck episode.
 Cleared when a reply arrives or the queue drains, so one wedge produces
 one warning rather than one per check interval.")
+(defvar-local tmux-control--disconnecting nil
+  "Non-nil while this session's control process is being shut down on purpose.
+Set by `tmux-control-disconnect' (and the kill-buffer teardown) right
+before deleting the process, and consumed by the sentinel: a deliberate
+shutdown stays quiet, while an unexpected death -- a dropped SSH
+connection, a killed tmux server -- announces itself and points at
+`tmux-control-reconnect'.")
 (defvar-local tmux-control--seed-cursor nil
   "Most recent (X . Y) cursor position queried for a screen seed.
 X and Y are tmux's 0-indexed cursor column and row on the visible
@@ -470,6 +477,7 @@ kills, which are deliberate.")
     (define-key map (kbd "C-c C-t") #'tmux-control-toggle-tiling)
     (define-key map (kbd "C-c C-n") #'tmux-control-next-window)
     (define-key map (kbd "C-c C-p") #'tmux-control-previous-window)
+    (define-key map (kbd "C-c C-r") #'tmux-control-reconnect)
     (define-key map (kbd "C-c C-s") #'tmux-control-select-session)
     (define-key map (kbd "C-c C-f") #'tmux-control-toggle-flock)
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
@@ -513,6 +521,7 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     (define-key map (kbd "C-c C-t") #'tmux-control-toggle-tiling)
     (define-key map (kbd "C-c C-n") #'tmux-control-next-window)
     (define-key map (kbd "C-c C-p") #'tmux-control-previous-window)
+    (define-key map (kbd "C-c C-r") #'tmux-control-reconnect)
     (define-key map (kbd "C-c C-s") #'tmux-control-select-session)
     (define-key map (kbd "C-c C-f") #'tmux-control-toggle-flock)
     ;; Route every "paste" gesture to the terminal.  Eat's own map covers
@@ -547,6 +556,7 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     (set-keymap-parent map special-mode-map)
     (define-key map (kbd "g") #'tmux-control-scrollback-refresh)
     (define-key map (kbd "c") #'tmux-control-scrollback-toggle-compaction)
+    (define-key map (kbd "C-c C-r") #'tmux-control-reconnect)
     (define-key map (kbd "C-c C-e") #'tmux-control-live)
     (define-key map (kbd "RET") #'tmux-control-live)
     (define-key map (kbd "q") #'tmux-control-live)
@@ -964,7 +974,44 @@ host/socket first (run it from a session buffer so the host is known)."
   "Disconnect the current tmux-control client."
   (interactive)
   (when (process-live-p tmux-control--process)
+    (let ((ctrl (process-buffer tmux-control--process)))
+      (when (buffer-live-p ctrl)
+        (with-current-buffer ctrl
+          (setq tmux-control--disconnecting t))))
     (delete-process tmux-control--process)))
+
+(defun tmux-control-reconnect ()
+  "Re-establish this session's control connection in place.
+
+The tmux session itself is untouched -- it keeps running server-side;
+only the control client is replaced.  Use this after a dropped SSH
+connection (a closed laptop lid, a network change) or when the
+connection is stuck.  The buffer's saved host, socket and session are
+reused, so there is nothing to re-enter.
+
+Works from the live view, a per-window render buffer, a tiled pane
+buffer, or the scrollback pager."
+  (interactive)
+  (let ((ctrl (cond
+               ((derived-mode-p 'tmux-control-scrollback-mode)
+                (if (buffer-live-p tmux-control--live-buffer)
+                    (with-current-buffer tmux-control--live-buffer
+                      (tmux-control--wb-controller))
+                  ;; The live buffer is gone; the pager still carries the
+                  ;; connection parameters as buffer-locals.
+                  (current-buffer)))
+               ((derived-mode-p 'tmux-control-mode)
+                (tmux-control--wb-controller))
+               (t (user-error "Not in a tmux-control buffer")))))
+    (let ((host (buffer-local-value 'tmux-control--host ctrl))
+          (socket (buffer-local-value 'tmux-control--socket-name ctrl))
+          (session (buffer-local-value 'tmux-control--session ctrl)))
+      (unless session
+        (user-error "No tmux-control session recorded in this buffer"))
+      ;; Replace the current view in place, exactly like the session
+      ;; switcher: a reconnect should never split the frame.
+      (let ((display-buffer-overriding-action '((display-buffer-same-window))))
+        (tmux-control-connect host socket session)))))
 
 (defun tmux-control-clear-and-repaint ()
   "Refresh the live view from the current tmux pane screen."
@@ -2149,6 +2196,12 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
     (tmux-control--teardown-tiling (current-buffer) t))
   (let ((inhibit-read-only t))
     (when (process-live-p tmux-control--process)
+      ;; Detach the sentinel before killing: it runs from the command loop
+      ;; some time AFTER `delete-process', by which point a reconnect has
+      ;; already installed the fresh process -- the stale sentinel would
+      ;; then announce a lost connection and nil out the NEW process
+      ;; variable.  This kill is deliberate; nothing to announce.
+      (set-process-sentinel tmux-control--process #'ignore)
       (delete-process tmux-control--process))
     (remove-hook 'kill-buffer-hook #'tmux-control--kill-process t)
     (erase-buffer)
@@ -2207,6 +2260,8 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
 (defun tmux-control--stop-live-process ()
   "Stop the live tmux control process without killing the tmux session."
   (when (process-live-p tmux-control--process)
+    ;; Deliberate shutdown: keep the deferred sentinel from announcing it.
+    (set-process-sentinel tmux-control--process #'ignore)
     (delete-process tmux-control--process))
   (setq tmux-control--process nil)
   (setq tmux-control--terminal nil)
@@ -3702,7 +3757,17 @@ injected into the pane (see `tmux-control--write-terminal').  Genuine
 user keystrokes arrive outside that dynamic extent and are sent.
 
 The UTF-8 byte stream is split into `tmux-control--send-keys-chunk-bytes'
-chunks so a large paste is not dropped as one over-long `send-keys'."
+chunks so a large paste is not dropped as one over-long `send-keys'.
+
+Typing into a session whose connection has died offers to reconnect:
+keystrokes are the natural thing to try against a dead-looking
+terminal, so make them the recovery path instead of a silent no-op."
+  (when (and (not (process-live-p tmux-control--process))
+             (> (length string) 0)
+             (not tmux-control--suppress-responses)
+             tmux-control--session)
+    (when (y-or-n-p "tmux-control: connection is down; reconnect? ")
+      (tmux-control-reconnect)))
   (when (and (process-live-p tmux-control--process)
              (> (length string) 0)
              (not tmux-control--suppress-responses))
@@ -3802,7 +3867,7 @@ flag reset."
                                    buffer))
               (unless tmux-control--command-watchdog-warned
                 (setq tmux-control--command-watchdog-warned t)
-                (let ((text (format "no reply from tmux for %ds (%d command%s pending) -- connection may be stuck; M-x tmux-control-reconnect to recover"
+                (let ((text (format "no reply from tmux for %ds (%d command%s pending) -- connection may be stuck; C-c C-r reconnects"
                                     (round age)
                                     (length tmux-control--command-queue)
                                     (if (cdr tmux-control--command-queue) "s" ""))))
@@ -4034,9 +4099,20 @@ client (e.g. iTerm2) for the trade-offs."
       ;; render buffers are not left orphaned without a process.
       (when tmux-control--tiled
         (tmux-control--teardown-tiling (current-buffer)))
-      (unless (string-match-p "\\`finished\\|exited" message)
-        (tmux-control--message (string-trim-right message)))
-      (setq tmux-control--process nil))))
+      (let ((deliberate tmux-control--disconnecting))
+        (setq tmux-control--disconnecting nil)
+        (setq tmux-control--process nil)
+        ;; A deliberate disconnect (C-c C-k, buffer teardown) needs no
+        ;; announcement.  Anything else -- a dropped SSH connection, a
+        ;; killed tmux server -- used to die silently here, leaving a
+        ;; dead-looking buffer with no explanation and no way back short
+        ;; of re-running `tmux-control-connect' with all its prompts.
+        ;; Say what happened and name the one-key recovery.
+        (unless deliberate
+          (tmux-control--message
+           (format "connection lost (%s) -- press C-c C-r to reconnect; the tmux session is still running"
+                   (string-trim-right message)))
+          (force-mode-line-update t))))))
 
 (defun tmux-control--kill-process ()
   "Delete the tmux control process and any dependent render buffers."
@@ -4054,6 +4130,9 @@ client (e.g. iTerm2) for the trade-offs."
             (kill-buffer buf))))))
   (setq tmux-control--window-buffers nil)
   (when (process-live-p tmux-control--process)
+    ;; Deliberate teardown (the buffer is being killed); keep the deferred
+    ;; sentinel from writing into whatever buffer reuses the name.
+    (set-process-sentinel tmux-control--process #'ignore)
     (delete-process tmux-control--process)))
 
 (defun tmux-control--message (message)
