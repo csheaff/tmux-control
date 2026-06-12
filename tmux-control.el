@@ -366,11 +366,12 @@ Cleared when a reply arrives or the queue drains, so one wedge produces
 one warning rather than one per check interval.")
 (defvar-local tmux-control--disconnecting nil
   "Non-nil while this session's control process is being shut down on purpose.
-Set by `tmux-control-disconnect' (and the kill-buffer teardown) right
-before deleting the process, and consumed by the sentinel: a deliberate
-shutdown stays quiet, while an unexpected death -- a dropped SSH
-connection, a killed tmux server -- announces itself and points at
-`tmux-control-reconnect'.")
+Set by `tmux-control-disconnect' right before deleting the process and
+consumed by the sentinel: a deliberate disconnect stays quiet, while an
+unexpected death -- a dropped SSH connection, a killed tmux server --
+announces itself and points at `tmux-control-reconnect'.  The other
+deliberate shutdown paths (buffer teardown, a reconnect's reset) detach
+the sentinel entirely instead of setting this flag.")
 (defvar-local tmux-control--seed-cursor nil
   "Most recent (X . Y) cursor position queried for a screen seed.
 X and Y are tmux's 0-indexed cursor column and row on the visible
@@ -4095,24 +4096,34 @@ client (e.g. iTerm2) for the trade-offs."
   "Handle PROCESS exit with MESSAGE."
   (when (buffer-live-p (process-buffer process))
     (with-current-buffer (process-buffer process)
-      ;; If the session died while tiled, tear the tiling down so its pane
-      ;; render buffers are not left orphaned without a process.
-      (when tmux-control--tiled
-        (tmux-control--teardown-tiling (current-buffer)))
-      (let ((deliberate tmux-control--disconnecting))
-        (setq tmux-control--disconnecting nil)
-        (setq tmux-control--process nil)
-        ;; A deliberate disconnect (C-c C-k, buffer teardown) needs no
-        ;; announcement.  Anything else -- a dropped SSH connection, a
-        ;; killed tmux server -- used to die silently here, leaving a
-        ;; dead-looking buffer with no explanation and no way back short
-        ;; of re-running `tmux-control-connect' with all its prompts.
-        ;; Say what happened and name the one-key recovery.
-        (unless deliberate
-          (tmux-control--message
-           (format "connection lost (%s) -- press C-c C-r to reconnect; the tmux session is still running"
-                   (string-trim-right message)))
-          (force-mode-line-update t))))))
+      ;; The sentinel runs deferred from the command loop, so a quick
+      ;; reconnect may already have installed a FRESH process in this
+      ;; buffer by the time a dead process's sentinel fires.  Acting then
+      ;; would nil out the new connection's process variable and print a
+      ;; spurious loss announcement over a live session.  Only the
+      ;; buffer's CURRENT process gets to report its own death.
+      (when (eq process tmux-control--process)
+        ;; If the session died while tiled, tear the tiling down so its
+        ;; pane render buffers are not left orphaned without a process.
+        (when tmux-control--tiled
+          (tmux-control--teardown-tiling (current-buffer)))
+        (let ((deliberate tmux-control--disconnecting))
+          (setq tmux-control--disconnecting nil)
+          (setq tmux-control--process nil)
+          ;; A deliberate disconnect (C-c C-k) needs no announcement.
+          ;; Anything else -- a dropped SSH connection, a killed tmux
+          ;; server -- used to die silently here, leaving a dead-looking
+          ;; buffer with no explanation and no way back short of
+          ;; re-running `tmux-control-connect' with all its prompts.  Say
+          ;; what happened and name the one-key recovery.  (Whether the
+          ;; tmux session survived cannot be known from here -- a dropped
+          ;; link leaves it running, a killed server does not -- so the
+          ;; message is conditional.)
+          (unless deliberate
+            (tmux-control--message
+             (format "connection lost (%s) -- if the tmux session is still running, C-c C-r reconnects"
+                     (string-trim-right message)))
+            (force-mode-line-update t)))))))
 
 (defun tmux-control--kill-process ()
   "Delete the tmux control process and any dependent render buffers."

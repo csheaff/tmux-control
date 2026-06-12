@@ -2424,22 +2424,44 @@ output), :calls (side-effect invocations in order), :active-pane,
   (let ((fake-proc (make-symbol "proc")))
     (cl-letf (((symbol-function 'process-buffer)
                (lambda (_p) (current-buffer))))
-      ;; Unexpected death: announce + point at C-c C-r.
+      ;; Unexpected death: announce + point at C-c C-r.  (The message
+      ;; cannot know whether the tmux session survived, so it must be
+      ;; conditional, not an assertion that it is still running.)
       (with-temp-buffer
         (tmux-control-mode)
-        (setq-local tmux-control--disconnecting nil)
+        (setq-local tmux-control--disconnecting nil
+                    tmux-control--process fake-proc)
         (tmux-control--sentinel fake-proc "exited abnormally with code 255\n")
         (should (string-match-p "connection lost" (buffer-string)))
         (should (string-match-p "C-c C-r" (buffer-string)))
-        (should (string-match-p "still running" (buffer-string))))
+        (should (string-match-p "if the tmux session is still running"
+                                (buffer-string)))
+        (should-not tmux-control--process))
       ;; Deliberate disconnect: quiet.
       (with-temp-buffer
         (tmux-control-mode)
-        (setq-local tmux-control--disconnecting t)
+        (setq-local tmux-control--disconnecting t
+                    tmux-control--process fake-proc)
         (tmux-control--sentinel fake-proc "killed\n")
         (should-not (string-match-p "connection lost" (buffer-string)))
         ;; The flag is consumed: a LATER unexpected death still announces.
         (should-not tmux-control--disconnecting)))))
+
+(ert-deftest tmux-control-test-sentinel-ignores-stale-process ()
+  ;; The sentinel runs deferred, so a dead process's sentinel can fire
+  ;; AFTER a quick reconnect installed a fresh process in the buffer.
+  ;; It must not nil out the new process or announce a loss over a live
+  ;; session -- only the buffer's current process reports its own death.
+  (let ((old-proc (make-symbol "old-proc"))
+        (new-proc (make-symbol "new-proc")))
+    (cl-letf (((symbol-function 'process-buffer)
+               (lambda (_p) (current-buffer))))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (setq-local tmux-control--process new-proc)
+        (tmux-control--sentinel old-proc "exited abnormally with code 255\n")
+        (should (eq tmux-control--process new-proc))
+        (should-not (string-match-p "connection lost" (buffer-string)))))))
 
 (ert-deftest tmux-control-test-dead-connection-typing-offers-reconnect ()
   ;; Keystrokes against a dead connection are the natural recovery

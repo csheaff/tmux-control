@@ -412,8 +412,8 @@ should lean on that.  When the control connection dies out from under you (a
 dropped SSH link, a closed laptop lid, a killed server process), the session
 buffer says so:
 
-    [tmux-control] connection lost (...) -- press C-c C-r to reconnect; the
-    tmux session is still running
+    [tmux-control] connection lost (...) -- if the tmux session is still
+    running, C-c C-r reconnects
 
 `C-c C-r` (`tmux-control-reconnect`) re-establishes the connection in place,
 reusing the buffer's saved host, socket and session — nothing to re-enter,
