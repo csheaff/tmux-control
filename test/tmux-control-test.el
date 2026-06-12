@@ -1071,11 +1071,15 @@ each wrapped in an evolving prompt line and a status bar.")
   ;; Eat's own map only rebinds C-y, M-y, S-insert and mouse yank, so those
   ;; gestures otherwise fall through to plain `yank' and insert into the Eat
   ;; buffer instead of sending to the pane.  tmux-control-mode-map must remap
-  ;; the yank commands to the terminal yank.
-  (should (eq (lookup-key tmux-control-mode-map [remap yank]) 'eat-yank))
-  (should (eq (lookup-key tmux-control-mode-map [remap clipboard-yank]) 'eat-yank))
-  (should (eq (lookup-key tmux-control-mode-map [remap yank-pop])
-              'eat-yank-from-kill-ring)))
+  ;; every paste gesture -- including Eat's own C-y/M-y bindings, via the
+  ;; eat-yank remaps -- to the tmux paste-buffer commands, which let tmux
+  ;; apply bracketed paste exactly when the pane requested it.
+  (dolist (cmd '(yank clipboard-yank eat-yank))
+    (should (eq (lookup-key tmux-control-mode-map (vector 'remap cmd))
+                'tmux-control-yank)))
+  (dolist (cmd '(yank-pop eat-yank-from-kill-ring))
+    (should (eq (lookup-key tmux-control-mode-map (vector 'remap cmd))
+                'tmux-control-yank-from-kill-ring))))
 
 (ert-deftest tmux-control-test-session-window-changed-external-reseeds ()
   ;; A %session-window-changed from an EXTERNAL switch (another client, a tmux
@@ -2373,6 +2377,113 @@ output), :calls (side-effect invocations in order), :active-pane,
         (should resized)
         (should-not tmux-control--size-pin-warned)))))
 
+(ert-deftest tmux-control-test-escape-sends-escape-immediately ()
+  ;; A bare ESC press must reach the pane the moment it is pressed.  In
+  ;; GUI Emacs the unbound `escape' event decays into the meta prefix and
+  ;; waits indefinitely for a second key -- vim's mode switch and an
+  ;; agent TUI's interrupt did nothing until the NEXT keystroke.
+  (should (eq (lookup-key tmux-control-mode-map [escape])
+              #'tmux-control-send-escape))
+  (should (eq (lookup-key tmux-control--override-map [escape])
+              #'tmux-control-send-escape))
+  (let ((sent '()))
+    (cl-letf (((symbol-function 'eat-self-input)
+               (lambda (_n event) (push event sent))))
+      (tmux-control-send-escape)
+      (should (equal sent '(?\e))))))
+
+(ert-deftest tmux-control-test-quote-tmux-data-octal-escapes ()
+  ;; Newlines (and every non-alphanumeric byte) ride control commands as
+  ;; octal escapes inside double quotes -- the one representation tmux's
+  ;; parser decodes that a one-line command can always carry.
+  (let* ((s "ab 1\n$\"\\#{x}\t")
+         (bytes (encode-coding-string s 'utf-8-unix))
+         (quoted (tmux-control--quote-tmux-data bytes 0 (length bytes))))
+    (should (string-prefix-p "\"" quoted))
+    (should (string-suffix-p "\"" quoted))
+    ;; Literal alphanumerics and spaces survive.
+    (should (string-match-p "ab 1" quoted))
+    ;; Newline, dollar, quote, backslash, hash, tab are all octal.
+    (should (string-match-p "\\\\012" quoted))   ; \n
+    (should (string-match-p "\\\\044" quoted))   ; $
+    (should (string-match-p "\\\\042" quoted))   ; "
+    (should (string-match-p "\\\\134" quoted))   ; backslash
+    (should (string-match-p "\\\\043" quoted))   ; #
+    (should (string-match-p "\\\\011" quoted))   ; tab
+    ;; And nothing hazardous remains bare (backslashes appear only as
+    ;; the escape introducer, always followed by three octal digits).
+    (should-not (string-match-p "[$#\n\t]" (substring quoted 1 -1)))
+    (should-not (string-match-p "\\\\[^0-7]" (substring quoted 1 -1)))
+    ;; Stable across calls: the builder must not mutate a shared list
+    ;; literal (the original did, via nreverse -- every paste after the
+    ;; first came out byte-reversed with debris).
+    (should (equal quoted
+                   (tmux-control--quote-tmux-data bytes 0 (length bytes))))
+    (should (equal quoted
+                   (tmux-control--quote-tmux-data bytes 0 (length bytes))))))
+
+(ert-deftest tmux-control-test-paste-rides-tmux-paste-buffer ()
+  ;; Pastes go through set-buffer + paste-buffer -p so that tmux applies
+  ;; bracketed paste exactly when the pane requested it.  A client-side
+  ;; send-keys cannot know that state: a 3-line paste into bash executed
+  ;; line by line (verified live) instead of arriving as one reviewable
+  ;; block.
+  (let ((sent '()))
+    (cl-letf (((symbol-function 'tmux-control--send-command)
+               (lambda (cmd &optional _kind) (push cmd sent))))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (setq-local tmux-control--active-pane "%5")
+        (tmux-control--paste-to-pane "echo one\necho two"))
+      (let ((cmds (nreverse sent)))
+        (should (= 2 (length cmds)))
+        (should (string-match-p "\\`set-buffer -b tmux-control-paste-[0-9]+ \""
+                                (nth 0 cmds)))
+        (should (string-match-p "echo one\\\\012echo two" (nth 0 cmds)))
+        (should (string-match-p
+                 "\\`paste-buffer -p -d -b tmux-control-paste-[0-9]+ -t %5\\'"
+                 (nth 1 cmds)))))))
+
+(ert-deftest tmux-control-test-paste-chunks-large-text ()
+  ;; A paste longer than one command's worth appends with set-buffer -a,
+  ;; in order, before the single paste-buffer delivery.
+  (let ((sent '()))
+    (cl-letf (((symbol-function 'tmux-control--send-command)
+               (lambda (cmd &optional _kind) (push cmd sent))))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (setq-local tmux-control--active-pane "%1")
+        (tmux-control--paste-to-pane (make-string 2500 ?x)))
+      (let ((cmds (nreverse sent)))
+        (should (= 4 (length cmds)))          ; 3 chunks of 1024 + paste
+        (should (string-prefix-p "set-buffer -b" (nth 0 cmds)))
+        (should (string-prefix-p "set-buffer -a -b" (nth 1 cmds)))
+        (should (string-prefix-p "set-buffer -a -b" (nth 2 cmds)))
+        (should (string-prefix-p "paste-buffer -p -d -b" (nth 3 cmds)))))))
+
+(ert-deftest tmux-control-test-char-mode-swaps-override-map ()
+  ;; Char mode exists to send EVERY key to the pane -- C-c above all --
+  ;; but the override emulation map outranks char mode's own keymap, so
+  ;; C-c stayed a prefix there.  The advices swap the full override map
+  ;; for the wheel-only map on entry and restore it on return.
+  (with-temp-buffer
+    (tmux-control-mode)
+    (setq-local tmux-control--keys-active t
+                tmux-control--char-mode-keys nil)
+    ;; Enter char mode (orig-fn stubbed: Eat's own toggling is not under
+    ;; test, the tmux-control gating is).
+    (tmux-control--eat-char-mode-advice #'ignore)
+    (should-not tmux-control--keys-active)
+    (should tmux-control--char-mode-keys)
+    ;; The wheel-only map still handles wheel-up; C-c is NOT bound in it
+    ;; (not even as a prefix), so char mode's own C-c reaches the pane.
+    (should (eq (lookup-key tmux-control--char-mode-map [wheel-up])
+                #'tmux-control-wheel-scroll))
+    (should-not (lookup-key tmux-control--char-mode-map (kbd "C-c")))
+    ;; Back to semi-char: full map restored.
+    (tmux-control--eat-semi-char-mode-advice #'ignore)
+    (should tmux-control--keys-active)
+    (should-not tmux-control--char-mode-keys)))
 (ert-deftest tmux-control-test-snap-to-live-screen-on-arrival ()
   ;; A window ARRIVING at a live render buffer is pointed at the live
   ;; screen.  Emacs restores the window's remembered per-buffer point,
