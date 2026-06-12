@@ -255,6 +255,38 @@ view):
 
 Line numbers are disabled locally in live and scrollback buffers.
 
+## Keys, raw mode, and paste
+
+**ESC reaches the pane the moment you press it.**  Leaving vim's insert
+mode, closing a TUI menu, interrupting an agent — none of it waits for a
+second key.  (Stock GUI Emacs turns an unbound escape into a pending meta
+prefix, so a bare ESC sent nothing until your next keystroke.)
+
+**Sending C-c and friends.**  In the default semi-char mode, `C-c` is the
+Emacs prefix, so interrupting the pane's process is `C-c C-c` — the comint
+convention.  `C-u`, `C-h`, `C-x` and `M-x` likewise stay Emacs keys.  When
+you want the real thing, switch to **char mode**:
+
+- `M-x tmux-control-char-mode` (or Eat's own `C-c M-d`, or click
+  `[semi-char]` in the mode line): **every** key goes to the pane — `C-c`
+  interrupts instantly, `C-u` kills the shell line, `C-r` searches history,
+  exactly like a standalone terminal.
+- `C-M-m` (that's `M-RET`) comes back to semi-char mode.  The mode line
+  shows `[char]` / `[semi-char]`, and the `C-c` command keys (window
+  switching, scrollback, …) apply only in semi-char mode.  The mouse wheel
+  still opens scrollback in both.
+
+**Paste rides tmux's own paste buffer.**  Every paste gesture — `C-y`,
+`M-y`, `Cmd-V`, the Edit menu, middle-click — loads the text into a tmux
+buffer and delivers it with `paste-buffer -p`, so tmux applies **bracketed
+paste** exactly when the pane's program asked for it.  A multi-line paste
+into a modern shell (zsh, bash ≥ 4.4, fish) arrives as one reviewable
+block you confirm with RET, instead of executing line by line on the way
+in; programs that never asked (macOS's stock bash 3.2, plain `cat`) get
+the plain paste they expect.  This is the same mechanism iTerm2's tmux
+integration uses, for the same reason: only tmux knows the pane's
+bracketed-paste state.
+
 ## Opening files from a pane
 
 A tmux-control buffer renders a pane that has its own working directory — and,

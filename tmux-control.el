@@ -472,13 +472,38 @@ kills, which are deliberate.")
     (define-key map (kbd "C-c C-p") #'tmux-control-previous-window)
     (define-key map (kbd "C-c C-s") #'tmux-control-select-session)
     (define-key map (kbd "C-c C-f") #'tmux-control-toggle-flock)
+    (define-key map [escape] #'tmux-control-send-escape)
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
     map)
-  "High-precedence keymap for tmux-control buffers.")
+  "High-precedence keymap for tmux-control buffers.
+Active in semi-char mode (`tmux-control--keys-active').  In char mode it
+is swapped for `tmux-control--char-mode-map' so its C-c chords stop
+shadowing the pane's own C-c.")
+
+(defvar tmux-control--char-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [wheel-up] #'tmux-control-wheel-scroll)
+    map)
+  "High-precedence keymap for tmux-control buffers in char mode.
+Char mode exists to send EVERY key to the pane -- C-c above all, the
+interrupt reflex -- so the full override map's C-c chords must not be
+consulted there.  Only the wheel stays ours: it is not a key the
+application would see, and wheel-up-into-scrollback should work the
+same in both modes (the handler already forwards the event to a
+mouse-grabbing application).")
 
 (defvar tmux-control--emulation-mode-map-alist
-  `((tmux-control--keys-active . ,tmux-control--override-map))
-  "Emulation map alist used to override Eat minor-mode bindings.")
+  `((tmux-control--keys-active . ,tmux-control--override-map)
+    (tmux-control--char-mode-keys . ,tmux-control--char-mode-map))
+  "Emulation map alist used to override Eat minor-mode bindings.
+Exactly one of the two gate variables is non-nil at a time: the full
+override map in semi-char mode, the wheel-only map in char mode.")
+
+(defvar-local tmux-control--char-mode-keys nil
+  "Non-nil while this tmux-control buffer is in Eat char mode.
+Gates `tmux-control--char-mode-map' on, while `tmux-control--keys-active'
+gates the full override map off; toggled by the eat-char-mode /
+eat-semi-char-mode advices.")
 
 (defvar-local tmux-control--windows nil
   "Cached window list for the tab bar.
@@ -515,17 +540,26 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     (define-key map (kbd "C-c C-p") #'tmux-control-previous-window)
     (define-key map (kbd "C-c C-s") #'tmux-control-select-session)
     (define-key map (kbd "C-c C-f") #'tmux-control-toggle-flock)
-    ;; Route every "paste" gesture to the terminal.  Eat's own map covers
-    ;; C-y, M-y, S-insert and mouse yank, but a GUI/macOS paste -- `s-v'
-    ;; (Cmd-V), the `[paste]' event, the Edit > Paste menu -- stays bound to
-    ;; plain `yank', which inserts into the terminal buffer instead of sending
-    ;; to the pane: the text never reaches tmux, leaves stray characters in
-    ;; the buffer, and pasted into a full-screen TUI desyncs Eat.  Remap the
-    ;; yank commands so those gestures go through `eat-yank' (bracketed paste,
-    ;; chunked send-keys to the pane) exactly like C-y already does.
-    (define-key map [remap yank] #'eat-yank)
-    (define-key map [remap clipboard-yank] #'eat-yank)
-    (define-key map [remap yank-pop] #'eat-yank-from-kill-ring)
+    ;; A bare ESC press must reach the pane immediately; see
+    ;; `tmux-control-send-escape'.  Bound here as well as in the override
+    ;; map so it holds in char mode (override map swapped out) and under
+    ;; modal packages whose minor-mode maps would beat the major mode.
+    (define-key map [escape] #'tmux-control-send-escape)
+    ;; Route every "paste" gesture through tmux's own paste buffer.  Eat's
+    ;; map covers C-y, M-y, S-insert and mouse yank, but a GUI/macOS
+    ;; paste -- `s-v' (Cmd-V), the `[paste]' event, the Edit > Paste
+    ;; menu -- stays bound to plain `yank', which inserts into the
+    ;; terminal buffer instead of sending to the pane.  And a client-side
+    ;; send cannot know whether the pane requested bracketed paste, so a
+    ;; multi-line paste executed line by line; tmux knows, so the paste
+    ;; rides `set-buffer' + `paste-buffer -p' (see
+    ;; `tmux-control--paste-to-pane').  The eat-yank remaps catch C-y/M-y
+    ;; through Eat's own minor-mode bindings.
+    (define-key map [remap yank] #'tmux-control-yank)
+    (define-key map [remap clipboard-yank] #'tmux-control-yank)
+    (define-key map [remap eat-yank] #'tmux-control-yank)
+    (define-key map [remap yank-pop] #'tmux-control-yank-from-kill-ring)
+    (define-key map [remap eat-yank-from-kill-ring] #'tmux-control-yank-from-kill-ring)
     ;; Open files at the live pane's own directory (on the pane's host), so
     ;; finding a file from a buffer mirroring a remote pane does not mean
     ;; spelling out a full TRAMP path.  Eat's semi-char mode leaves C-x and
@@ -2127,18 +2161,61 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
     (set-window-margins window 0 0)))
 
 (defun tmux-control--eat-semi-char-mode-advice (orig-fn &rest args)
-  "Make `eat-semi-char-mode' return tmux-control scrollback buffers live."
+  "Make `eat-semi-char-mode' return tmux-control scrollback buffers live.
+In a live tmux-control buffer, also restore the full override keymap
+that char mode swapped out (see `tmux-control--char-mode-keys')."
   (if (derived-mode-p 'tmux-control-scrollback-mode)
       (progn
         (tmux-control-live)
         (unless (bound-and-true-p eat--semi-char-mode)
           (eat-semi-char-mode)))
-    (apply orig-fn args)))
+    (apply orig-fn args)
+    (when (derived-mode-p 'tmux-control-mode)
+      (setq tmux-control--char-mode-keys nil)
+      (setq tmux-control--keys-active t))))
 
 (advice-remove #'eat-semi-char-mode
                #'tmux-control--eat-semi-char-mode-advice)
 (advice-add #'eat-semi-char-mode
             :around #'tmux-control--eat-semi-char-mode-advice)
+
+(defun tmux-control--eat-char-mode-advice (orig-fn &rest args)
+  "Adapt `eat-char-mode' to tmux-control buffers.
+Eat's char mode exists to send EVERY key to the terminal -- C-c, C-x,
+C-u, C-h and all -- leaving only `C-M-m' (M-RET) to come back to
+semi-char mode.  That almost worked here out of the box, except the
+tmux-control override keymap is an EMULATION map, which outranks char
+mode's own keymap: C-c stayed a prefix, breaking precisely the key
+char mode is most reached for (the interrupt).  Swap the override map
+for the wheel-only `tmux-control--char-mode-map' while char mode is on;
+`eat-semi-char-mode' restores it.  In a scrollback pager, char mode
+means \"get me back to the live terminal, raw\": return live first,
+then enter char mode there."
+  (if (derived-mode-p 'tmux-control-scrollback-mode)
+      (progn
+        (tmux-control-live)
+        (unless (bound-and-true-p eat--char-mode)
+          (eat-char-mode)))
+    (apply orig-fn args)
+    (when (derived-mode-p 'tmux-control-mode)
+      (setq tmux-control--keys-active nil)
+      (setq tmux-control--char-mode-keys t))))
+
+(advice-remove #'eat-char-mode
+               #'tmux-control--eat-char-mode-advice)
+(advice-add #'eat-char-mode
+            :around #'tmux-control--eat-char-mode-advice)
+
+(defun tmux-control-char-mode ()
+  "Switch the live buffer to char mode: every key goes to the pane.
+C-c interrupts, C-u kills the shell line, C-x and M-x reach the
+application -- raw terminal feel, exactly like a standalone terminal
+emulator.  `C-M-m' (M-RET) returns to semi-char mode, where C-c is the
+tmux-control/Emacs prefix again.  This is Eat's own char mode, adapted
+so the tmux-control keys get out of the way; the mode line shows
+[char] / [semi-char]."
+  (interactive)
+  (eat-char-mode))
 
 (defun tmux-control--reset-buffer ()
   "Reset the current buffer for a fresh tmux-control session."
@@ -2158,6 +2235,7 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
                       (delq tmux-control--emulation-mode-map-alist
                             emulation-mode-map-alists)))
     (setq tmux-control--keys-active t)
+    (setq tmux-control--char-mode-keys nil)
     (setq tmux-control--accumulator "")
     (setq tmux-control--display-dirty nil)
     (setq tmux-control--output-batch nil)
@@ -2212,6 +2290,7 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
   (setq tmux-control--terminal nil)
   (setq eat-terminal nil)
   (setq tmux-control--keys-active nil)
+  (setq tmux-control--char-mode-keys nil)
   (remove-hook 'kill-buffer-hook #'tmux-control--kill-process t))
 
 (defun tmux-control--command (host socket-name session)
@@ -3736,6 +3815,94 @@ expects."
   "Return STRING encoded as space-separated UTF-8 hexadecimal bytes."
   (let ((bytes (encode-coding-string string 'utf-8-unix)))
     (tmux-control--bytes-to-hex-args bytes 0 (length bytes))))
+
+(defun tmux-control-send-escape ()
+  "Send a literal ESC to the pane, immediately.
+In a graphical Emacs the escape key is otherwise translated into the
+meta prefix and sits there waiting for a second key -- so a bare ESC
+press sent NOTHING to the pane until the next keystroke.  ESC is the
+most reflexive key a terminal has after C-c: it leaves vim's insert
+mode, cancels a TUI's menu, interrupts an agent.  Send it the moment
+it is pressed, like any terminal would.  (In a tty Emacs the escape
+key never generates this `escape' event, so terminal Meta sequences
+are unaffected.)"
+  (interactive)
+  (eat-self-input 1 ?\e))
+
+(defconst tmux-control--paste-buffer-chunk-bytes 1024
+  "Maximum UTF-8 bytes per `set-buffer' control command when pasting.
+The escaped data is at most four characters per byte, keeping each
+command line comfortably inside tmux's limits; longer pastes append
+with `set-buffer -a'.")
+
+(defun tmux-control--quote-tmux-data (bytes start end)
+  "Return BYTES from START to END as a double-quoted tmux argument.
+Alphanumerics and spaces are literal; every other byte is an octal
+escape, which tmux's double-quote parser decodes -- including newlines,
+which could never ride a one-line control command literally.  Escaping
+everything else sidesteps the parser's specials ($ expansion, #{}
+formats, quotes, backslashes) wholesale."
+  ;; NB freshly consed list, never a quoted literal: the `nreverse' below
+  ;; would destructively rewire a shared literal, corrupting every later
+  ;; call (first paste fine, second reversed -- found live).
+  (let ((parts (list "\""))
+        (i start))
+    (while (< i end)
+      (let ((b (aref bytes i)))
+        (push (if (or (<= ?a b ?z) (<= ?A b ?Z) (<= ?0 b ?9) (= b ?\s))
+                  (string b)
+                (format "\\%03o" b))
+              parts))
+      (setq i (1+ i)))
+    (push "\"" parts)
+    (apply #'concat (nreverse parts))))
+
+(defun tmux-control--paste-to-pane (text)
+  "Paste TEXT into the active pane through tmux's own paste buffer.
+Loads TEXT into a named tmux buffer (chunked `set-buffer'/-a appends)
+and delivers it with `paste-buffer -p -d': tmux then applies bracketed
+paste exactly when the pane's application has requested it -- so a
+multi-line paste into a modern shell arrives as one reviewable block
+instead of executing line by line -- and translates linefeeds for the
+pane like any terminal paste.  This is how iTerm2's tmux integration
+pastes, and the reason is the same: the client cannot know the pane's
+bracketed-paste state, but tmux does."
+  (when (> (length text) 0)
+    (let ((target (or tmux-control--active-pane tmux-control--fallback-target)))
+      (if (not target)
+          (tmux-control--message "No active tmux pane yet")
+        (let* ((bytes (encode-coding-string text 'utf-8-unix))
+               (n (length bytes))
+               (size tmux-control--paste-buffer-chunk-bytes)
+               (name (format "tmux-control-paste-%d" (emacs-pid)))
+               (i 0))
+          (while (< i n)
+            (let ((end (min n (+ i size))))
+              (tmux-control--send-command
+               (format "set-buffer %s-b %s %s"
+                       (if (zerop i) "" "-a ")
+                       name
+                       (tmux-control--quote-tmux-data bytes i end)))
+              (setq i end)))
+          (tmux-control--send-command
+           (format "paste-buffer -p -d -b %s -t %s" name target)))))))
+
+(defun tmux-control-yank (&optional _arg)
+  "Paste the most recent kill into the pane via tmux's paste buffer.
+Replaces `eat-yank' (and the remapped `yank'/`clipboard-yank' GUI
+gestures) in tmux-control buffers so that bracketed paste is decided by
+tmux, which knows the pane's state; see `tmux-control--paste-to-pane'."
+  (interactive "P")
+  (when-let* ((text (current-kill 0)))
+    (tmux-control--paste-to-pane text)))
+
+(defun tmux-control-yank-from-kill-ring (string &optional _arg)
+  "Choose STRING from the kill ring and paste it into the pane.
+The pane-side paste goes through tmux's paste buffer, exactly like
+`tmux-control-yank'."
+  (interactive (list (read-from-kill-ring "Yank to pane from kill-ring: ")
+                     current-prefix-arg))
+  (tmux-control--paste-to-pane string))
 
 (defun tmux-control--send-command (command &optional kind)
   "Send tmux control mode COMMAND.
