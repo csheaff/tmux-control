@@ -2489,6 +2489,111 @@ output), :calls (side-effect invocations in order), :active-pane,
       (when (buffer-live-p made)
         (let ((kill-buffer-query-functions nil)) (kill-buffer made)))
       (kill-buffer ctrl))))
+(ert-deftest tmux-control-test-reconnect-reuses-saved-parameters ()
+  ;; `tmux-control-reconnect' re-runs the connect with the buffer's own
+  ;; saved host/socket/session -- nothing to re-enter after a dropped link.
+  (let ((calls '()))
+    (cl-letf (((symbol-function 'tmux-control-connect)
+               (lambda (host socket session)
+                 (push (list host socket session) calls))))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (setq-local tmux-control--host "aurora"
+                    tmux-control--socket-name "main"
+                    tmux-control--session "dev")
+        (tmux-control-reconnect))
+      (should (equal calls '(("aurora" "main" "dev")))))))
+
+(ert-deftest tmux-control-test-reconnect-hops-to-controller ()
+  ;; From a per-window render buffer the reconnect must use the
+  ;; controller's parameters (the render buffer shares them, but the
+  ;; controller is authoritative).
+  (let ((calls '()))
+    (cl-letf (((symbol-function 'tmux-control-connect)
+               (lambda (host socket session)
+                 (push (list host socket session) calls))))
+      (let ((ctrl (generate-new-buffer " *tc-test-ctrl*")))
+        (unwind-protect
+            (progn
+              (with-current-buffer ctrl
+                (tmux-control-mode)
+                (setq-local tmux-control--host nil
+                            tmux-control--socket-name "sock"
+                            tmux-control--session "sess"))
+              (with-temp-buffer
+                (tmux-control-mode)
+                (setq-local tmux-control--controller ctrl)
+                (tmux-control-reconnect))
+              (should (equal calls '((nil "sock" "sess")))))
+          (kill-buffer ctrl))))))
+
+(ert-deftest tmux-control-test-reconnect-outside-session-errors ()
+  (with-temp-buffer
+    (fundamental-mode)
+    (should-error (tmux-control-reconnect) :type 'user-error)))
+
+(ert-deftest tmux-control-test-sentinel-announces-only-unexpected-death ()
+  ;; An SSH drop (or killed server) must say what happened and name the
+  ;; recovery key; a deliberate disconnect must stay quiet.  Before this,
+  ;; the polarity was reversed: deliberate kills printed noise ("deleted")
+  ;; while a real "exited abnormally with code 255" died in silence.
+  (let ((fake-proc (make-symbol "proc")))
+    (cl-letf (((symbol-function 'process-buffer)
+               (lambda (_p) (current-buffer))))
+      ;; Unexpected death: announce + point at C-c C-r.  (The message
+      ;; cannot know whether the tmux session survived, so it must be
+      ;; conditional, not an assertion that it is still running.)
+      (with-temp-buffer
+        (tmux-control-mode)
+        (setq-local tmux-control--disconnecting nil
+                    tmux-control--process fake-proc)
+        (tmux-control--sentinel fake-proc "exited abnormally with code 255\n")
+        (should (string-match-p "connection lost" (buffer-string)))
+        (should (string-match-p "C-c C-r" (buffer-string)))
+        (should (string-match-p "if the tmux session is still running"
+                                (buffer-string)))
+        (should-not tmux-control--process))
+      ;; Deliberate disconnect: quiet.
+      (with-temp-buffer
+        (tmux-control-mode)
+        (setq-local tmux-control--disconnecting t
+                    tmux-control--process fake-proc)
+        (tmux-control--sentinel fake-proc "killed\n")
+        (should-not (string-match-p "connection lost" (buffer-string)))
+        ;; The flag is consumed: a LATER unexpected death still announces.
+        (should-not tmux-control--disconnecting)))))
+
+(ert-deftest tmux-control-test-sentinel-ignores-stale-process ()
+  ;; The sentinel runs deferred, so a dead process's sentinel can fire
+  ;; AFTER a quick reconnect installed a fresh process in the buffer.
+  ;; It must not nil out the new process or announce a loss over a live
+  ;; session -- only the buffer's current process reports its own death.
+  (let ((old-proc (make-symbol "old-proc"))
+        (new-proc (make-symbol "new-proc")))
+    (cl-letf (((symbol-function 'process-buffer)
+               (lambda (_p) (current-buffer))))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (setq-local tmux-control--process new-proc)
+        (tmux-control--sentinel old-proc "exited abnormally with code 255\n")
+        (should (eq tmux-control--process new-proc))
+        (should-not (string-match-p "connection lost" (buffer-string)))))))
+
+(ert-deftest tmux-control-test-dead-connection-typing-offers-reconnect ()
+  ;; Keystrokes against a dead connection are the natural recovery
+  ;; gesture; they must offer to reconnect instead of vanishing.
+  (let ((offered nil) (reconnected nil))
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (_prompt) (setq offered t) t))
+              ((symbol-function 'tmux-control-reconnect)
+               (lambda () (setq reconnected t))))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (setq-local tmux-control--session "dev"
+                    tmux-control--process nil)
+        (tmux-control--send-input nil "x")
+        (should offered)
+        (should reconnected)))))
 
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
