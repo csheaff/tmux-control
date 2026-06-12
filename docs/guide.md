@@ -51,6 +51,13 @@ bound in the live buffer; the rest are `M-x`, bind them to taste):
   with windows you actually visit.  Set the option to nil for the old
   repaint-in-place behavior (a switch then discards the previous window's
   scrollback).
+
+  Arriving at a window always shows its **live screen** (tmux's own rule;
+  the history above stays one wheel-up away) — however the buffer reaches
+  the window: the switch commands, returning from scrollback, a plain
+  `C-x b`, a window-configuration restore.  Without this, Emacs would
+  restore the window's remembered position in the buffer, which a window
+  that kept streaming in the background has long since outgrown.
 - `M-x tmux-control-new-window` creates a window (optionally named) and
   switches to it.
 - `M-x tmux-control-rename-window` renames a window, with completion over
@@ -253,6 +260,9 @@ view):
   pane shows its normal screen); a full-screen app that genuinely owns the
   alternate screen keeps its own wheel scrolling instead.  Disable with
   `(setq tmux-control-wheel-enters-scrollback nil)`.
+- **Scrolling back down to the bottom returns to the live view** — tmux's own
+  copy-mode rule: the gesture that took you into history takes you back out,
+  no key to remember.  `ESC` also returns to the live view.
 
 Line numbers are disabled locally in live and scrollback buffers.
 
