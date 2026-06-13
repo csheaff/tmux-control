@@ -491,7 +491,9 @@ kills, which are deliberate.")
     (define-key map (kbd "C-c C-r") #'tmux-control-reconnect)
     (define-key map (kbd "C-c C-s") #'tmux-control-select-session)
     (define-key map (kbd "C-c C-f") #'tmux-control-toggle-flock)
-    (define-key map [escape] #'tmux-control-send-escape)
+    ;; NB: ESC is deliberately NOT bound here.  It belongs in the major
+    ;; mode map (low precedence) so a modal package's own ESC binding
+    ;; wins -- see `tmux-control-mode-map'.
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
     map)
   "High-precedence keymap for tmux-control buffers.
@@ -560,10 +562,15 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     (define-key map (kbd "C-c C-r") #'tmux-control-reconnect)
     (define-key map (kbd "C-c C-s") #'tmux-control-select-session)
     (define-key map (kbd "C-c C-f") #'tmux-control-toggle-flock)
-    ;; A bare ESC press must reach the pane immediately; see
-    ;; `tmux-control-send-escape'.  Bound here as well as in the override
-    ;; map so it holds in char mode (override map swapped out) and under
-    ;; modal packages whose minor-mode maps would beat the major mode.
+    ;; A bare ESC press should reach the pane immediately; see
+    ;; `tmux-control-send-escape'.  Bound ONLY here, in the major mode
+    ;; map, on purpose: a modal package (xah-fly-keys, evil, viper) that
+    ;; binds ESC to leave insert mode installs it in a minor-mode map,
+    ;; which outranks the major mode map -- so for those users ESC keeps
+    ;; switching modes (the regression this placement fixes), while for
+    ;; everyone else, where nothing else claims ESC, it sends to the pane.
+    ;; It must NOT go in `tmux-control--override-map' (an emulation map):
+    ;; that beats minor-mode maps and would swallow the modal binding.
     (define-key map [escape] #'tmux-control-send-escape)
     ;; Route every "paste" gesture through tmux's own paste buffer.  Eat's
     ;; map covers C-y, M-y, S-insert and mouse yank, but a GUI/macOS
@@ -4157,7 +4164,14 @@ most reflexive key a terminal has after C-c: it leaves vim's insert
 mode, cancels a TUI's menu, interrupts an agent.  Send it the moment
 it is pressed, like any terminal would.  (In a tty Emacs the escape
 key never generates this `escape' event, so terminal Meta sequences
-are unaffected.)"
+are unaffected.)
+
+Bound only in `tmux-control-mode-map', the major mode map, so a modal
+package that binds ESC to leave insert mode (xah-fly-keys, evil, viper)
+keeps it: those bindings live in a minor-mode map, which outranks the
+major mode map.  For such users the ESC key switches modes rather than
+reaching the pane; to send ESC to the pane they bind this command to a
+free key, or use char mode (where every key goes to the pane)."
   (interactive)
   (eat-self-input 1 ?\e))
 

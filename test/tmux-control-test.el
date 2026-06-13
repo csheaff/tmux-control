@@ -2378,19 +2378,55 @@ output), :calls (side-effect invocations in order), :active-pane,
         (should-not tmux-control--size-pin-warned)))))
 
 (ert-deftest tmux-control-test-escape-sends-escape-immediately ()
-  ;; A bare ESC press must reach the pane the moment it is pressed.  In
+  ;; A bare ESC press should reach the pane the moment it is pressed.  In
   ;; GUI Emacs the unbound `escape' event decays into the meta prefix and
   ;; waits indefinitely for a second key -- vim's mode switch and an
-  ;; agent TUI's interrupt did nothing until the NEXT keystroke.
+  ;; agent TUI's interrupt did nothing until the NEXT keystroke.  It is
+  ;; bound in the major mode map ONLY: a modal package's ESC binding
+  ;; (xah-fly-keys/evil/viper, in a minor-mode map) must keep winning, so
+  ;; ESC must NOT sit in the high-precedence emulation override map (a
+  ;; regression that swallowed xah-fly-keys' command-mode-activate).
   (should (eq (lookup-key tmux-control-mode-map [escape])
               #'tmux-control-send-escape))
-  (should (eq (lookup-key tmux-control--override-map [escape])
-              #'tmux-control-send-escape))
+  (should-not (lookup-key tmux-control--override-map [escape]))
   (let ((sent '()))
     (cl-letf (((symbol-function 'eat-self-input)
                (lambda (_n event) (push event sent))))
       (tmux-control-send-escape)
       (should (equal sent '(?\e))))))
+
+(defvar tmux-control-test--fake-modal nil
+  "Stands in for a modal minor mode in the ESC precedence test.")
+
+(ert-deftest tmux-control-test-escape-yields-to-minor-mode-map ()
+  ;; The regression was about keymap PRECEDENCE, not which map names the
+  ;; binding: ESC lived in an emulation map, which outranks minor-mode
+  ;; maps, so a modal package's ESC binding lost.  Exercise the live
+  ;; `key-binding' resolution through the full stack a real buffer has --
+  ;; emulation override (active in semi-char mode) over minor-mode maps
+  ;; over the major mode map -- so reintroducing ESC into the override
+  ;; map fails here even though the static binding would still "look"
+  ;; right.
+  (let* ((sentinel (lambda () (interactive) 'modal-switch))
+         (modal-map (let ((m (make-sparse-keymap)))
+                      (define-key m [escape] sentinel)
+                      m)))
+    (with-temp-buffer
+      (tmux-control-mode)
+      ;; Reproduce a live buffer: the override emulation map is active.
+      (setq-local emulation-mode-map-alists
+                  (cons tmux-control--emulation-mode-map-alist
+                        emulation-mode-map-alists))
+      (setq tmux-control--keys-active t)
+      (let ((minor-mode-map-alist
+             (cons (cons 'tmux-control-test--fake-modal modal-map)
+                   minor-mode-map-alist)))
+        ;; Modal package active: its minor-mode ESC wins.
+        (setq tmux-control-test--fake-modal t)
+        (should (eq (key-binding [escape]) sentinel))
+        ;; No modal package: ESC falls through to the pane.
+        (setq tmux-control-test--fake-modal nil)
+        (should (eq (key-binding [escape]) #'tmux-control-send-escape))))))
 
 (ert-deftest tmux-control-test-quote-tmux-data-octal-escapes ()
   ;; Newlines (and every non-alphanumeric byte) ride control commands as
