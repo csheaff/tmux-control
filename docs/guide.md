@@ -268,15 +268,16 @@ Line numbers are disabled locally in live and scrollback buffers.
 
 ## Keys, raw mode, and paste
 
-**ESC reaches the pane the moment you press it.**  Leaving vim's insert
-mode, closing a TUI menu, interrupting an agent — none of it waits for a
-second key.  (Stock GUI Emacs turns an unbound escape into a pending meta
-prefix, so a bare ESC sent nothing until your next keystroke.)  This is a
-low-precedence default: a modal package that binds ESC to leave insert
-mode — xah-fly-keys, evil, viper — keeps it, because those bindings sit
-in a minor-mode map that outranks tmux-control's major-mode map.  Such
-users switch modes with ESC as usual and reach the pane's own ESC through
-their config (or char mode below).
+**By default, ESC reaches the pane the moment you press it** — leaving
+vim's insert mode, closing a TUI menu, interrupting an agent, with no
+wait for a second key.  (Stock GUI Emacs turns an unbound escape into a
+pending meta prefix, so a bare ESC sent nothing until your next
+keystroke.)  This is a low-precedence default: a modal package that binds
+ESC to leave insert mode — xah-fly-keys, evil, viper — keeps it, because
+those bindings sit in a minor-mode map that outranks tmux-control's
+major-mode map.  For those users the ESC key switches modes as usual; to
+send ESC to the pane they bind `tmux-control-send-escape` to a free key,
+or use char mode (below), where every key goes to the pane.
 
 **Sending C-c and friends.**  In the default semi-char mode, `C-c` is the
 Emacs prefix, so interrupting the pane's process is `C-c C-c` — the comint

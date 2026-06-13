@@ -4169,8 +4169,9 @@ are unaffected.)
 Bound only in `tmux-control-mode-map', the major mode map, so a modal
 package that binds ESC to leave insert mode (xah-fly-keys, evil, viper)
 keeps it: those bindings live in a minor-mode map, which outranks the
-major mode map.  Such users send ESC to the pane through their own
-config (e.g. an insert-mode keymap entry) rather than this command."
+major mode map.  For such users the ESC key switches modes rather than
+reaching the pane; to send ESC to the pane they bind this command to a
+free key, or use char mode (where every key goes to the pane)."
   (interactive)
   (eat-self-input 1 ?\e))
 
