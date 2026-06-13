@@ -2582,8 +2582,11 @@ output), :calls (side-effect invocations in order), :active-pane,
 (ert-deftest tmux-control-test-scrollback-wheel-down-exits-at-bottom ()
   ;; tmux copy-mode parity: scrolling back down to the bottom of the
   ;; pager leaves scrollback -- the gesture that took you in takes you
-  ;; back out.  Above the bottom the event re-dispatches to the user's
-  ;; normal scrolling.
+  ;; back out.  But ONLY after the user has scrolled up into history: you
+  ;; enter by scrolling up, so the pager opens at the bottom, and a
+  ;; wheel-down right then (the up-flick's momentum tail, or one arriving
+  ;; while the "capturing…" placeholder makes the bottom trivially
+  ;; visible) must NOT bounce straight back out (field report: a loop).
   (let ((lived 0) (dispatched 0) (at-bottom t))
     (cl-letf (((symbol-function 'tmux-control-live)
                (lambda () (cl-incf lived)))
@@ -2598,18 +2601,28 @@ output), :calls (side-effect invocations in order), :active-pane,
         (with-temp-buffer
           (tmux-control-scrollback-mode)
           (let ((inhibit-read-only t)) (insert "history line\n"))
+          (setq-local tmux-control--scrollback-left-bottom nil)
           (set-window-buffer (selected-window) (current-buffer))
-          ;; Bottom visible: return to live.
+          ;; Fresh pager, at the bottom, never scrolled up: a wheel-down
+          ;; does NOT leave -- it scrolls (a no-op on a short buffer).
           (tmux-control-scrollback-wheel-down
            (list 'wheel-down (list (selected-window))))
-          (should (= lived 1))
-          (should (= dispatched 0))
-          ;; Bottom out of view: normal scroll.
+          (should (= lived 0))
+          (should (= dispatched 1))
+          ;; Scroll up off the bottom: normal scroll, and now the pager
+          ;; remembers it has left the bottom.
           (setq at-bottom nil)
           (tmux-control-scrollback-wheel-down
            (list 'wheel-down (list (selected-window))))
+          (should (= lived 0))
+          (should (= dispatched 2))
+          (should tmux-control--scrollback-left-bottom)
+          ;; Back down to the bottom after viewing history: NOW it leaves.
+          (setq at-bottom t)
+          (tmux-control-scrollback-wheel-down
+           (list 'wheel-down (list (selected-window))))
           (should (= lived 1))
-          (should (= dispatched 1)))))))
+          (should (= dispatched 2)))))))
 
 (ert-deftest tmux-control-test-window-buffer-mode-line-drops-process-status ()
   ;; A per-window render buffer owns no process (the controller does);
