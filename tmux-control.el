@@ -345,6 +345,15 @@ is treated as stale and cleared, so a self-initiated reseed that produced no
   "(WIDTH . HEIGHT) the scrollback view was last captured for, or nil.")
 (defvar-local tmux-control--scrollback-resize-timer nil
   "Debounce timer for re-capturing scrollback after a window resize.")
+(defvar-local tmux-control--scrollback-left-bottom nil
+  "Non-nil once the scrollback pager has been scrolled up off the bottom.
+You enter the pager by scrolling UP, so it opens at the bottom; the
+wheel-down-leaves-to-live rule must not fire until you have actually
+moved up into history and are scrolling back down -- otherwise a
+wheel-down right after entering (or while the capture is still pending,
+when the one-line \"capturing…\" placeholder makes the bottom trivially
+visible) bounces you straight back to the live view.  Reset when the
+pager opens.")
 (defvar-local tmux-control--command-queue nil
   "Pending control-mode command entries, oldest first.
 Each entry is a cons (KIND . SEND-TIME): the reply-handler kind enqueued
@@ -2150,6 +2159,9 @@ the live interactive pane."
         (setq-local tmux-control--scrollback-target target)
         (setq-local tmux-control--capture-trailing-p trailing)
         (setq-local tmux-control--live-buffer live-buffer)
+        ;; Fresh pager: not yet scrolled up into history, so a wheel-down
+        ;; cannot leave to live yet (see `tmux-control-scrollback-wheel-down').
+        (setq-local tmux-control--scrollback-left-bottom nil)
         ;; Keep the window tabs visible.  Hide the text cursor in this read-only
         ;; history pager: point pins at the bottom and, under pixel-scroll
         ;; (point does not move on wheel), the cursor scrolls off-screen and
@@ -2305,24 +2317,43 @@ user's configured wheel behavior; route the event back to it."
 
 (defun tmux-control-scrollback-wheel-down (event)
   "Scroll the pager down; from the bottom, return to the live view.
-This is tmux's own copy-mode rule: scrolling back down to the bottom
-of history leaves scrollback and you are live again -- no key to
-remember, the gesture that took you in takes you back out.  Above the
-bottom, the wheel scrolls as it always did (EVENT is re-dispatched to
-the user's configured scrolling, pixel-precision included)."
+This is tmux's own copy-mode rule: scrolling back down to the bottom of
+history leaves scrollback and you are live again -- no key to remember,
+the gesture that took you in takes you back out.
+
+But you ENTER the pager by scrolling up, so it opens at the bottom; the
+leave-to-live step only fires once you have actually scrolled up into
+history and are scrolling back down (`tmux-control--scrollback-left-bottom').
+Otherwise a wheel-down right after entering -- the momentum tail of the
+up-flick, a stray tick, or one arriving while the capture is still
+pending and the one-line \"capturing…\" placeholder makes the bottom
+trivially visible -- would bounce you straight back out, repeatedly
+\(field report: an apparent loop).
+
+Above the bottom, the wheel scrolls as it always did (EVENT is
+re-dispatched to the user's configured scrolling, pixel-precision
+included)."
   (interactive "e")
   (let ((window (posn-window (event-start event))))
-    (if (and (window-live-p window)
-             (with-current-buffer (window-buffer window)
-               (and (derived-mode-p 'tmux-control-scrollback-mode)
-                    ;; "At the bottom" must count a PARTIALLY visible last
-                    ;; line: pixel-precision scrolling routinely parks the
-                    ;; window with the final line a few pixels clipped, and
-                    ;; `pos-visible-in-window-p' answers nil there forever.
-                    (>= (window-end window t) (point-max)))))
+    (if (window-live-p window)
         (with-selected-window window
           (with-current-buffer (window-buffer window)
-            (tmux-control-live)))
+            ;; "At the bottom" must count a PARTIALLY visible last line:
+            ;; pixel-precision scrolling routinely parks the window with the
+            ;; final line a few pixels clipped, and `pos-visible-in-window-p'
+            ;; answers nil there forever.
+            (if (and (derived-mode-p 'tmux-control-scrollback-mode)
+                     (>= (window-end window t) (point-max)))
+                (if tmux-control--scrollback-left-bottom
+                    (tmux-control-live)
+                  ;; At the bottom but never left it: do not leave; let the
+                  ;; wheel scroll (a no-op on a buffer this short).
+                  (tmux-control--dispatch-wheel event))
+              ;; Above the bottom -- viewing history.  Remember it, so a
+              ;; later wheel-down that reaches the bottom leaves.
+              (when (derived-mode-p 'tmux-control-scrollback-mode)
+                (setq tmux-control--scrollback-left-bottom t))
+              (tmux-control--dispatch-wheel event))))
       (tmux-control--dispatch-wheel event))))
 
 (defun tmux-control--alt-screen-effective-p (honored eat-alt-display-p)
