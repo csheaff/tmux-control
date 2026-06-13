@@ -2706,5 +2706,242 @@ output), :calls (side-effect invocations in order), :active-pane,
         (should offered)
         (should reconnected)))))
 
+(ert-deftest tmux-control-test-pane-changed-foreign-window-leaves-buffer-alone ()
+  ;; %window-pane-changed for an UNVISITED other window (no render buffer
+  ;; yet) must not retarget this buffer.  tmux-control-new-window emits
+  ;; this for the created window BEFORE the %session-window-changed that
+  ;; builds its buffer; adopting that pane aimed the controller at a
+  ;; foreign pane, and when the window later closed (an agent's task
+  ;; window) the controller was stranded on a DEAD pane -- empty screen,
+  ;; keystrokes into "can't find pane" -- and window switches did not
+  ;; heal it (chaos-soak find).
+  (let ((seeded 0) (map-refreshed 0))
+    (cl-letf (((symbol-function 'tmux-control--seed-screen)
+               (lambda () (cl-incf seeded)))
+              ((symbol-function 'tmux-control--refresh-alt-screen-option)
+               #'ignore)
+              ((symbol-function 'tmux-control--refresh-pane-size) #'ignore)
+              ((symbol-function 'tmux-control--refresh-pane-window-map)
+               (lambda () (cl-incf map-refreshed))))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (let ((tmux-control-window-buffers t))
+          (setq-local tmux-control--window-id "@2"
+                      tmux-control--active-pane "%2"
+                      tmux-control--window-buffers nil
+                      tmux-control--collecting-command nil)
+          ;; Foreign window @7: pane stays ours, map refreshed, no reseed.
+          (tmux-control--handle-line "%window-pane-changed @7 %9")
+          (should (equal tmux-control--active-pane "%2"))
+          (should (= seeded 0))
+          (should (= map-refreshed 1))
+          ;; Our own window @2: follow the pane change.
+          (tmux-control--handle-line "%window-pane-changed @2 %5")
+          (should (equal tmux-control--active-pane "%5"))
+          (should (= seeded 1)))))))
+
+(ert-deftest tmux-control-test-pane-changed-legacy-mode-follows-unconditionally ()
+  ;; With per-window buffers OFF the single view mirrors the session and
+  ;; has always followed %window-pane-changed unconditionally -- a
+  ;; load-bearing affordance (it is how cross-window select-pane jumps
+  ;; worked); the foreign-window guard must not change it.
+  (let ((seeded 0))
+    (cl-letf (((symbol-function 'tmux-control--seed-screen)
+               (lambda () (cl-incf seeded)))
+              ((symbol-function 'tmux-control--refresh-alt-screen-option)
+               #'ignore)
+              ((symbol-function 'tmux-control--refresh-pane-size) #'ignore))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (let ((tmux-control-window-buffers nil))
+          (setq-local tmux-control--window-id "@2"
+                      tmux-control--active-pane "%2"
+                      tmux-control--collecting-command nil)
+          (tmux-control--handle-line "%window-pane-changed @7 %9")
+          (should (equal tmux-control--active-pane "%9"))
+          (should (= seeded 1)))))))
+
+(ert-deftest tmux-control-test-new-and-kill-window-skip-pane-requery-when-gated ()
+  ;; With per-window buffers the echoed %session-window-changed swaps the
+  ;; display; re-querying the active pane would aim THIS buffer at the
+  ;; new window's pane while it still renders its own window -- the same
+  ;; foreign-pane corruption, through the :pane-id reply.  The window
+  ;; switch commands already gate this; new-window and kill-window must
+  ;; too.
+  (let ((requeried 0) (quieted 0) (sent '()))
+    (cl-letf (((symbol-function 'tmux-control--refresh-active-pane)
+               (lambda (&optional _self) (cl-incf requeried)))
+              ((symbol-function 'tmux-control--quiet-activity)
+               (lambda (&optional _secs) (cl-incf quieted)))
+              ((symbol-function 'tmux-control--ensure-live) #'ignore)
+              ((symbol-function 'tmux-control--send-command)
+               (lambda (cmd &optional _kind) (push cmd sent)))
+              ((symbol-function 'yes-or-no-p) (lambda (_) t)))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (setq-local tmux-control--session "s")
+        (let ((tmux-control-window-buffers t))
+          (tmux-control-new-window "agent")
+          (tmux-control-kill-window "3")
+          (should (= requeried 0))
+          (should (= quieted 2)))
+        (let ((tmux-control-window-buffers nil))
+          (tmux-control-new-window "agent")
+          (tmux-control-kill-window "3")
+          (should (= requeried 2)))
+        (should (cl-some (lambda (c) (string-prefix-p "new-window" c)) sent))
+        (should (cl-some (lambda (c) (string-prefix-p "kill-window" c)) sent))))))
+
+(ert-deftest tmux-control-test-eat-cursor-xy-reads-terminal-cursor ()
+  ;; The drift detector compares tmux's 0-indexed #{cursor_x},#{cursor_y}
+  ;; with Eat's own cursor; the accessor must convert Eat's 1-indexed
+  ;; coordinates.
+  (with-temp-buffer
+    (tmux-control-mode)
+    (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
+    (eat-term-resize tmux-control--terminal 40 10)
+    (let ((inhibit-read-only t))
+      (eat-term-process-output tmux-control--terminal "ab")
+      (eat-term-redisplay tmux-control--terminal))
+    (should (equal (tmux-control--eat-cursor-xy) '(2 . 0)))
+    (let ((inhibit-read-only t))
+      (eat-term-process-output tmux-control--terminal "\r\ncd")
+      (eat-term-redisplay tmux-control--terminal))
+    (should (equal (tmux-control--eat-cursor-xy) '(2 . 1)))
+    (eat-term-delete tmux-control--terminal)))
+
+(ert-deftest tmux-control-test-verify-seed-reseeds-on-drift-bounded ()
+  ;; A seed's cursor query and capture are separate reply blocks; %output
+  ;; interleaved between them leaves the seeded baseline shifted -- one
+  ;; row off, FOREVER, since deltas preserve relative consistency (chaos
+  ;; soak find: a screen identical to the pane's but shifted one row,
+  ;; stable for minutes).  After each seed the verifier compares tmux's
+  ;; cursor with Eat's; drift triggers a bounded reseed, agreement resets
+  ;; the budget.
+  (let ((reseeds 0) (queries '()) (fresh "5,3") (mine '(5 . 3)))
+    (cl-letf (((symbol-function 'tmux-control--query)
+               (lambda (cmd cb) (push cmd queries) (funcall cb (list fresh))))
+              ((symbol-function 'tmux-control--eat-cursor-xy)
+               (lambda () mine)))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (setq-local tmux-control--active-pane "%7"
+                    tmux-control--seed-verify-retries 0)
+        ;; Agreement: no reseed, budget reset.
+        (tmux-control--verify-seed (current-buffer)
+                                   (lambda () (cl-incf reseeds)))
+        (should (= reseeds 0))
+        (should (= tmux-control--seed-verify-retries 0))
+        (should (string-match-p "cursor_x.*cursor_y" (car queries)))
+        ;; Drift: reseed, budget consumed.
+        (setq mine '(5 . 2))
+        (tmux-control--verify-seed (current-buffer)
+                                   (lambda () (cl-incf reseeds)))
+        (should (= reseeds 1))
+        (should (= tmux-control--seed-verify-retries 1))
+        ;; Drift persists: second (last) retry...
+        (tmux-control--verify-seed (current-buffer)
+                                   (lambda () (cl-incf reseeds)))
+        (should (= reseeds 2))
+        ;; ...then the budget is exhausted: no further reseed, reset.
+        (tmux-control--verify-seed (current-buffer)
+                                   (lambda () (cl-incf reseeds)))
+        (should (= reseeds 2))
+        (should (= tmux-control--seed-verify-retries 0))
+        ;; Pane switched between issue and reply: not judged.  Defer the
+        ;; reply so the switch can happen in between, as it would live.
+        (let ((pending nil))
+          (cl-letf (((symbol-function 'tmux-control--query)
+                     (lambda (_cmd cb) (setq pending cb))))
+            (tmux-control--verify-seed (current-buffer)
+                                       (lambda () (cl-incf reseeds))))
+          (setq tmux-control--active-pane "%9")
+          (funcall pending (list fresh))
+          (should (= reseeds 2)))))))
+
+(ert-deftest tmux-control-test-seed-screen-issues-verification ()
+  ;; Every controller seed is followed by the drift-check query.
+  (let ((sent '()) (verified '()))
+    (cl-letf (((symbol-function 'tmux-control--send-command)
+               (lambda (cmd &optional kind) (push (cons kind cmd) sent)))
+              ((symbol-function 'tmux-control--verify-seed)
+               (lambda (buf _reseed) (push buf verified))))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (setq-local tmux-control--active-pane "%3")
+        (tmux-control--seed-screen)
+        (should (equal (mapcar #'car (nreverse sent))
+                       '(:cursor-pos :capture)))
+        (should (equal verified (list (current-buffer))))))))
+
+(ert-deftest tmux-control-test-controller-window-close-goes-homeless ()
+  ;; When the CONTROLLER's own window closes (an agent's task window it
+  ;; was homed on), the buffer survives -- it owns the process -- but its
+  ;; window id and active pane are dead.  It must mark itself homeless
+  ;; (id and pane nil, registry entry gone) instead of rendering a frozen
+  ;; screen and sending keystrokes into "can't find pane" forever.
+  (cl-letf (((symbol-function 'tmux-control--refresh-windows) #'ignore)
+            ((symbol-function 'tmux-control--refresh-pane-window-map)
+             #'ignore))
+    (with-temp-buffer
+      (tmux-control-mode)
+      (let ((tmux-control-window-buffers t))
+        (setq-local tmux-control--window-id "@2"
+                    tmux-control--active-pane "%2"
+                    tmux-control--collecting-command nil
+                    tmux-control--window-buffers
+                    (list (cons "@2" (current-buffer))))
+        ;; Another window closing leaves the controller homed.
+        (tmux-control--handle-line "%window-close @7")
+        (should (equal tmux-control--window-id "@2"))
+        ;; Its own window closing makes it homeless.
+        (tmux-control--handle-line "%window-close @2")
+        (should-not tmux-control--window-id)
+        (should-not tmux-control--active-pane)
+        (should tmux-control--homeless)
+        (should-not (assoc "@2" tmux-control--window-buffers))
+        ;; CRITICAL: the window-list refresh must NOT re-claim the
+        ;; session's current window for a homeless controller.  That
+        ;; binding exists for connect time only -- re-firing it here
+        ;; orphaned the current window's render buffer from the
+        ;; registry, routed its output to the hidden controller, and
+        ;; froze the visible buffer (chaos-soak find: the same
+        ;; split-brain twice, through two different re-homing paths).
+        (tmux-control--update-windows '("5\tlive\t1\t0\t@9"))
+        (should-not tmux-control--window-id)
+        (should-not (assoc "@9" tmux-control--window-buffers))))))
+
+(ert-deftest tmux-control-test-homeless-controller-stays-out-of-routing ()
+  ;; A homeless controller does NOT adopt windows: a first cut that
+  ;; re-registered the controller under the next displayed window id
+  ;; created a SPLIT-BRAIN under churn -- two buffers claiming one
+  ;; window, output routed to the hidden one, the displayed one frozen
+  ;; (chaos-soak find).  The invariant is one window, one buffer: a
+  ;; switch while the controller is homeless builds an ordinary render
+  ;; buffer, and the controller keeps owning only the process.
+  (let ((made 0))
+    (cl-letf (((symbol-function 'tmux-control--make-window-buffer)
+               (lambda (&rest _) (cl-incf made)
+                 (generate-new-buffer " *tc-made*")))
+              ((symbol-function 'tmux-control--seed-window-buffer) #'ignore)
+              ((symbol-function 'tmux-control--resize-to-window) #'ignore))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (setq-local tmux-control--window-id nil
+                    tmux-control--active-pane nil
+                    tmux-control--window-buffers nil
+                    tmux-control--session-display nil)
+        (let ((new (tmux-control--display-window-buffer "@9")))
+          (unwind-protect
+              (progn
+                ;; A fresh render buffer, not the controller.
+                (should-not (eq new (current-buffer)))
+                (should (= made 1))
+                ;; The controller stays homeless and unregistered.
+                (should-not tmux-control--window-id)
+                (should-not (cl-rassoc (current-buffer)
+                                       tmux-control--window-buffers)))
+            (when (buffer-live-p new) (kill-buffer new))))))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

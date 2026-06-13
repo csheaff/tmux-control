@@ -511,3 +511,17 @@ Emacs while exercising tiling by hand:
 (load-file "test/tmux-control-live-oracle.el")
 (tmux-control-live-compare-all "main")  ;; MATCH/DIFF per tiled pane
 ```
+
+A **chaos soak** (`test/tmux-control-chaos.el`) drives a live GUI session
+through a reproducible random stream of realistic operations — window
+switches, the pager, typing, pastes, floods, frame resizes, char-mode
+round trips, reconnects, window/pane churn — checking after every step
+that the displayed screen matches `capture-pane`, the command queue
+drains, no view is stranded, and buffers stay bounded.  Run it against a
+throwaway `tmux -L tc-chaos` server (see the file's commentary); the
+same seed replays the same sequence:
+
+```elisp
+(load-file "test/tmux-control-chaos.el")
+(tmux-control-chaos-run 120 1234)   ;; STEPS SEED; nil = clean
+```

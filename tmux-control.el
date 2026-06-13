@@ -365,6 +365,15 @@ the block early.")
   "Non-nil after the watchdog has warned about the current stuck episode.
 Cleared when a reply arrives or the queue drains, so one wedge produces
 one warning rather than one per check interval.")
+(defvar-local tmux-control--homeless nil
+  "Non-nil in a controller buffer whose own tmux window has closed.
+The buffer keeps owning the process and the session state, but it no
+longer renders any window: its window id and active pane are nil, and
+this flag keeps the window-list refresh from re-claiming the session's
+current window for it (that window has -- or will get -- its own render
+buffer; two buffers claiming one window routes output to the hidden one
+and freezes the visible one).  Cleared by a (re)connect.")
+
 (defvar-local tmux-control--disconnecting nil
   "Non-nil while this session's control process is being shut down on purpose.
 Set by `tmux-control-disconnect' right before deleting the process and
@@ -1408,7 +1417,14 @@ With a NAME, give the new window that name."
    (concat (format "new-window -t %s:" tmux-control--session)
            (when (and name (not (string-empty-p name)))
              (concat " -n " (tmux-control--quote-tmux-arg name)))))
-  (tmux-control--refresh-active-pane t))
+  ;; Per-window buffers: the echoed %session-window-changed creates and
+  ;; displays the new window's buffer; re-querying the active pane here
+  ;; would aim THIS buffer at the new window's pane while it still renders
+  ;; its own window -- the foreign-pane corruption the window-switch
+  ;; commands already guard against (see `tmux-control--do-select-window').
+  (if tmux-control-window-buffers
+      (tmux-control--quiet-activity)
+    (tmux-control--refresh-active-pane t)))
 
 (defun tmux-control-kill-window (&optional index)
   "Kill window INDEX in the current tmux-control session.
@@ -1424,7 +1440,11 @@ window in the session ends the session and disconnects this client."
   (setq index (tmux-control--normalize-window-index index))
   (tmux-control--send-command
    (format "kill-window -t %s:%s" tmux-control--session index))
-  (tmux-control--refresh-active-pane t))
+  ;; Mirror tmux-control-new-window: with per-window buffers the
+  ;; %window-close/%session-window-changed echoes do all the work.
+  (if tmux-control-window-buffers
+      (tmux-control--quiet-activity)
+    (tmux-control--refresh-active-pane t)))
 
 (defun tmux-control-rename-window (&optional index name)
   "Rename window INDEX in the current tmux-control session to NAME.
@@ -1503,11 +1523,18 @@ the controller renders its own window, so a switch back to it swaps here."
       (when (hash-table-p tmux-control--activity)
         (remhash active tmux-control--activity)))
     ;; The controller doubles as the render buffer for the window it was
-    ;; connected on; bind it to that window's id once known.
+    ;; connected on; bind it to that window's id once known.  ONLY that
+    ;; once: a controller whose own window later closed has a nil id too,
+    ;; and re-binding it here -- this runs on every window-list refresh --
+    ;; silently re-homed it onto the session's current window, ORPHANING
+    ;; that window's render buffer from the registry: output then routed
+    ;; to the hidden controller while the user watched the orphan freeze
+    ;; (chaos-soak find; `tmux-control--homeless' marks the difference).
     (when (and tmux-control-window-buffers
                active-id
                (null tmux-control--controller)   ; we are the controller
-               (null tmux-control--window-id))
+               (null tmux-control--window-id)
+               (not tmux-control--homeless))
       (setq tmux-control--window-id active-id)
       (tmux-control--register-window-buffer active-id (current-buffer)))
     (force-mode-line-update)))
@@ -2379,6 +2406,7 @@ so the tmux-control keys get out of the way; the mode line shows
               (kill-buffer buf))))))
     (setq tmux-control--window-buffers nil)
     (setq tmux-control--window-id nil)
+    (setq tmux-control--homeless nil)
     (setq tmux-control--session-display nil)
     (setq tmux-control--seed-cursor nil)
     (setq tmux-control--seed-cursor-visible :unknown)
@@ -3369,7 +3397,27 @@ the matching pane's render buffer instead, so every pane updates at once."
           (with-current-buffer wbuf
             (setq tmux-control--active-pane pane))
           (tmux-control--seed-window-buffer wbuf win-id))
+         ((and tmux-control-window-buffers
+               (not tmux-control--tiled)
+               tmux-control--window-id
+               (not (equal win-id tmux-control--window-id)))
+          ;; Per-window buffers: the event names some OTHER window with no
+          ;; render buffer (brand-new -- tmux-control-new-window emits
+          ;; %window-pane-changed for the created window BEFORE the
+          ;; %session-window-changed that builds its buffer -- or simply
+          ;; never visited).  It is not this buffer's pane: adopting it
+          ;; retargeted the controller onto a foreign pane, and when that
+          ;; window later closed (an agent's task window, say) the
+          ;; controller was left aimed at a DEAD pane -- empty screen,
+          ;; keystrokes to "can't find pane", even window switches did not
+          ;; heal it (chaos-soak find).  Just refresh the pane->window map
+          ;; (a pane appeared or moved) for the activity machinery.
+          (tmux-control--refresh-pane-window-map))
          (t
+          ;; Our own window's pane changed (a split, select-pane, closed
+          ;; pane) -- or the legacy single-buffer mode, whose view follows
+          ;; the event unconditionally (pre-window-buffers semantics, a
+          ;; load-bearing affordance).  Follow it.
           (setq tmux-control--active-pane pane)
           (unless tmux-control--tiled
             (tmux-control--seed-screen)
@@ -3436,6 +3484,24 @@ the matching pane's render buffer instead, so every pane updates at once."
       (when (and tmux-control-window-buffers
                  (string-match "\\`%\\(?:unlinked-\\)?window-close \\(@[0-9]+\\)\\'"
                                line))
+        ;; The CONTROLLER's own window can close too (an agent's task
+        ;; window the controller happened to be homed on).  The buffer
+        ;; must survive -- it owns the process -- but its window id and
+        ;; active pane are now dead: left as they were, it would render
+        ;; a frozen screen and send keystrokes into "can't find pane" if
+        ;; it ever reached a window again (C-x b always can).  Mark it
+        ;; homeless instead: id and pane nil (typing then says "No
+        ;; active tmux pane yet" -- honest, recoverable), registry entry
+        ;; gone.  The session's view continues through the per-window
+        ;; render buffers; the homeless controller keeps owning the
+        ;; process and the session state, just no window of its own.
+        (when (equal (match-string 1 line) tmux-control--window-id)
+          (setq tmux-control--window-buffers
+                (cl-remove-if (lambda (e) (eq (cdr e) (current-buffer)))
+                              tmux-control--window-buffers))
+          (setq tmux-control--window-id nil)
+          (setq tmux-control--active-pane nil)
+          (setq tmux-control--homeless t))
         (when-let* ((buf (tmux-control--window-buffer (match-string 1 line))))
           (unless (eq buf (current-buffer))
             (when (eq tmux-control--session-display buf)
@@ -3577,7 +3643,86 @@ the `:capture' reply that paints the screen and consumes it."
              ;; -N keeps trailing background cells so full-width fills survive.
              (if tmux-control--capture-trailing-p " -N" "")
              tmux-control--active-pane)
-     :capture)))
+     :capture)
+    (tmux-control--verify-seed (current-buffer)
+                               #'tmux-control--seed-screen)))
+
+(defconst tmux-control--seed-verify-max-retries 2
+  "How many times a drift-detected seed is retried before giving up.
+A pane that streams continuously can race every retry; the cap keeps
+the worst case bounded, and the next seed (a resize, a window visit, a
+pause) gets a fresh budget.")
+
+(defvar-local tmux-control--seed-verify-retries 0
+  "Consecutive seed retries triggered by cursor-drift detection.
+Reset to zero whenever a verification passes.")
+
+(defun tmux-control--eat-cursor-xy ()
+  "Return the current buffer's terminal cursor as 0-indexed (X . Y).
+Reads Eat's own cursor bookkeeping (the same coordinates tmux reports
+as #{cursor_x},#{cursor_y}); nil when the terminal is gone or Eat's
+internals are unavailable, in which case seed verification quietly
+disables itself."
+  (when (and tmux-control--terminal
+             (eat-term-live-p tmux-control--terminal)
+             (fboundp 'eat--t-term-display)
+             (fboundp 'eat--t-disp-cursor)
+             (fboundp 'eat--t-cur-x)
+             (fboundp 'eat--t-cur-y))
+    (let* ((disp (eat--t-term-display tmux-control--terminal))
+           (cur (and disp (eat--t-disp-cursor disp))))
+      (when cur
+        ;; Eat's cursor is 1-indexed; tmux's is 0-indexed.
+        (cons (1- (eat--t-cur-x cur)) (1- (eat--t-cur-y cur)))))))
+
+(defun tmux-control--verify-seed (buffer reseed)
+  "Verify BUFFER's freshly seeded screen against tmux; RESEED on drift.
+
+The seed's cursor query and screen capture are two reply blocks, and
+tmux may interleave %output between them -- a prompt redraw scrolling
+the pane one row right there leaves the seeded baseline one row off,
+after which every cursor-relative repaint applies one row off, FOREVER
+\(deltas preserve relative consistency; nothing repaints).  The chaos
+soak caught exactly this: a screen identical to the pane's but shifted
+one row, stable for minutes.
+
+So after each seed, ask tmux for the pane's cursor once more and
+compare it with Eat's own cursor.  Stream ordering makes the comparison
+exact: any output that moved tmux's cursor before this reply was
+generated has already been fed to Eat by the time the reply dispatches
+\(the filter flushes pending output before every control line), so on
+an aligned screen the two agree even mid-stream.  Disagreement means
+the baseline drifted: run RESEED (bounded by
+`tmux-control--seed-verify-max-retries').  This also heals any
+historical drift at the next natural seed, whatever its cause."
+  (when (buffer-live-p buffer)
+    (let ((pane (buffer-local-value 'tmux-control--active-pane buffer))
+          (ctrl (with-current-buffer buffer (tmux-control--wb-controller))))
+      (when (and pane (buffer-live-p ctrl))
+        (with-current-buffer ctrl
+          (tmux-control--query
+           (format "display-message -p -t %s \"#{cursor_x},#{cursor_y}\""
+                   pane)
+           (lambda (lines)
+             (when (and lines (buffer-live-p buffer))
+               (with-current-buffer buffer
+                 ;; Only judge the pane this verification was issued for:
+                 ;; a pane switch between issue and reply would compare
+                 ;; apples to oranges.
+                 (when (equal pane tmux-control--active-pane)
+                   (let ((fresh (tmux-control--parse-cursor-pos lines))
+                         (mine (tmux-control--eat-cursor-xy)))
+                     (cond
+                      ((or (null fresh) (null mine))
+                       (setq tmux-control--seed-verify-retries 0))
+                      ((equal fresh mine)
+                       (setq tmux-control--seed-verify-retries 0))
+                      ((< tmux-control--seed-verify-retries
+                          tmux-control--seed-verify-max-retries)
+                       (cl-incf tmux-control--seed-verify-retries)
+                       (funcall reseed))
+                      (t
+                       (setq tmux-control--seed-verify-retries 0))))))))))))))
 
 (defun tmux-control--handle-pause (pane)
   "Resync after tmux paused PANE for lagging, then resume streaming it.
@@ -4616,7 +4761,15 @@ round trip counts), then the capture paints the screen."
                         (string-join cap-lines "\n")
                         cur (or vis :unknown)))
                       (tmux-control--flush-display
-                       (tmux-control--current-sync-windows))))))))))))))
+                       (tmux-control--current-sync-windows)))
+                    ;; Same drift detection as the controller seed: output
+                    ;; interleaved between the cursor and capture replies
+                    ;; leaves the baseline shifted; verify and re-seed.
+                    (tmux-control--verify-seed
+                     buffer
+                     (lambda ()
+                       (tmux-control--seed-window-buffer
+                        buffer window-id))))))))))))))
 
 (defun tmux-control--flush-window-buffers ()
   "Flush each sibling window render buffer's batched output and redisplay.
