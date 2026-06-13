@@ -1103,6 +1103,111 @@ buffer, or the scrollback pager."
   (interactive)
   (tmux-control--seed-screen))
 
+(defun tmux-control--walk-keymap (keymap fn &optional prefix)
+  "Call FN with a (KEY-VECTOR . COMMAND) cons for each binding in KEYMAP.
+Recurses into prefix keymaps (accumulating PREFIX) so chords like
+\\`C-c C-n' are reported whole, and expands `[remap CMD]' entries into a
+`[remap CMD]' key vector.  Skips anything that is not a command."
+  (map-keymap
+   (lambda (event binding)
+     (cond
+      ((eq event 'remap)
+       (map-keymap
+        (lambda (cmd new)
+          (when (commandp new)
+            (funcall fn (cons (vector 'remap cmd) new))))
+        binding))
+      ((keymapp binding)
+       (tmux-control--walk-keymap binding fn (vconcat prefix (vector event))))
+      ((commandp binding)
+       (funcall fn (cons (vconcat prefix (vector event)) binding)))))
+   keymap))
+
+(defun tmux-control--audit-rows ()
+  "Return audit rows (KEY-DESC INTENDED ACTUAL STATUS) for this buffer.
+For every key tmux-control binds in the maps active here, resolve what
+the key ACTUALLY runs now and compare it with tmux-control's intended
+command.  STATUS is `active' when they agree and `overridden' when the
+user's configuration (a minor-mode or modal-package map) wins.  Must run
+in the tmux-control buffer being audited."
+  (let ((maps (if (derived-mode-p 'tmux-control-scrollback-mode)
+                  (list tmux-control-scrollback-mode-map)
+                (append (list tmux-control-mode-map)
+                        (when tmux-control--keys-active
+                          (list tmux-control--override-map))
+                        (when tmux-control--char-mode-keys
+                          (list tmux-control--char-mode-map)))))
+        (seen (make-hash-table :test 'equal))
+        rows)
+    (dolist (map maps)
+      ;; `map-keymap' descends into a map's parent, so walking the mode
+      ;; map would report every inherited `eat-mode-map' binding as
+      ;; tmux-control's own.  Detach the parent for the walk so only
+      ;; tmux-control's bindings are audited (the override, char-mode and
+      ;; scrollback maps have no parent, so they are unaffected).
+      (let ((parent (keymap-parent map)))
+        (unwind-protect
+            (progn
+              (when parent (set-keymap-parent map nil))
+              (tmux-control--walk-keymap
+               map
+               (lambda (pair)
+                 (let* ((key (car pair))
+                        (intended (cdr pair))
+                        (desc (key-description key)))
+                   (unless (gethash desc seen)
+                     (puthash desc t seen)
+                     (let ((actual (key-binding key)))
+                       (push (list desc intended actual
+                                   (if (eq actual intended)
+                                       'active 'overridden))
+                             rows)))))))
+          (when parent (set-keymap-parent map parent)))))
+    (sort rows (lambda (a b) (string< (car a) (car b))))))
+
+(defun tmux-control-audit-keys ()
+  "Report how tmux-control's key bindings resolve in this buffer.
+
+For every key tmux-control binds, show its intended command and what the
+key ACTUALLY runs here.  A binding the package needs but your config
+shadows (a silently broken feature) shows as `overridden'; so does a key
+tmux-control intentionally yields to your config (e.g. ESC, which defers
+to a modal package's command-mode key) -- the report states facts, you
+judge which overrides are wanted.
+
+Run it in the live buffer you care about; under a modal package
+\(xah-fly-keys, evil, viper) the active keymaps differ by state, so run
+it once in insert state and once in command state to see both."
+  (interactive)
+  (unless (or (derived-mode-p 'tmux-control-mode)
+              (derived-mode-p 'tmux-control-scrollback-mode))
+    (user-error "Not in a tmux-control buffer"))
+  (let* ((rows (tmux-control--audit-rows))
+         (overridden (cl-count 'overridden rows :key #'cadddr))
+         (width (apply #'max 10 (mapcar (lambda (r) (length (car r))) rows)))
+         ;; Emacs `format' has no `*' dynamic-width field, so bake WIDTH in.
+         (row-fmt (format "%%-%ds  %%-32s  %%s%%s\n" width)))
+    (with-help-window "*tmux-control key audit*"
+      (princ (format "tmux-control key audit -- %s\n" (buffer-name)))
+      (princ (format "%d bindings, %d overridden by your configuration.\n\n"
+                     (length rows) overridden))
+      (princ (format row-fmt "KEY" "INTENDED" "ACTUAL HERE" ""))
+      (princ (make-string (+ width 2 32 2 24) ?-))
+      (princ "\n")
+      (dolist (r rows)
+        (princ (format row-fmt
+                       (nth 0 r)
+                       (nth 1 r)
+                       (nth 2 r)
+                       (if (eq (nth 3 r) 'overridden) "   <- overridden" ""))))
+      (princ "\n")
+      (princ "\"overridden\" means another keymap (often a minor mode or a\n")
+      (princ "modal package) wins this key here.  That is a broken feature if\n")
+      (princ "you expected the tmux-control command -- or intended if the key\n")
+      (princ "is one tmux-control yields on purpose (ESC defers to a modal\n")
+      (princ "package's command-mode key).  Under a modal package, run this in\n")
+      (princ "both insert and command state; the active maps differ.\n"))))
+
 (defun tmux-control--list-windows (host socket-name session)
   "Return an alist of (INDEX-STRING . LABEL) for SESSION windows.
 
