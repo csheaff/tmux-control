@@ -130,6 +130,16 @@ inline and push here; `tmux-control-chaos--check' merges and clears it.")
       (accept-process-output nil 0.03))
     (tmux-control-chaos--pump 0.25)))
 
+(defun tmux-control-chaos--wheel (dir window)
+  "Send a DIR (`wheel-up'/`wheel-down') wheel event to WINDOW, if bound.
+`key-binding' can return nil or a non-command for a wheel event in some
+GUI setups; skip rather than error the soak for a reason unrelated to
+tmux-control."
+  (let ((cmd (key-binding (vector dir))))
+    (when (commandp cmd)
+      (with-selected-window window
+        (funcall cmd (list dir (list window)))))))
+
 ;;;; Operations
 
 (defmacro tmux-control-chaos--defop (name weight &rest body)
@@ -182,16 +192,16 @@ inline and push here; `tmux-control-chaos--check' merges and clears it.")
       (when (with-current-buffer (window-buffer w)
               (derived-mode-p 'tmux-control-scrollback-mode))
         (with-selected-window w
-          (with-current-buffer (window-buffer w)
-            ;; up off the bottom: this wheel-down (above the bottom) sets
-            ;; the left-bottom flag.
-            (set-window-start w (point-min))
-            (goto-char (point-min))
-            (funcall (key-binding [wheel-down]) (list 'wheel-down (list w)))
-            ;; back to the bottom: now a wheel-down leaves.
-            (goto-char (point-max))
-            (recenter -1)
-            (funcall (key-binding [wheel-down]) (list 'wheel-down (list w)))))))
+          ;; up off the bottom: this wheel-down (above the bottom) sets
+          ;; the left-bottom flag.
+          (set-window-start w (point-min))
+          (goto-char (point-min)))
+        (tmux-control-chaos--wheel 'wheel-down w)
+        (with-selected-window w
+          ;; back to the bottom: now a wheel-down leaves.
+          (goto-char (point-max))
+          (recenter -1))
+        (tmux-control-chaos--wheel 'wheel-down w)))
     ;; Robust cleanup: never leave the pager open for the next op.
     (when (with-current-buffer (tmux-control-chaos--displayed)
             (derived-mode-p 'tmux-control-scrollback-mode))
@@ -323,8 +333,7 @@ inline and push here; `tmux-control-chaos--check' merges and clears it.")
     (let ((w (tmux-control-chaos--win)))
       (when (with-current-buffer (window-buffer w)
               (derived-mode-p 'tmux-control-scrollback-mode))
-        (with-selected-window w
-          (funcall (key-binding [wheel-down]) (list 'wheel-down (list w))))
+        (tmux-control-chaos--wheel 'wheel-down w)
         (unless (with-current-buffer (window-buffer (tmux-control-chaos--win))
                   (derived-mode-p 'tmux-control-scrollback-mode))
           (tmux-control-chaos--flag
@@ -346,11 +355,8 @@ inline and push here; `tmux-control-chaos--check' merges and clears it.")
     (let ((w (tmux-control-chaos--win)))
       (when (with-current-buffer (window-buffer w)
               (derived-mode-p 'tmux-control-scrollback-mode))
-        (with-selected-window w
-          (dolist (dir '(wheel-down wheel-up wheel-down))
-            (let ((b (key-binding (vector dir))))
-              (when (commandp b)
-                (funcall b (list dir (list w)))))))
+        (dolist (dir '(wheel-down wheel-up wheel-down))
+          (tmux-control-chaos--wheel dir w))
         (unless (with-current-buffer (window-buffer (tmux-control-chaos--win))
                   (derived-mode-p 'tmux-control-scrollback-mode))
           (tmux-control-chaos--flag "pager bounced on jitter flick"))))
@@ -440,27 +446,28 @@ inline and push here; `tmux-control-chaos--check' merges and clears it.")
         ;; Render oracle on the displayed live buffer.
         (let ((b (tmux-control-chaos--displayed)))
           (when (with-current-buffer b (derived-mode-p 'tmux-control-mode))
-            (let ((pane (buffer-local-value 'tmux-control--active-pane b)))
-              (when (and pane
-                         (not (equal (tmux-control-chaos--screen-tail b 2)
-                                     (tmux-control-chaos--capture-tail pane 2))))
+            (let* ((pane (buffer-local-value 'tmux-control--active-pane b))
+                   (eat (and pane (tmux-control-chaos--screen-tail b 2)))
+                   (cap (and pane (tmux-control-chaos--capture-tail pane 2))))
+              (when (and pane (not (equal eat cap)))
                 ;; Settle-retry: a diff is usually in-flight output, not a
                 ;; failure.  A prompt's volatile bits settle a touch slower
                 ;; (a starship prompt flashes "took Ns" for a finished
                 ;; command, briefly differing between Eat and capture), so
                 ;; pump a few times and re-compare; only a diff that
-                ;; persists is a real desync.
+                ;; persists is a real desync.  Each `--capture-tail' shells
+                ;; out to tmux, so keep the latest tails and reuse them for
+                ;; the failure message rather than recomputing.
                 (let ((diff t))
                   (dotimes (_ 4)
                     (when diff
                       (tmux-control-chaos--pump 0.8)
-                      (setq diff (not (equal (tmux-control-chaos--screen-tail b 2)
-                                             (tmux-control-chaos--capture-tail pane 2))))))
+                      (setq eat (tmux-control-chaos--screen-tail b 2)
+                            cap (tmux-control-chaos--capture-tail pane 2)
+                            diff (not (equal eat cap)))))
                   (when diff
                     (push (format "oracle diff: eat=%S cap=%S"
-                                  (mapcar #'substring-no-properties
-                                          (tmux-control-chaos--screen-tail b 2))
-                                  (tmux-control-chaos--capture-tail pane 2))
+                                  (mapcar #'substring-no-properties eat) cap)
                           problems)))))))
         ;; Buffers bounded (Eat's scrollback trim at work).
         (dolist (b (buffer-list))
