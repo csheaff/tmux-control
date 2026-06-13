@@ -495,6 +495,7 @@ kills, which are deliberate.")
     ;; mode map (low precedence) so a modal package's own ESC binding
     ;; wins -- see `tmux-control-mode-map'.
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
+    (define-key map [wheel-down] #'tmux-control-wheel-down)
     map)
   "High-precedence keymap for tmux-control buffers.
 Active in semi-char mode (`tmux-control--keys-active').  In char mode it
@@ -504,6 +505,7 @@ shadowing the pane's own C-c.")
 (defvar tmux-control--char-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
+    (define-key map [wheel-down] #'tmux-control-wheel-down)
     map)
   "High-precedence keymap for tmux-control buffers in char mode.
 Char mode exists to send EVERY key to the pane -- C-c above all, the
@@ -2261,9 +2263,9 @@ Emacs-side analog of tmux's default wheel-up binding, which opens
 copy-mode scrollback for normal-screen panes.
 
 In every other case -- a genuine full-screen (alternate-screen)
-application, a mouse-aware application, or wheel-down -- the event is
-forwarded to the terminal unchanged so the application keeps its own
-handling.
+application or a mouse-aware application -- the event is forwarded to the
+terminal unchanged so the application keeps its own handling.  Wheel-down
+is handled by `tmux-control-wheel-down'.
 
 The scrollback interception is only active when Eat's screen state can
 be read, so the live behavior is otherwise unchanged."
@@ -2286,6 +2288,28 @@ be read, so the live behavior is otherwise unchanged."
             (with-selected-window window
               (eat-self-input 1 event)))))
       (eat-self-input 1 event))))
+
+(defun tmux-control-wheel-down (event)
+  "Handle a wheel-down EVENT in a live tmux-control buffer.
+A full-screen (alternate-screen) or mouse-tracking application owns the
+wheel, so forward the event to it -- the symmetric partner of
+`tmux-control-wheel-scroll', which forwards wheel-up to such an app.
+Without this, wheel-UP reached a mouse application (e.g. a TUI scrolled
+with the mouse) but wheel-DOWN did not: nothing bound it, so it fell
+through to the user's ordinary scrolling, and under
+`pixel-scroll-precision-mode' that visibly scrolled the Emacs buffer
+instead of the application.  On a normal-screen pane the wheel keeps the
+user's ordinary downward scrolling."
+  (interactive "e")
+  (let ((window (posn-window (event-start event))))
+    (if (and (window-live-p window)
+             (with-current-buffer (window-buffer window)
+               (and (derived-mode-p 'tmux-control-mode)
+                    (or (tmux-control--alt-screen-p)
+                        (tmux-control--pane-grabs-mouse-p)))))
+        (with-selected-window window
+          (eat-self-input 1 event))
+      (tmux-control--dispatch-wheel event))))
 
 (defun tmux-control--disable-line-numbers ()
   "Disable line numbers in tmux-control buffers."

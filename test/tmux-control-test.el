@@ -3018,5 +3018,43 @@ output), :calls (side-effect invocations in order), :active-pane,
                                        tmux-control--window-buffers)))
             (when (buffer-live-p new) (kill-buffer new))))))))
 
+(ert-deftest tmux-control-test-wheel-down-forwards-to-mouse-app ()
+  ;; Symmetry with wheel-up: a full-screen or mouse-tracking app must get
+  ;; wheel-DOWN forwarded to it, not have it fall through to ordinary
+  ;; scrolling.  Found in a config-loaded buffer: wheel-up scrolled vim
+  ;; but wheel-down hit pixel-scroll-precision and scrolled the Emacs
+  ;; buffer instead (vim never moved).  Bound in the high-precedence
+  ;; maps so it beats a global wheel minor mode (pixel-scroll).
+  (should (eq (lookup-key tmux-control--override-map [wheel-down])
+              #'tmux-control-wheel-down))
+  (should (eq (lookup-key tmux-control--char-mode-map [wheel-down])
+              #'tmux-control-wheel-down))
+  (let ((forwarded 0) (scrolled 0)
+        (event (list 'wheel-down (list (selected-window) 1 '(0 . 0) 0))))
+    (cl-letf (((symbol-function 'eat-self-input)
+               (lambda (&rest _) (cl-incf forwarded)))
+              ((symbol-function 'tmux-control--dispatch-wheel)
+               (lambda (_) (cl-incf scrolled)))
+              ((symbol-function 'posn-window) (lambda (_) (selected-window))))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (set-window-buffer (selected-window) (current-buffer))
+        ;; Mouse-grabbing (or alt-screen) app: forward to the app.
+        (cl-letf (((symbol-function 'tmux-control--alt-screen-p)
+                   (lambda () nil))
+                  ((symbol-function 'tmux-control--pane-grabs-mouse-p)
+                   (lambda () t)))
+          (tmux-control-wheel-down event)
+          (should (= forwarded 1))
+          (should (= scrolled 0)))
+        ;; Plain normal-screen pane: ordinary scrolling, not forwarded.
+        (cl-letf (((symbol-function 'tmux-control--alt-screen-p)
+                   (lambda () nil))
+                  ((symbol-function 'tmux-control--pane-grabs-mouse-p)
+                   (lambda () nil)))
+          (tmux-control-wheel-down event)
+          (should (= forwarded 1))
+          (should (= scrolled 1)))))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
