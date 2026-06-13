@@ -3057,5 +3057,52 @@ output), :calls (side-effect invocations in order), :active-pane,
             (should (= forwarded 1))
             (should (= scrolled 1))))))))
 
+(defvar tmux-control-test--audit-modal nil
+  "Stands in for a modal minor mode in the key-audit test.")
+
+(ert-deftest tmux-control-test-audit-keys ()
+  ;; The audit reports, for each tmux-control binding, whether it actually
+  ;; resolves to its command in this buffer -- the institutionalized
+  ;; version of the manual check that caught the ESC regression.  It must
+  ;; (1) cover tmux-control's own bindings, (2) EXCLUDE bindings inherited
+  ;; from eat-mode-map (the parent -- `map-keymap' descends into it), and
+  ;; (3) flag a binding a higher-precedence config map overrides.
+  (should-error (with-temp-buffer (fundamental-mode) (tmux-control-audit-keys))
+                :type 'user-error)
+  (let ((modal-map (let ((m (make-sparse-keymap)))
+                     (define-key m [escape] (lambda () (interactive) 'modal))
+                     m)))
+    (with-temp-buffer
+      (tmux-control-mode)
+      (setq-local emulation-mode-map-alists
+                  (cons tmux-control--emulation-mode-map-alist
+                        emulation-mode-map-alists))
+      (setq tmux-control--keys-active t)
+      (let* ((rows (tmux-control--audit-rows))
+             (nextwin (assoc "C-c C-n" rows))
+             (escape (assoc "<escape>" rows)))
+        ;; (1) own bindings present and active.
+        (should nextwin)
+        (should (eq (nth 1 nextwin) 'tmux-control-next-window))
+        (should (eq (nth 3 nextwin) 'active))
+        ;; (2) every intended command is tmux-control's own -- if the
+        ;; eat-mode-map parent leaked in, some intended would be eat-*.
+        (should (cl-every (lambda (r)
+                            (string-prefix-p "tmux-control-"
+                                             (symbol-name (nth 1 r))))
+                          rows))
+        ;; ESC is tmux-control's intended command, active when unclaimed.
+        (should (eq (nth 1 escape) 'tmux-control-send-escape))
+        (should (eq (nth 3 escape) 'active))
+        ;; (3) a modal minor-mode ESC binding flips ESC to overridden --
+        ;; exactly the relationship that lets xah-fly-keys keep command
+        ;; mode (and that, reversed, was the regression).
+        (let ((minor-mode-map-alist
+               (cons (cons 'tmux-control-test--audit-modal modal-map)
+                     minor-mode-map-alist)))
+          (setq tmux-control-test--audit-modal t)
+          (let ((escape2 (assoc "<escape>" (tmux-control--audit-rows))))
+            (should (eq (nth 3 escape2) 'overridden))))))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

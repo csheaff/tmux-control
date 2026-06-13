@@ -304,6 +304,17 @@ the plain paste they expect.  This is the same mechanism iTerm2's tmux
 integration uses, for the same reason: only tmux knows the pane's
 bracketed-paste state.
 
+**A key not doing what you expect?**  `M-x tmux-control-audit-keys` shows,
+for every key tmux-control binds, the command it intends and the command
+that key *actually* runs in this buffer — so a binding your own
+configuration shadows (a silently broken feature) is visible at a glance.
+A key marked `overridden` is won by another keymap here; that is a bug if
+you expected the tmux-control command, or intended if it is a key
+tmux-control yields on purpose (ESC defers to a modal package's
+command-mode key — xah-fly-keys, evil, viper — so it shows as
+overridden).  Under a modal package the active maps differ by state, so
+run it once in insert state and once in command state.
+
 ## Opening files from a pane
 
 A tmux-control buffer renders a pane that has its own working directory — and,
