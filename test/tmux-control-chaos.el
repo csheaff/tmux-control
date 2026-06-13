@@ -51,6 +51,17 @@
 (defvar tmux-control-chaos--seed 1)
 (defvar tmux-control-chaos--trace nil)
 (defvar tmux-control-chaos--failures nil)
+(defvar tmux-control-chaos--op-problems nil
+  "Transient invariant violations recorded by the current op.
+Some bugs live only in the un-settled window of an async operation -- a
+wheel-down arriving while a scrollback capture is still pending, input
+sent mid window-swap -- and are gone by the time the per-step
+`tmux-control-chaos--check' runs.  Transient ops check those invariants
+inline and push here; `tmux-control-chaos--check' merges and clears it.")
+
+(defun tmux-control-chaos--flag (fmt &rest args)
+  "Record a transient invariant violation for the current op."
+  (push (apply #'format fmt args) tmux-control-chaos--op-problems))
 
 (defun tmux-control-chaos--rand (n)
   (setq tmux-control-chaos--seed
@@ -119,6 +130,16 @@
       (accept-process-output nil 0.03))
     (tmux-control-chaos--pump 0.25)))
 
+(defun tmux-control-chaos--wheel (dir window)
+  "Send a DIR (`wheel-up'/`wheel-down') wheel event to WINDOW, if bound.
+`key-binding' can return nil or a non-command for a wheel event in some
+GUI setups; skip rather than error the soak for a reason unrelated to
+tmux-control."
+  (let ((cmd (key-binding (vector dir))))
+    (when (commandp cmd)
+      (with-selected-window window
+        (funcall cmd (list dir (list window)))))))
+
 ;;;; Operations
 
 (defmacro tmux-control-chaos--defop (name weight &rest body)
@@ -157,6 +178,12 @@
     (tmux-control-chaos--settle)))
 
 (tmux-control-chaos--defop tmux-control-chaos--op-wheel-exit 6
+  ;; The real wheel-exit round trip: scroll up off the bottom (so the
+  ;; pager records it left the bottom), then a wheel-down at the bottom
+  ;; leaves to live.  A bare wheel-down at the bottom right after opening
+  ;; does NOT leave (that is the no-bounce rule), so this op must drive
+  ;; the up-then-down sequence -- and clean up unconditionally, or a
+  ;; stranded pager poisons every later op with "process is not live".
   (when (with-current-buffer (tmux-control-chaos--displayed)
           (derived-mode-p 'tmux-control-mode))
     (tmux-control-chaos--in-displayed #'tmux-control-scrollback)
@@ -165,10 +192,20 @@
       (when (with-current-buffer (window-buffer w)
               (derived-mode-p 'tmux-control-scrollback-mode))
         (with-selected-window w
-          (with-current-buffer (window-buffer w)
-            (goto-char (point-max))
-            (funcall (key-binding [wheel-down])
-                     (list 'wheel-down (list w)))))))
+          ;; up off the bottom: this wheel-down (above the bottom) sets
+          ;; the left-bottom flag.
+          (set-window-start w (point-min))
+          (goto-char (point-min)))
+        (tmux-control-chaos--wheel 'wheel-down w)
+        (with-selected-window w
+          ;; back to the bottom: now a wheel-down leaves.
+          (goto-char (point-max))
+          (recenter -1))
+        (tmux-control-chaos--wheel 'wheel-down w)))
+    ;; Robust cleanup: never leave the pager open for the next op.
+    (when (with-current-buffer (tmux-control-chaos--displayed)
+            (derived-mode-p 'tmux-control-scrollback-mode))
+      (tmux-control-chaos--in-displayed #'tmux-control-live))
     (tmux-control-chaos--settle)))
 
 (tmux-control-chaos--defop tmux-control-chaos--op-type 14
@@ -274,6 +311,97 @@
   (tmux-control-chaos--in-displayed #'tmux-control-reconnect)
   (tmux-control-chaos--settle 15))
 
+;;;; Transient-probing ops
+;;
+;; The ops above settle (wait for the command queue to drain) before
+;; checking anything -- so they exercise the calm, never the storm.  But
+;; real bugs live in the un-settled window: input arriving while an async
+;; capture is mid-flight, a stray wheel event during the one-line
+;; "capturing…" placeholder, keys sent mid window-swap.  These ops fire
+;; input DURING that window and assert inline, before settling.
+
+(tmux-control-chaos--defop tmux-control-chaos--op-pager-wheel-during-capture 7
+  ;; Open the pager and fire a wheel-down while the capture is still
+  ;; pending -- the placeholder is a one-line buffer, so its bottom is
+  ;; trivially visible.  The pager must NOT bounce to live: you enter by
+  ;; scrolling up, so an immediate wheel-down has nothing below to leave
+  ;; toward.  This is the exact scroll-bounce/loop bug.
+  (when (with-current-buffer (tmux-control-chaos--displayed)
+          (derived-mode-p 'tmux-control-mode))
+    (tmux-control-chaos--in-displayed #'tmux-control-scrollback)
+    ;; deliberately NO settle -- the placeholder is showing now
+    (let ((w (tmux-control-chaos--win)))
+      (when (with-current-buffer (window-buffer w)
+              (derived-mode-p 'tmux-control-scrollback-mode))
+        (tmux-control-chaos--wheel 'wheel-down w)
+        (unless (with-current-buffer (window-buffer (tmux-control-chaos--win))
+                  (derived-mode-p 'tmux-control-scrollback-mode))
+          (tmux-control-chaos--flag
+           "pager bounced to live on wheel-down during capture"))))
+    (tmux-control-chaos--settle)
+    ;; Back to live for the next op (whichever buffer we ended on).
+    (when (with-current-buffer (tmux-control-chaos--displayed)
+            (derived-mode-p 'tmux-control-scrollback-mode))
+      (tmux-control-chaos--in-displayed #'tmux-control-live))
+    (tmux-control-chaos--settle)))
+
+(tmux-control-chaos--defop tmux-control-chaos--op-pager-jitter-flick 5
+  ;; A jittery flick over the just-opened pager: down, up, down, before
+  ;; the capture lands.  Must stay in the pager (no bounce) and, once
+  ;; settled, the capture must still land (not be left in limbo).
+  (when (with-current-buffer (tmux-control-chaos--displayed)
+          (derived-mode-p 'tmux-control-mode))
+    (tmux-control-chaos--in-displayed #'tmux-control-scrollback)
+    (let ((w (tmux-control-chaos--win)))
+      (when (with-current-buffer (window-buffer w)
+              (derived-mode-p 'tmux-control-scrollback-mode))
+        (dolist (dir '(wheel-down wheel-up wheel-down))
+          (tmux-control-chaos--wheel dir w))
+        (unless (with-current-buffer (window-buffer (tmux-control-chaos--win))
+                  (derived-mode-p 'tmux-control-scrollback-mode))
+          (tmux-control-chaos--flag "pager bounced on jitter flick"))))
+    (tmux-control-chaos--settle)
+    (when (with-current-buffer (tmux-control-chaos--displayed)
+            (derived-mode-p 'tmux-control-scrollback-mode))
+      (tmux-control-chaos--in-displayed #'tmux-control-live))
+    (tmux-control-chaos--settle)))
+
+(tmux-control-chaos--defop tmux-control-chaos--op-switch-then-type 6
+  ;; Send input the instant after a window switch, before the swap and
+  ;; reseed settle.  The view must not strand and the input must reach a
+  ;; pane (caught by the global oracle + stranded-view checks after the
+  ;; settle); here we just provoke the transient.
+  (let ((idx (number-to-string
+              (tmux-control-chaos--rand tmux-control-chaos-windows))))
+    (tmux-control-chaos--in-displayed
+     (lambda () (tmux-control-select-window idx)))
+    ;; NO settle -- type into whatever the swap is mid-installing.
+    (with-current-buffer (tmux-control-chaos--displayed)
+      (when (and (derived-mode-p 'tmux-control-mode) tmux-control--terminal)
+        (tmux-control--send-input tmux-control--terminal "\C-u")
+        (tmux-control--send-input
+         tmux-control--terminal
+         (format " echo t%d" (tmux-control-chaos--rand 1000)))))
+    (tmux-control-chaos--settle)
+    (with-current-buffer (tmux-control-chaos--displayed)
+      (when (derived-mode-p 'tmux-control-mode)
+        (tmux-control--send-input tmux-control--terminal "\C-u")))
+    (tmux-control-chaos--settle)))
+
+(tmux-control-chaos--defop tmux-control-chaos--op-reconnect-then-type 2
+  ;; Type the instant after a reconnect, while the fresh connection is
+  ;; still seeding.  Must not strand or lose the view.
+  (tmux-control-chaos--in-displayed #'tmux-control-reconnect)
+  (with-current-buffer (tmux-control-chaos--displayed)
+    (when (and (derived-mode-p 'tmux-control-mode) tmux-control--terminal)
+      (ignore-errors
+        (tmux-control--send-input tmux-control--terminal "\C-u"))))
+  (tmux-control-chaos--settle 15)
+  (with-current-buffer (tmux-control-chaos--displayed)
+    (when (derived-mode-p 'tmux-control-mode)
+      (ignore-errors (tmux-control--send-input tmux-control--terminal "\C-u"))))
+  (tmux-control-chaos--settle))
+
 (defun tmux-control-chaos--pick-op ()
   (let* ((total (apply #'+ (mapcar #'cdr tmux-control-chaos--ops)))
          (r (tmux-control-chaos--rand total)))
@@ -300,7 +428,9 @@
         n))
 
 (defun tmux-control-chaos--check (step op)
-  (let ((problems nil))
+  ;; Transient problems the op detected inline (gone by now) come first.
+  (let ((problems (prog1 tmux-control-chaos--op-problems
+                    (setq tmux-control-chaos--op-problems nil))))
     ;; Stranded view?
     (let ((b (tmux-control-chaos--displayed)))
       (unless (with-current-buffer b
@@ -316,18 +446,28 @@
         ;; Render oracle on the displayed live buffer.
         (let ((b (tmux-control-chaos--displayed)))
           (when (with-current-buffer b (derived-mode-p 'tmux-control-mode))
-            (let ((pane (buffer-local-value 'tmux-control--active-pane b)))
-              (when (and pane
-                         (not (equal (tmux-control-chaos--screen-tail b 2)
-                                     (tmux-control-chaos--capture-tail pane 2))))
-                ;; one settle retry: in-flight output is not a failure
-                (tmux-control-chaos--pump 1.0)
-                (let ((eat-tail (tmux-control-chaos--screen-tail b 2))
-                      (cap-tail (tmux-control-chaos--capture-tail pane 2)))
-                  (unless (equal eat-tail cap-tail)
+            (let* ((pane (buffer-local-value 'tmux-control--active-pane b))
+                   (eat (and pane (tmux-control-chaos--screen-tail b 2)))
+                   (cap (and pane (tmux-control-chaos--capture-tail pane 2))))
+              (when (and pane (not (equal eat cap)))
+                ;; Settle-retry: a diff is usually in-flight output, not a
+                ;; failure.  A prompt's volatile bits settle a touch slower
+                ;; (a starship prompt flashes "took Ns" for a finished
+                ;; command, briefly differing between Eat and capture), so
+                ;; pump a few times and re-compare; only a diff that
+                ;; persists is a real desync.  Each `--capture-tail' shells
+                ;; out to tmux, so keep the latest tails and reuse them for
+                ;; the failure message rather than recomputing.
+                (let ((diff t))
+                  (dotimes (_ 4)
+                    (when diff
+                      (tmux-control-chaos--pump 0.8)
+                      (setq eat (tmux-control-chaos--screen-tail b 2)
+                            cap (tmux-control-chaos--capture-tail pane 2)
+                            diff (not (equal eat cap)))))
+                  (when diff
                     (push (format "oracle diff: eat=%S cap=%S"
-                                  (mapcar #'substring-no-properties eat-tail)
-                                  cap-tail)
+                                  (mapcar #'substring-no-properties eat) cap)
                           problems)))))))
         ;; Buffers bounded (Eat's scrollback trim at work).
         (dolist (b (buffer-list))
@@ -346,11 +486,28 @@
 
 ;;;; Runners
 
+(defun tmux-control-chaos--recover ()
+  "Reconnect if the displayed buffer lost its connection.
+A real user whose control client dies just reconnects (C-c C-r); without
+this, ONE dropped connection makes every later op error \"process is not
+live\" and the run reports a cascade of the same failure instead of
+continuing.  Run between ops; returns non-nil if it reconnected."
+  (let ((b (tmux-control-chaos--displayed)))
+    (when (and (buffer-live-p b)
+               (with-current-buffer b
+                 (and (derived-mode-p 'tmux-control-mode)
+                      tmux-control--session
+                      (not (process-live-p tmux-control--process)))))
+      (ignore-errors (tmux-control-chaos--in-displayed #'tmux-control-reconnect))
+      (tmux-control-chaos--settle 15)
+      t)))
+
 (defun tmux-control-chaos-run (steps seed)
   "Run STEPS random ops from SEED; return the failure list (nil = clean)."
   (setq tmux-control-chaos--seed seed
         tmux-control-chaos--trace nil
-        tmux-control-chaos--failures nil)
+        tmux-control-chaos--failures nil
+        tmux-control-chaos--op-problems nil)
   (dotimes (i steps)
     (let ((op (tmux-control-chaos--pick-op)))
       (push (cons i op) tmux-control-chaos--trace)
@@ -358,7 +515,8 @@
           (funcall op)
         (error (push (list i op (list (format "OP ERROR: %S" err)))
                      tmux-control-chaos--failures)))
-      (tmux-control-chaos--check i op)))
+      (tmux-control-chaos--check i op)
+      (tmux-control-chaos--recover)))
   (reverse tmux-control-chaos--failures))
 
 (defun tmux-control-chaos-run-until-failure (steps seed)
@@ -367,7 +525,8 @@ The live state is left frozen for inspection; `tmux-control-chaos--trace'
 holds the operations that led there."
   (setq tmux-control-chaos--seed seed
         tmux-control-chaos--trace nil
-        tmux-control-chaos--failures nil)
+        tmux-control-chaos--failures nil
+        tmux-control-chaos--op-problems nil)
   (catch 'stop
     (dotimes (i steps)
       (let ((op (tmux-control-chaos--pick-op)))
