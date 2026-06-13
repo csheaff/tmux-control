@@ -2378,14 +2378,17 @@ output), :calls (side-effect invocations in order), :active-pane,
         (should-not tmux-control--size-pin-warned)))))
 
 (ert-deftest tmux-control-test-escape-sends-escape-immediately ()
-  ;; A bare ESC press must reach the pane the moment it is pressed.  In
+  ;; A bare ESC press should reach the pane the moment it is pressed.  In
   ;; GUI Emacs the unbound `escape' event decays into the meta prefix and
   ;; waits indefinitely for a second key -- vim's mode switch and an
-  ;; agent TUI's interrupt did nothing until the NEXT keystroke.
+  ;; agent TUI's interrupt did nothing until the NEXT keystroke.  It is
+  ;; bound in the major mode map ONLY: a modal package's ESC binding
+  ;; (xah-fly-keys/evil/viper, in a minor-mode map) must keep winning, so
+  ;; ESC must NOT sit in the high-precedence emulation override map (a
+  ;; regression that swallowed xah-fly-keys' command-mode-activate).
   (should (eq (lookup-key tmux-control-mode-map [escape])
               #'tmux-control-send-escape))
-  (should (eq (lookup-key tmux-control--override-map [escape])
-              #'tmux-control-send-escape))
+  (should-not (lookup-key tmux-control--override-map [escape]))
   (let ((sent '()))
     (cl-letf (((symbol-function 'eat-self-input)
                (lambda (_n event) (push event sent))))
