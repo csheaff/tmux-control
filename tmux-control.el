@@ -3298,9 +3298,15 @@ the matching pane's render buffer instead, so every pane updates at once."
             (with-current-buffer wbuf
               (push decoded tmux-control--output-batch)))))
        (t
-        (unless tmux-control--active-pane
+        ;; Bootstrapping the active pane from the first output exists for
+        ;; connect time, before the :pane-id reply lands.  A HOMELESS
+        ;; controller has a nil pane too, but for it this would adopt
+        ;; whatever unbuffered pane speaks first -- re-aiming a buffer
+        ;; that must stay out of rendering (Copilot review).
+        (unless (or tmux-control--active-pane tmux-control--homeless)
           (setq tmux-control--active-pane pane))
-        (when (equal pane tmux-control--active-pane)
+        (when (and tmux-control--active-pane
+                   (equal pane tmux-control--active-pane))
           (push (tmux-control--decode-output payload)
                 tmux-control--output-batch)))))))
 
@@ -3399,8 +3405,13 @@ the matching pane's render buffer instead, so every pane updates at once."
           (tmux-control--seed-window-buffer wbuf win-id))
          ((and tmux-control-window-buffers
                (not tmux-control--tiled)
-               tmux-control--window-id
-               (not (equal win-id tmux-control--window-id)))
+               ;; A HOMELESS controller owns no window at all, so every
+               ;; window's pane event is foreign to it -- without this it
+               ;; fell through to the follow branch and re-aimed itself
+               ;; (Copilot review).
+               (or tmux-control--homeless
+                   (and tmux-control--window-id
+                        (not (equal win-id tmux-control--window-id)))))
           ;; Per-window buffers: the event names some OTHER window with no
           ;; render buffer (brand-new -- tmux-control-new-window emits
           ;; %window-pane-changed for the created window BEFORE the
@@ -4099,7 +4110,14 @@ terminal, so make them the recovery path instead of a silent no-op."
   (when (and (process-live-p tmux-control--process)
              (> (length string) 0)
              (not tmux-control--suppress-responses))
-    (let ((target (or tmux-control--active-pane tmux-control--fallback-target)))
+    ;; The session-target fallback exists for connect time, before the
+    ;; active pane is known.  A HOMELESS controller (own window closed)
+    ;; must NOT fall back: it would silently drive the session's current
+    ;; pane -- which the user is watching through a DIFFERENT buffer --
+    ;; from a frozen view (Copilot review).
+    (let ((target (or tmux-control--active-pane
+                      (and (not tmux-control--homeless)
+                           tmux-control--fallback-target))))
       (if target
           (let* ((bytes (encode-coding-string string 'utf-8-unix))
                  (n (length bytes))
@@ -4182,7 +4200,11 @@ pane like any terminal paste.  This is how iTerm2's tmux integration
 pastes, and the reason is the same: the client cannot know the pane's
 bracketed-paste state, but tmux does."
   (when (> (length text) 0)
-    (let ((target (or tmux-control--active-pane tmux-control--fallback-target)))
+    ;; Same homeless gating as `tmux-control--send-input': never drive
+    ;; the session's current pane from a buffer that renders nothing.
+    (let ((target (or tmux-control--active-pane
+                      (and (not tmux-control--homeless)
+                           tmux-control--fallback-target))))
       (if (not target)
           (tmux-control--message "No active tmux pane yet")
         (let* ((bytes (encode-coding-string text 'utf-8-unix))

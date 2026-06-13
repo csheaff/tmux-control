@@ -2909,7 +2909,46 @@ output), :calls (side-effect invocations in order), :active-pane,
         ;; split-brain twice, through two different re-homing paths).
         (tmux-control--update-windows '("5\tlive\t1\t0\t@9"))
         (should-not tmux-control--window-id)
-        (should-not (assoc "@9" tmux-control--window-buffers))))))
+        (should-not (assoc "@9" tmux-control--window-buffers))
+        ;; Nor may the first arriving %output bootstrap a pane into it
+        ;; (that exists for connect time, before :pane-id lands)...
+        (tmux-control--batch-pane-output "%9" "stray")
+        (should-not tmux-control--active-pane)
+        (should-not tmux-control--output-batch)
+        ;; ...nor a %window-pane-changed re-aim it -- every window's
+        ;; pane event is foreign to a buffer that owns no window.
+        (cl-letf (((symbol-function 'tmux-control--seed-screen)
+                   (lambda () (error "homeless controller reseeded")))
+                  ((symbol-function 'tmux-control--refresh-pane-window-map)
+                   #'ignore))
+          (tmux-control--handle-line "%window-pane-changed @9 %9"))
+        (should-not tmux-control--active-pane)))))
+
+(ert-deftest tmux-control-test-homeless-controller-drops-input-fallback ()
+  ;; With the active pane nil, input and paste normally fall back to the
+  ;; session target -- a connect-time affordance.  A HOMELESS controller
+  ;; must not: it would silently drive the session's current pane (which
+  ;; the user watches through a DIFFERENT buffer) from a frozen view.
+  (let ((sent '()))
+    (cl-letf (((symbol-function 'tmux-control--send-command)
+               (lambda (cmd &optional _kind) (push cmd sent)))
+              ((symbol-function 'tmux-control--message) #'ignore)
+              ((symbol-function 'process-live-p) (lambda (_) t)))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (setq-local tmux-control--session "s"
+                    tmux-control--process (make-symbol "proc")
+                    tmux-control--active-pane nil
+                    tmux-control--fallback-target "s:"
+                    tmux-control--homeless t)
+        (tmux-control--send-input nil "x")
+        (tmux-control--paste-to-pane "clip")
+        (should (null sent))
+        ;; The connect-time fallback (NOT homeless) still works.
+        (setq tmux-control--homeless nil)
+        (tmux-control--send-input nil "x")
+        (should (cl-some (lambda (c) (string-match-p "send-keys -t s:" c))
+                         sent))))))
 
 (ert-deftest tmux-control-test-homeless-controller-stays-out-of-routing ()
   ;; A homeless controller does NOT adopt windows: a first cut that
