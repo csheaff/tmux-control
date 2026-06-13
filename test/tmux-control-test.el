@@ -3036,25 +3036,26 @@ output), :calls (side-effect invocations in order), :active-pane,
               ((symbol-function 'tmux-control--dispatch-wheel)
                (lambda (_) (cl-incf scrolled)))
               ((symbol-function 'posn-window) (lambda (_) (selected-window))))
-      (with-temp-buffer
-        (tmux-control-mode)
-        (set-window-buffer (selected-window) (current-buffer))
-        ;; Mouse-grabbing (or alt-screen) app: forward to the app.
-        (cl-letf (((symbol-function 'tmux-control--alt-screen-p)
-                   (lambda () nil))
-                  ((symbol-function 'tmux-control--pane-grabs-mouse-p)
-                   (lambda () t)))
-          (tmux-control-wheel-down event)
-          (should (= forwarded 1))
-          (should (= scrolled 0)))
-        ;; Plain normal-screen pane: ordinary scrolling, not forwarded.
-        (cl-letf (((symbol-function 'tmux-control--alt-screen-p)
-                   (lambda () nil))
-                  ((symbol-function 'tmux-control--pane-grabs-mouse-p)
-                   (lambda () nil)))
-          (tmux-control-wheel-down event)
-          (should (= forwarded 1))
-          (should (= scrolled 1)))))))
+      (save-window-excursion
+        (with-temp-buffer
+          (tmux-control-mode)
+          (set-window-buffer (selected-window) (current-buffer))
+          ;; Mouse-grabbing (or alt-screen) app: forward to the app.
+          (cl-letf (((symbol-function 'tmux-control--alt-screen-p)
+                     (lambda () nil))
+                    ((symbol-function 'tmux-control--pane-grabs-mouse-p)
+                     (lambda () t)))
+            (tmux-control-wheel-down event)
+            (should (= forwarded 1))
+            (should (= scrolled 0)))
+          ;; Plain normal-screen pane: ordinary scrolling, not forwarded.
+          (cl-letf (((symbol-function 'tmux-control--alt-screen-p)
+                     (lambda () nil))
+                    ((symbol-function 'tmux-control--pane-grabs-mouse-p)
+                     (lambda () nil)))
+            (tmux-control-wheel-down event)
+            (should (= forwarded 1))
+            (should (= scrolled 1))))))))
 
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
