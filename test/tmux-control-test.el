@@ -3117,5 +3117,31 @@ output), :calls (side-effect invocations in order), :active-pane,
           (let ((escape2 (assoc "<escape>" (tmux-control--audit-rows))))
             (should (eq (nth 3 escape2) 'overridden))))))))
 
+(ert-deftest tmux-control-test-kill-render-buffers-by-name ()
+  ;; A reconnect must sweep stale render buffers even when the registry
+  ;; has drifted out of sync -- so the sweep is by NAME, not the
+  ;; registry.  Chaos-soak find: after visiting a window then
+  ;; reconnecting, that window's render buffer survived holding the dead
+  ;; process, and every key on it errored "process is not live".
+  (let* ((ctrl (generate-new-buffer "*tmux-control:local:cs*"))
+         (r0 (generate-new-buffer "*tmux-control:local:cs:@0*"))
+         (r7 (generate-new-buffer "*tmux-control:local:cs:@7*"))
+         ;; A pane (tiling) buffer uses ":%", and another session's
+         ;; render buffer has a different controller name -- neither is
+         ;; ours; both must survive.
+         (pane (generate-new-buffer "*tmux-control:local:cs:%2*"))
+         (other (generate-new-buffer "*tmux-control:local:other:@0*")))
+    (unwind-protect
+        (progn
+          (tmux-control--kill-render-buffers ctrl)
+          (should (buffer-live-p ctrl))      ; never kills the controller
+          (should-not (buffer-live-p r0))    ; @-render buffers swept
+          (should-not (buffer-live-p r7))
+          (should (buffer-live-p pane))      ; :% pane buffer untouched
+          (should (buffer-live-p other)))    ; other session untouched
+      (dolist (b (list ctrl r0 r7 pane other))
+        (when (buffer-live-p b)
+          (let ((kill-buffer-query-functions nil)) (kill-buffer b)))))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

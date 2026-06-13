@@ -2588,14 +2588,8 @@ so the tmux-control keys get out of the way; the mode line shows
     (setq tmux-control--command-watchdog-timer nil)
     (setq tmux-control--command-watchdog-warned nil)
     ;; A (re)connect starts the per-window buffer registry fresh; stale
-    ;; sibling buffers from a previous connection eat output for window ids
-    ;; that may no longer exist.
-    (let ((self (current-buffer)))
-      (dolist (entry tmux-control--window-buffers)
-        (let ((buf (cdr entry)))
-          (when (and (buffer-live-p buf) (not (eq buf self)))
-            (let ((kill-buffer-query-functions nil))
-              (kill-buffer buf))))))
+    ;; sibling render buffers from the previous connection must go.
+    (tmux-control--kill-render-buffers (current-buffer))
     (setq tmux-control--window-buffers nil)
     (setq tmux-control--window-id nil)
     (setq tmux-control--homeless nil)
@@ -4825,6 +4819,26 @@ Must run in the controller buffer."
   (setq tmux-control--window-buffers
         (cons (cons window-id buffer)
               (assoc-delete-all window-id tmux-control--window-buffers))))
+
+(defun tmux-control--kill-render-buffers (controller)
+  "Kill every per-window render buffer belonging to CONTROLLER.
+A render buffer is named \"*<CONTROLLER-name>:@ID*\", so CONTROLLER's
+own name with the closing star replaced by \":@\" is the exact prefix.
+
+Sweeps by NAME rather than the `tmux-control--window-buffers' registry
+on purpose: the registry can drift out of sync with the live buffers (a
+visited window deregistered without its buffer killed), and a
+registry-only sweep then leaves the orphan behind.  On a reconnect that
+orphan keeps the now-dead process, so reaching it (`C-x b', a later
+window event) hits \"process is not live\" with no recovery -- the
+chaos-soak find this guards against.  CONTROLLER itself is never killed."
+  (let ((prefix (concat (substring (buffer-name controller) 0 -1) ":@")))
+    (dolist (buf (buffer-list))
+      (when (and (buffer-live-p buf)
+                 (not (eq buf controller))
+                 (string-prefix-p prefix (buffer-name buf)))
+        (let ((kill-buffer-query-functions nil))
+          (kill-buffer buf))))))
 
 (defun tmux-control--session-display-buffer (&optional ctrl)
   "Return the buffer currently representing CTRL's session on screen.
