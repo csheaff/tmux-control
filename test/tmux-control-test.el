@@ -2709,7 +2709,15 @@ output), :calls (side-effect invocations in order), :active-pane,
               (setq-local tmux-control--scrollback-extending nil)
               (tmux-control--scrollback-scroll-watch win deep)
               (should (= scheduled 1))
-              (should-not tmux-control--scrollback-extending))
+              (should-not tmux-control--scrollback-extending)
+              ;; Reached the oldest line already: near the top no longer
+              ;; schedules (nothing more to load).
+              (setq-local tmux-control--scrollback-extending nil)
+              (setq-local tmux-control--scrollback-at-top t)
+              (tmux-control--scrollback-scroll-watch win top)
+              (should (= scheduled 1))
+              (should-not tmux-control--scrollback-extending)
+              (setq-local tmux-control--scrollback-at-top nil))
             ;; At the cap, even pinned to the very top, nothing more loads.
             (let ((tmux-control-scrollback-lines 500))
               (setq-local tmux-control--scrollback-depth 500)

@@ -711,5 +711,70 @@ runs fast without raising the server's history-limit."
               (delete-process (buffer-local-value 'tmux-control--process live)))
             (kill-buffer live))))))))
 
+(ert-deftest tmux-control-it-scrollback-lazy-extend-hits-history-top ()
+  "When the pane has less history than the cap, extension loads everything
+older then stops: the depth settles at the ACTUAL number of lines tmux had
+(not the requested cap), the `at-top' latch trips so further scrolls do not
+re-query an empty range, and the buffer still equals one full capture with
+no gap or duplicate at the final seam.  This is the case where recording the
+requested depth instead of the received depth would risk a seam error."
+  (skip-unless (tmux-control-it--available-p))
+  (let ((tmux-control-scrollback-initial-lines 50)
+        (tmux-control-scrollback-extend-lines 100)
+        (tmux-control-scrollback-lines 5000)   ; cap far above real history
+        (tmux-control-compact-scrollback nil)
+        ;; ~120 lines of history -- well under the 5000 cap.
+        (content (mapconcat (lambda (i) (format "L%04d" i))
+                            (number-sequence 1 120) "\n")))
+    (tmux-control-it--with-pane (concat content "\n") 100 24
+      (cl-letf (((symbol-function 'tmux-control--scrollback-scroll-watch)
+                 #'ignore))
+        (let ((live (tmux-control-connect nil tmux-control-it--socket "t")))
+          (unwind-protect
+              (progn
+                (tmux-control-it--pump-until
+                 5 (lambda () (with-current-buffer live tmux-control--active-pane)))
+                (let* ((sb-name (format "*%s-scrollback*" (buffer-name live)))
+                       (sb nil))
+                  (with-current-buffer live (tmux-control-scrollback))
+                  (setq sb (get-buffer sb-name))
+                  (tmux-control-it--pump-until
+                   10 (lambda () (with-current-buffer sb
+                                   (not (string-match-p "capturing"
+                                                        (buffer-string))))))
+                  ;; Drive extends past the real top of history.
+                  (dotimes (_ 4)
+                    (with-current-buffer sb
+                      (setq tmux-control--scrollback-extending nil))
+                    (tmux-control--scrollback-extend sb)
+                    (tmux-control-it--pump-until
+                     10 (lambda ()
+                          (with-current-buffer sb
+                            (not tmux-control--scrollback-extending)))))
+                  ;; Reached the oldest line: latched, and depth is the actual
+                  ;; history loaded -- far below the 5000 cap, not pinned to it.
+                  (should (buffer-local-value
+                           'tmux-control--scrollback-at-top sb))
+                  (let ((depth (buffer-local-value
+                                'tmux-control--scrollback-depth sb)))
+                    (should (< depth 500))
+                    (should (> depth 0)))
+                  ;; Complete and seam-correct: every history line, once each.
+                  (let ((got (tmux-control-it--sb-indices
+                              (tmux-control-it--buffer-text sb))))
+                    (should (tmux-control-it--contiguous-p got))
+                    (should (equal got
+                                   (tmux-control-it--sb-indices
+                                    (tmux-control-it--tmux
+                                     "capture-pane" "-p" "-S" "-5000"
+                                     "-t" pane)))))
+                  (when (buffer-live-p sb) (kill-buffer sb))))
+            (when (buffer-live-p live)
+              (when (process-live-p
+                     (buffer-local-value 'tmux-control--process live))
+                (delete-process
+                 (buffer-local-value 'tmux-control--process live)))
+              (kill-buffer live))))))))
+
 (provide 'tmux-control-integration)
 ;;; tmux-control-integration.el ends here

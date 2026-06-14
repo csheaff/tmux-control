@@ -382,6 +382,11 @@ Grows as `tmux-control--scrollback-extend' prepends older lines, up to
 `tmux-control-scrollback-lines'.")
 (defvar-local tmux-control--scrollback-extending nil
   "Non-nil while an extend capture is in flight, to coalesce scrolls.")
+(defvar-local tmux-control--scrollback-at-top nil
+  "Non-nil once extension has reached the oldest available pane-history line.
+Set when an extend capture returns fewer lines than requested -- there is
+nothing older to load -- so the scroll watcher stops firing futile
+captures.  Reset when the pager opens or is refreshed.")
 (defvar-local tmux-control--command-queue nil
   "Pending control-mode command entries, oldest first.
 Each entry is a cons (KIND . SEND-TIME): the reply-handler kind enqueued
@@ -2128,11 +2133,19 @@ inside redisplay."
                (with-current-buffer buffer
                  (and (derived-mode-p 'tmux-control-scrollback-mode)
                       (not tmux-control--scrollback-extending)
+                      (not tmux-control--scrollback-at-top)
                       (< tmux-control--scrollback-depth
                          tmux-control-scrollback-lines)
-                      ;; within one window-height of the top
-                      (<= (count-lines (point-min) (min start (point-max)))
-                          (max 20 (window-body-height window))))))
+                      ;; Within one window-height of the top.  Test it with a
+                      ;; bounded `forward-line' from the top (at most a
+                      ;; window-height of line moves) rather than
+                      ;; `count-lines' to START, which is O(buffer-size) and
+                      ;; would run on every scroll event of a long history.
+                      (<= (min start (point-max))
+                          (save-excursion
+                            (goto-char (point-min))
+                            (forward-line (max 20 (window-body-height window)))
+                            (point))))))
       ;; Guard against a burst of scroll events scheduling many extends.
       (with-current-buffer buffer
         (setq tmux-control--scrollback-extending t))
@@ -2154,7 +2167,14 @@ a dead connection just stops extending (the snapshot stays put)."
              (live tmux-control--live-buffer)
              (proc (and (buffer-live-p live)
                         (buffer-local-value 'tmux-control--process live))))
-        (if (or (<= new-depth old-depth) (not (process-live-p proc)))
+        (if (or tmux-control--scrollback-at-top
+                (<= new-depth old-depth)
+                (not (process-live-p proc)))
+            ;; Nothing more to load (already at the oldest line, at the cap,
+            ;; or disconnected): clear the latch and stop.  Guarding on
+            ;; `at-top' here as well as in the scroll watcher keeps a direct
+            ;; call from re-capturing tmux's clamped oldest line and
+            ;; prepending it as a duplicate.
             (setq tmux-control--scrollback-extending nil)
           ;; Own the in-flight latch: callers (the scroll watcher) set it too,
           ;; to coalesce a burst before the deferred extend runs, but setting
@@ -2164,15 +2184,30 @@ a dead connection just stops extending (the snapshot stays put)."
           (with-current-buffer live
             (tmux-control--query
              ;; Strictly older than the current top line (OLD-DEPTH back):
-             ;; from NEW-DEPTH back down to OLD-DEPTH+1 back.
+             ;; from NEW-DEPTH back down to OLD-DEPTH+1 back.  This delta is
+             ;; pure history (its end is above the visible screen), so the
+             ;; reply's line count is exactly how many older lines exist.
              (tmux-control--scrollback-capture-command
               target new-depth trailing (1+ old-depth))
              (lambda (reply-lines)
                (when (buffer-live-p buffer)
                  (with-current-buffer buffer
-                   (when reply-lines
-                     (tmux-control--scrollback-prepend
-                      (string-join reply-lines "\n") new-depth))
+                   (let ((got (length reply-lines)))
+                     (when reply-lines
+                       ;; Advance depth by the lines ACTUALLY received, not
+                       ;; the lines requested: tmux clamps the capture to the
+                       ;; oldest available line, so a short reply means the
+                       ;; loaded top really sits OLD-DEPTH+GOT back, and the
+                       ;; next extend must continue from there to stay
+                       ;; seam-accurate.
+                       (tmux-control--scrollback-prepend
+                        (string-join reply-lines "\n") (+ old-depth got)))
+                     ;; Fewer lines than asked for: that was the top of the
+                     ;; available history -- stop extending until reopen or
+                     ;; refresh, instead of re-querying an empty range on
+                     ;; every further scroll.
+                     (when (< got (- new-depth old-depth))
+                       (setq tmux-control--scrollback-at-top t)))
                    (setq tmux-control--scrollback-extending nil)))))))))))
 
 (defun tmux-control--scrollback-prepend (text new-depth)
@@ -2282,6 +2317,7 @@ the live interactive pane."
                     (min tmux-control-scrollback-initial-lines
                          tmux-control-scrollback-lines))
         (setq-local tmux-control--scrollback-extending nil)
+        (setq-local tmux-control--scrollback-at-top nil)
         (add-hook 'window-scroll-functions
                   #'tmux-control--scrollback-scroll-watch nil t)
         ;; Fresh pager: not yet scrolled up into history, so a wheel-down
@@ -2326,13 +2362,20 @@ the initial chunk or ballooning to the cap."
   (let ((line (line-number-at-pos))
         (column (current-column))
         (at-end (eobp)))
-    (tmux-control--scrollback-request (current-buffer)
-                                      tmux-control--scrollback-target
-                                      (max tmux-control--scrollback-depth
-                                           tmux-control-scrollback-initial-lines)
-                                      tmux-control--capture-trailing-p
-                                      (unless at-end line)
-                                      (unless at-end column))))
+    ;; A refresh may reveal more history again (e.g. the cap was raised), so
+    ;; let extension resume.
+    (setq tmux-control--scrollback-at-top nil)
+    (tmux-control--scrollback-request
+     (current-buffer)
+     tmux-control--scrollback-target
+     ;; Re-capture the current depth, but never above the cap -- guards a
+     ;; configuration where the initial chunk is larger than the maximum.
+     (min tmux-control-scrollback-lines
+          (max tmux-control--scrollback-depth
+               tmux-control-scrollback-initial-lines))
+     tmux-control--capture-trailing-p
+     (unless at-end line)
+     (unless at-end column))))
 
 (defun tmux-control--scrollback-window-size (window)
   "Return WINDOW's terminal dimensions as (WIDTH . HEIGHT).
