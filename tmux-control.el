@@ -2332,6 +2332,10 @@ the live interactive pane."
                              tmux-control-scrollback-lines)))
         (tmux-control-scrollback-mode)
         (tmux-control--disable-line-numbers)
+        ;; Terminal rows must not soft-wrap at word boundaries (mangles
+        ;; fixed-column TUI borders); run here, after the mode, so a global
+        ;; `visual-line-mode' cannot re-enable it.
+        (tmux-control--disable-soft-wrap)
         (setq-local tmux-control--host host)
         (setq-local tmux-control--socket-name socket-name)
         (setq-local tmux-control--session session)
@@ -2765,6 +2769,22 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
   (setq-local right-margin-width 0)
   (dolist (window (get-buffer-window-list (current-buffer) nil t))
     (set-window-margins window 0 0)))
+
+(defun tmux-control--disable-soft-wrap ()
+  "Turn off `visual-line-mode' / `word-wrap' in the current buffer.
+Scrollback rows are terminal grid lines; when a row overflows the window
+\(e.g. a wide remote pane captured for a narrower window) `word-wrap' reflows
+it at a WORD boundary, which smears fixed-column box borders -- the `|'/`\\='
+sidebar of a TUI -- across the wrap and mangles the layout.  Plain character
+wrapping keeps every column aligned.
+
+Must run AFTER the major mode is established, not from the mode body: a
+globalized `global-visual-line-mode' (in the user's config) turns
+`visual-line-mode' back on from the `after-change-major-mode-hook' that fires
+when the mode is set, so anything the mode body does is immediately undone."
+  (when (bound-and-true-p visual-line-mode)
+    (visual-line-mode -1))
+  (setq-local word-wrap nil))
 
 (defun tmux-control--eat-semi-char-mode-advice (orig-fn &rest args)
   "Make `eat-semi-char-mode' return tmux-control scrollback buffers live.
