@@ -3189,14 +3189,17 @@ output), :calls (side-effect invocations in order), :active-pane,
 (ert-deftest tmux-control-test-wheel-scrolls-live-history-routing ()
   ;; `tmux-control-wheel-scrolls-live-history' off: wheel-up over a
   ;; normal-screen pane opens the pager immediately (legacy behavior).  On:
-  ;; it scrolls the live view's retained history until the top, where it
-  ;; hands off to the pager for the deeper pre-session history.
-  (let ((scrolled 0) (pager 0) (at-top nil)
+  ;; while there is retained history to scroll into (or you have scrolled up
+  ;; into it) wheel-up scrolls the live view in place; only when the whole
+  ;; retained history already fits on screen -- so you are still at the live
+  ;; screen and cannot scroll -- does it open the pager.  Crucially, being
+  ;; scrolled up (not exhausted) never flings to the pager.
+  (let ((scrolled 0) (pager 0) (exhausted nil)
         (event (list 'wheel-up (list (selected-window) 1 '(0 . 0) 0))))
     (cl-letf (((symbol-function 'tmux-control--wheel-should-enter-scrollback-p)
                (lambda (&rest _) t))
-              ((symbol-function 'tmux-control--live-history-at-top-p)
-               (lambda (_w) at-top))
+              ((symbol-function 'tmux-control--live-history-exhausted-p)
+               (lambda (_w) exhausted))
               ((symbol-function 'tmux-control--scroll-live-history)
                (lambda (_e _w) (cl-incf scrolled)))
               ((symbol-function 'tmux-control-scrollback)
@@ -3211,36 +3214,43 @@ output), :calls (side-effect invocations in order), :active-pane,
             (tmux-control-wheel-scroll event)
             (should (= pager 1))
             (should (= scrolled 0)))
-          ;; ON, not at the top: scroll the live retained history.
-          (setq at-top nil)
+          ;; ON, history available / scrolled up (not exhausted): scroll in
+          ;; place, never the pager -- no fling back to the live tail.
+          (setq exhausted nil)
           (let ((tmux-control-wheel-scrolls-live-history t))
             (tmux-control-wheel-scroll event)
             (should (= scrolled 1))
             (should (= pager 1)))
-          ;; ON, at the top of retained history: open the deep pager.
-          (setq at-top t)
+          ;; ON, whole retained history on screen (at the live screen, cannot
+          ;; scroll): open the pager -- seamless from the live tail.
+          (setq exhausted t)
           (let ((tmux-control-wheel-scrolls-live-history t))
             (tmux-control-wheel-scroll event)
             (should (= pager 2))
             (should (= scrolled 1))))))))
 
 (ert-deftest tmux-control-test-sync-windows-holds-scrolled-away ()
-  ;; The scroll-follow set: with live-history scrolling ON, a window whose
-  ;; live cursor is scrolled out of view is dropped (so streaming output
-  ;; cannot yank a scrolled-up reader back to the bottom); the `buffer'
-  ;; entry and any window still showing the cursor stay.  With it OFF, the
-  ;; set is exactly what Eat reports -- byte-identical legacy behavior.
+  ;; The scroll-follow set.  With live-history scrolling ON it is keyed on
+  ;; cursor visibility: a window showing the live cursor follows (win-a), one
+  ;; scrolled away does not (win-b) -- so a scrolled-up reader holds and a
+  ;; scrolled-back-down one resumes, regardless of where point sits.  Eat's
+  ;; `buffer' point decision is preserved.  With it OFF, the set is exactly
+  ;; what Eat reports -- byte-identical legacy behavior.
   (cl-letf (((symbol-function 'eat--synchronize-scroll-windows)
              (lambda (&rest _) (list 'buffer 'win-a 'win-b)))
             ((symbol-function 'eat-term-live-p) (lambda (_) t))
             ((symbol-function 'eat-term-display-cursor) (lambda (_) 42))
-            ;; The live cursor is visible only in win-a.
+            ((symbol-function 'get-buffer-window-list)
+             (lambda (&rest _) (list 'win-a 'win-b)))
+            ;; The live cursor is visible only in win-a (accepts the PARTIALLY
+            ;; arg the follow-set check now passes).
             ((symbol-function 'pos-visible-in-window-p)
-             (lambda (_pos w) (eq w 'win-a))))
+             (lambda (_pos w &optional _partially) (eq w 'win-a))))
     (let ((tmux-control--terminal 'term))
       (let ((tmux-control-wheel-scrolls-live-history nil))
         (should (equal (tmux-control--current-sync-windows)
                        '(buffer win-a win-b))))
+      ;; ON: keep `buffer' (point) + only the window showing the cursor.
       (let ((tmux-control-wheel-scrolls-live-history t))
         (should (equal (tmux-control--current-sync-windows)
                        '(buffer win-a)))))))
