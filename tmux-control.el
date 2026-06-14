@@ -2120,7 +2120,14 @@ synchronously; BUFFER may have been killed in between."
           (forward-line (1- line))
           (move-to-column (or column 0))
           (when-let* ((window (get-buffer-window buffer t)))
-            (set-window-point window (point)))))))))
+            (set-window-point window (point)))))
+        ;; The full content has landed: arm lazy extension.  It was held off
+        ;; (extending = t) from the moment the pager opened so the one-line
+        ;; "capturing…" placeholder -- which makes the top trivially visible --
+        ;; could not trip the scroll watcher into a spurious extend before the
+        ;; initial chunk even arrived.  Clear it LAST, after the point/window
+        ;; moves above whose redisplay would otherwise fire the watcher.
+        (setq tmux-control--scrollback-extending nil)))))
 
 (defun tmux-control--scrollback-scroll-watch (window start)
   "Extend scrollback when WINDOW has scrolled near the top (START).
@@ -2316,7 +2323,11 @@ the live interactive pane."
         (setq-local tmux-control--scrollback-depth
                     (min tmux-control-scrollback-initial-lines
                          tmux-control-scrollback-lines))
-        (setq-local tmux-control--scrollback-extending nil)
+        ;; Hold extension OFF until the initial chunk lands (the populate
+        ;; callback clears this) so the "capturing…" placeholder, which makes
+        ;; the top trivially visible, cannot trip the watcher into loading a
+        ;; second chunk before the first has even arrived.
+        (setq-local tmux-control--scrollback-extending t)
         (setq-local tmux-control--scrollback-at-top nil)
         (add-hook 'window-scroll-functions
                   #'tmux-control--scrollback-scroll-watch nil t)
@@ -2365,6 +2376,9 @@ the initial chunk or ballooning to the cap."
     ;; A refresh may reveal more history again (e.g. the cap was raised), so
     ;; let extension resume.
     (setq tmux-control--scrollback-at-top nil)
+    ;; Hold extension off while the reload is in flight; the populate callback
+    ;; clears it once the content lands (as on first open).
+    (setq tmux-control--scrollback-extending t)
     (tmux-control--scrollback-request
      (current-buffer)
      tmux-control--scrollback-target

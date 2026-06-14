@@ -776,5 +776,54 @@ requested depth instead of the received depth would risk a seam error."
                  (buffer-local-value 'tmux-control--process live)))
               (kill-buffer live))))))))
 
+(ert-deftest tmux-control-it-scrollback-lazy-open-no-spurious-extend ()
+  "Opening the pager loads ONLY the initial chunk -- it does not balloon into
+a second chunk because the brief \"capturing…\" placeholder makes the top
+trivially visible.  Unlike the other lazy tests this does NOT stub the scroll
+watcher: it drives the real one, because the watcher firing during the
+placeholder is exactly the regression being guarded (a fresh open settling at
+initial+extend instead of initial)."
+  (skip-unless (tmux-control-it--available-p))
+  (let ((tmux-control-scrollback-initial-lines 50)
+        (tmux-control-scrollback-extend-lines 100)
+        (tmux-control-scrollback-lines 5000)
+        (tmux-control-compact-scrollback nil)
+        (content (mapconcat (lambda (i) (format "L%04d" i))
+                            (number-sequence 1 600) "\n")))
+    (tmux-control-it--with-pane (concat content "\n") 100 24
+      (let ((live (tmux-control-connect nil tmux-control-it--socket "t")))
+        (unwind-protect
+            (progn
+              (tmux-control-it--pump-until
+               5 (lambda () (with-current-buffer live tmux-control--active-pane)))
+              (let* ((sbname (format "*%s-scrollback*" (buffer-name live)))
+                     (sb nil))
+                (with-current-buffer live (tmux-control-scrollback))
+                (setq sb (get-buffer sbname))
+                (tmux-control-it--pump-until
+                 10 (lambda () (with-current-buffer sb
+                                 (not (string-match-p "capturing"
+                                                      (buffer-string))))))
+                ;; Give any extend timer that should have been suppressed an
+                ;; ample chance to (not) fire.
+                (tmux-control-it--pump 0.5)
+                ;; Still just the initial chunk -- not initial + extend --
+                ;; and nothing in flight (an extend scheduled-but-pending would
+                ;; leave depth at 50 yet `extending' non-nil, so check both).
+                (should (= (buffer-local-value
+                            'tmux-control--scrollback-depth sb)
+                           50))
+                (should-not (buffer-local-value
+                             'tmux-control--scrollback-extending sb))
+                (should (< (with-current-buffer sb
+                             (count-lines (point-min) (point-max)))
+                           120))
+                (when (buffer-live-p sb) (kill-buffer sb))))
+          (when (buffer-live-p live)
+            (when (process-live-p
+                   (buffer-local-value 'tmux-control--process live))
+              (delete-process (buffer-local-value 'tmux-control--process live)))
+            (kill-buffer live)))))))
+
 (provide 'tmux-control-integration)
 ;;; tmux-control-integration.el ends here
