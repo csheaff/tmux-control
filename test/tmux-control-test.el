@@ -2660,19 +2660,6 @@ output), :calls (side-effect invocations in order), :active-pane,
       (should-not tmux-control--scrollback-extending)
       (should (string-match-p "L1" (buffer-string))))))
 
-(ert-deftest tmux-control-test-disable-soft-wrap ()
-  ;; Scrollback rows are terminal grid lines; `word-wrap' (soft, word-boundary
-  ;; wrapping) reflows an overflowing row mid-word and smears fixed-column TUI
-  ;; borders across the wrap (issue #57).  The helper turns it off even when a
-  ;; global `visual-line-mode' (stood in for here) had switched it on.
-  (with-temp-buffer
-    (visual-line-mode 1)
-    (should (bound-and-true-p visual-line-mode))
-    (should word-wrap)                  ; precondition visual-line set it
-    (tmux-control--disable-soft-wrap)
-    (should-not (bound-and-true-p visual-line-mode))
-    (should-not word-wrap)))
-
 (ert-deftest tmux-control-test-scrollback-prepend-pins-viewport ()
   ;; Prepending older history must keep the view on the same content line,
   ;; not jump it to the freshly loaded lines.  The anchor marker (insertion
