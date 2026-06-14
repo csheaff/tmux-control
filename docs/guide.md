@@ -343,17 +343,28 @@ hardcoded `/ssh:…`.
 
 ## Scrollback
 
-`tmux-control-scrollback-lines` (default `10000`) sets how many lines of pane
-history each scrollback view captures.  Opening scrollback captures, colorizes,
-and — when compaction is on — collapses that many lines, all of which scale
-with the number, so a very large value over a busy repainting pane can make the
-view take a moment to appear.  Raise it if you routinely scroll back further and
-can accept the extra cost; it is capped by the pane's own tmux `history-limit`.
+Scrollback loads **lazily**, so the view opens instantly no matter how deep
+the pane history is:
+
+- `tmux-control-scrollback-initial-lines` (default `500`) is captured when the
+  view first opens — enough to fill a screen with margin, and cheap to
+  capture, colorize, and (when compaction is on) collapse, so the pager
+  appears immediately.
+- Scrolling toward the top loads more, `tmux-control-scrollback-extend-lines`
+  (default `2000`) at a time, prepended above what you are reading with your
+  viewport held in place — so the cost of older history is paid only for the
+  lines you actually look at, in bounded chunks, never all at once.
+- `tmux-control-scrollback-lines` (default `10000`) only **caps** how deep the
+  lazy extension will go.  Raise it if you routinely scroll back very far; it
+  is itself capped by the pane's own tmux `history-limit`.  Because the open no
+  longer captures this many lines, a large value here is now cheap.
 
 The capture itself rides the **live control connection** — no separate `tmux`
-or `ssh` process — and arrives asynchronously: the view opens immediately and
-fills when the reply lands, so a remote session's network round trip never
-freezes Emacs.
+or `ssh` process — and every chunk arrives asynchronously: the view opens
+immediately and fills (and extends) when each reply lands, so a remote
+session's network round trip never freezes Emacs.  `g`
+(`tmux-control-scrollback-refresh`) re-captures however much history you have
+scrolled into, not the full cap.
 
 Scrollback shows pane rows exactly as tmux wraps them at the pane's current
 width — tmux re-wraps history when the pane resizes, so the capture always

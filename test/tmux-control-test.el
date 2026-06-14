@@ -1636,7 +1636,12 @@ buffer's own directory with a prefix arg or when the option is off."
     (should (equal (tmux-control--scrollback-capture-command "%5" 10000 nil)
                    "capture-pane -p -e -S -10000 -t %5"))
     (should (equal (tmux-control--scrollback-capture-command nil 200 t)
-                   "capture-pane -p -e -N -S -200")))
+                   "capture-pane -p -e -N -S -200"))
+    ;; END-BACK caps the end so a lazy-extend delta covers only the lines
+    ;; strictly older than what is already loaded: from -NEW-DEPTH back up
+    ;; to (but not including) the previous top at -(OLD-DEPTH+1).
+    (should (equal (tmux-control--scrollback-capture-command "%5" 2500 nil 501)
+                   "capture-pane -p -e -S -2500 -E -501 -t %5")))
   (let ((tmux-control-scrollback-join-wrapped-lines t))
     (should (equal (tmux-control--scrollback-capture-command "%1" 50 nil)
                    "capture-pane -p -e -J -S -50 -t %1"))))
@@ -2623,6 +2628,103 @@ output), :calls (side-effect invocations in order), :active-pane,
            (list 'wheel-down (list (selected-window))))
           (should (= lived 1))
           (should (= dispatched 2)))))))
+
+(ert-deftest tmux-control-test-scrollback-prepend ()
+  ;; Lazy extension prepends an older delta above the already-loaded
+  ;; history: the new lines land at the top, a separator newline keeps the
+  ;; delta's last line from gluing onto the old top line, and the loaded
+  ;; depth advances to the freshly captured value.
+  (let ((tmux-control-compact-scrollback nil))
+    (with-temp-buffer
+      (tmux-control-scrollback-mode)
+      (let ((inhibit-read-only t)) (insert "old-top line\nlive tail\n"))
+      (setq-local tmux-control--scrollback-depth 500)
+      ;; A delta with no trailing newline must still be separated from the
+      ;; existing top line.
+      (tmux-control--scrollback-prepend "older-1\nolder-2" 2500)
+      (should (equal (buffer-string)
+                     "older-1\nolder-2\nold-top line\nlive tail\n"))
+      (should (= tmux-control--scrollback-depth 2500)))))
+
+(ert-deftest tmux-control-test-scrollback-prepend-pins-viewport ()
+  ;; Prepending older history must keep the view on the same content line,
+  ;; not jump it to the freshly loaded lines.  The anchor marker (insertion
+  ;; type t) tracks the line at `window-start' across the insert-before, so
+  ;; the line you were reading stays put while new history appears above it.
+  (let ((tmux-control-compact-scrollback nil))
+    (save-window-excursion
+      (with-temp-buffer
+        (tmux-control-scrollback-mode)
+        (let ((inhibit-read-only t))
+          (dotimes (i 20) (insert (format "orig %02d\n" i))))
+        (setq-local tmux-control--scrollback-depth 500)
+        (set-window-buffer (selected-window) (current-buffer))
+        (let* ((win (selected-window))
+               (target (save-excursion
+                         (goto-char (point-min)) (forward-line 5) (point)))
+               (line-at (lambda ()
+                          (save-excursion
+                            (goto-char (window-start win))
+                            (buffer-substring-no-properties
+                             (line-beginning-position) (line-end-position))))))
+          (set-window-start win target)
+          (should (equal (funcall line-at) "orig 05"))
+          (tmux-control--scrollback-prepend "older A\nolder B\nolder C" 2500)
+          ;; Same line is still at the top of the window.
+          (should (equal (funcall line-at) "orig 05"))
+          (should (= tmux-control--scrollback-depth 2500)))))))
+
+(ert-deftest tmux-control-test-scrollback-scroll-watch-gates-extend ()
+  ;; The scroll watcher only schedules an extend when the view is near the
+  ;; top of the loaded history, more history exists, and none is already in
+  ;; flight -- and it latches `--scrollback-extending' so a burst of scroll
+  ;; events coalesces into a single capture.  START is an argument (as
+  ;; `window-scroll-functions' passes it), so the gating is exercised
+  ;; without depending on batch redisplay settling a real window start.
+  (let ((scheduled 0))
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (&rest _) (cl-incf scheduled))))
+      (save-window-excursion
+        (with-temp-buffer
+          (tmux-control-scrollback-mode)
+          (let ((inhibit-read-only t))
+            (dotimes (i 60) (insert (format "line %d\n" i))))
+          (set-window-buffer (selected-window) (current-buffer))
+          (let ((win (selected-window))
+                (top (point-min))
+                (deep (save-excursion
+                        (goto-char (point-min)) (forward-line 50) (point))))
+            (let ((tmux-control-scrollback-lines 10000))
+              ;; Near the top, more to load, nothing in flight -> schedule,
+              ;; and latch the in-flight guard.
+              (setq-local tmux-control--scrollback-depth 500)
+              (setq-local tmux-control--scrollback-extending nil)
+              (tmux-control--scrollback-scroll-watch win top)
+              (should (= scheduled 1))
+              (should tmux-control--scrollback-extending)
+              ;; Already extending: a second scroll event does not pile on.
+              (tmux-control--scrollback-scroll-watch win top)
+              (should (= scheduled 1))
+              ;; Deep in the buffer (far from the top): no extend.
+              (setq-local tmux-control--scrollback-extending nil)
+              (tmux-control--scrollback-scroll-watch win deep)
+              (should (= scheduled 1))
+              (should-not tmux-control--scrollback-extending)
+              ;; Reached the oldest line already: near the top no longer
+              ;; schedules (nothing more to load).
+              (setq-local tmux-control--scrollback-extending nil)
+              (setq-local tmux-control--scrollback-at-top t)
+              (tmux-control--scrollback-scroll-watch win top)
+              (should (= scheduled 1))
+              (should-not tmux-control--scrollback-extending)
+              (setq-local tmux-control--scrollback-at-top nil))
+            ;; At the cap, even pinned to the very top, nothing more loads.
+            (let ((tmux-control-scrollback-lines 500))
+              (setq-local tmux-control--scrollback-depth 500)
+              (setq-local tmux-control--scrollback-extending nil)
+              (tmux-control--scrollback-scroll-watch win top)
+              (should (= scheduled 1))
+              (should-not tmux-control--scrollback-extending))))))))
 
 (ert-deftest tmux-control-test-window-buffer-mode-line-drops-process-status ()
   ;; A per-window render buffer owns no process (the controller does);
