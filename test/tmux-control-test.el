@@ -3242,9 +3242,10 @@ output), :calls (side-effect invocations in order), :active-pane,
             ((symbol-function 'eat-term-display-cursor) (lambda (_) 42))
             ((symbol-function 'get-buffer-window-list)
              (lambda (&rest _) (list 'win-a 'win-b)))
-            ;; The live cursor is visible only in win-a.
+            ;; The live cursor is visible only in win-a (accepts the PARTIALLY
+            ;; arg the follow-set check now passes).
             ((symbol-function 'pos-visible-in-window-p)
-             (lambda (_pos w) (eq w 'win-a))))
+             (lambda (_pos w &optional _partially) (eq w 'win-a))))
     (let ((tmux-control--terminal 'term))
       (let ((tmux-control-wheel-scrolls-live-history nil))
         (should (equal (tmux-control--current-sync-windows)

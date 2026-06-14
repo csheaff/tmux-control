@@ -2632,10 +2632,14 @@ buffer (when `tmux-control-wheel-enters-scrollback').  This is the
 Emacs-side analog of tmux's default wheel-up binding, which opens
 copy-mode scrollback for normal-screen panes.
 
-With `tmux-control-wheel-scrolls-live-history', wheel-up first scrolls
-the live buffer's own retained history (the output Eat has kept since you
-connected); only at the top of that does it open the pager for the deeper
-pre-session history.  Otherwise wheel-up opens the pager immediately.
+With `tmux-control-wheel-scrolls-live-history', wheel-up scrolls the live
+buffer's own retained history (the output Eat has kept since you connected)
+in place, stopping at the top -- it never flings back to the live tail.  It
+opens the pager only when that whole retained history already fits on screen
+(a fresh or quiet pane, where you are still at the live screen, so the pager
+opens at the same tail); the deeper pre-session history is otherwise an
+explicit `tmux-control-scrollback' (\\[tmux-control-scrollback]) away.  With
+the option off, wheel-up opens the pager immediately.
 
 In every other case -- a genuine full-screen (alternate-screen)
 application or a mouse-aware application -- the event is forwarded to the
@@ -2683,12 +2687,17 @@ whole of what Eat still holds fits on screen, so wheel-up cannot scroll it
 any further and the deeper pre-session history (which lives in tmux, not
 Eat) needs the `tmux-control-scrollback' pager.  False once there is
 retained history above the view to scroll into, or once you have scrolled up
-off the live screen -- in which case wheel-up keeps scrolling in place."
-  (and (pos-visible-in-window-p (point-min) window)
+off the live screen -- in which case wheel-up keeps scrolling in place.
+
+The PARTIALLY arg to `pos-visible-in-window-p' is essential under
+`pixel-scroll-precision-mode', which routinely parks a line a few pixels
+clipped: without it a barely-clipped top or cursor line reads as not visible
+and the routing misfires."
+  (and (pos-visible-in-window-p (point-min) window t)
        (or (not (and tmux-control--terminal
                      (eat-term-live-p tmux-control--terminal)))
            (pos-visible-in-window-p
-            (eat-term-display-cursor tmux-control--terminal) window))))
+            (eat-term-display-cursor tmux-control--terminal) window t))))
 
 (defun tmux-control--scroll-live-history (event window)
   "Scroll WINDOW up through the live view's retained history for EVENT.
@@ -4389,7 +4398,10 @@ actually sees.  Eat's `buffer' point decision is preserved."
              (append
               (and (memq 'buffer base) '(buffer))
               (seq-filter
-               (lambda (w) (pos-visible-in-window-p cursor w))
+               ;; PARTIALLY: under `pixel-scroll-precision-mode' the cursor
+               ;; line at the bottom is often a few pixels clipped; without
+               ;; this it reads as not visible and following never resumes.
+               (lambda (w) (pos-visible-in-window-p cursor w t))
                (get-buffer-window-list (current-buffer) nil t))))))))
 
 (defun tmux-control--snap-to-live-screen (window)
