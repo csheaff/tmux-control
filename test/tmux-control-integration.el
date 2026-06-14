@@ -613,5 +613,103 @@ select w1's pane again, and the view must come back to w1."
           (kill-buffer buf))
         (tmux-control-it--tmux-ok "kill-server")))))
 
+;;; Lazy-extend scrollback: instant open, then on-demand seam-correct growth.
+
+(defun tmux-control-it--sb-indices (text)
+  "Ordered list of the NNNN numbers from \"L<NNNN>\" lines in TEXT.
+The lazy-extend test fills pane history with uniquely numbered lines so the
+loaded history can be checked for contiguity (no dropped or duplicated line
+at an extension seam) regardless of surrounding prompt/sleep chrome."
+  (let ((idxs nil) (start 0))
+    (while (string-match "^L\\([0-9]+\\)" text start)
+      (push (string-to-number (match-string 1 text)) idxs)
+      (setq start (match-end 0)))
+    (nreverse idxs)))
+
+(defun tmux-control-it--contiguous-p (idxs)
+  "Non-nil when IDXS ascends by exactly 1 with no gap and no duplicate."
+  (and idxs
+       (let ((ok t) (prev (car idxs)))
+         (dolist (cur (cdr idxs) ok)
+           (unless (= cur (1+ prev)) (setq ok nil))
+           (setq prev cur)))))
+
+(ert-deftest tmux-control-it-scrollback-lazy-extend ()
+  "The pager opens with only the initial chunk and extends toward older
+history on demand: each extension is contiguous with what is already
+loaded, depth caps at `tmux-control-scrollback-lines', a redundant extend
+at the cap is a no-op that leaves no in-flight latch, and the fully
+extended buffer equals a single capture of the same depth.  Uses small
+limits and 600 numbered lines (well under tmux's default history) so it
+runs fast without raising the server's history-limit."
+  (skip-unless (tmux-control-it--available-p))
+  (let ((tmux-control-scrollback-initial-lines 50)
+        (tmux-control-scrollback-extend-lines 100)
+        (tmux-control-scrollback-lines 300)
+        (tmux-control-compact-scrollback nil)
+        (content (mapconcat (lambda (i) (format "L%04d" i))
+                            (number-sequence 1 600) "\n")))
+    (tmux-control-it--with-pane (concat content "\n") 100 24
+      ;; Suppress the scroll watcher so extends happen only when this test
+      ;; drives them: in batch there is no redisplay, so a window's start
+      ;; stays pinned at point-min and the watcher (invoked once by
+      ;; `switch-to-buffer') would read the view as "at the top" and extend
+      ;; spuriously.  The watcher's gating is covered by a unit test; here we
+      ;; verify the extend MECHANISM deterministically.
+      (cl-letf (((symbol-function 'tmux-control--scrollback-scroll-watch)
+                 #'ignore))
+      (let ((live (tmux-control-connect nil tmux-control-it--socket "t")))
+        (unwind-protect
+            (progn
+              (tmux-control-it--pump-until
+               5 (lambda () (with-current-buffer live tmux-control--active-pane)))
+              (let* ((sb-name (format "*%s-scrollback*" (buffer-name live)))
+                     (sb nil))
+                (with-current-buffer live (tmux-control-scrollback))
+                (setq sb (get-buffer sb-name))
+                ;; Opened with just the initial chunk -- not the full history.
+                (tmux-control-it--pump-until
+                 10 (lambda () (with-current-buffer sb
+                                 (not (string-match-p "capturing"
+                                                      (buffer-string))))))
+                (should (= (buffer-local-value 'tmux-control--scrollback-depth sb)
+                           50))
+                (should (tmux-control-it--contiguous-p
+                         (tmux-control-it--sb-indices
+                          (tmux-control-it--buffer-text sb))))
+                ;; Drive five extends past the cap; every seam stays contiguous.
+                (let ((depths nil))
+                  (dotimes (_ 5)
+                    (with-current-buffer sb
+                      (setq tmux-control--scrollback-extending nil))
+                    (tmux-control--scrollback-extend sb)
+                    (tmux-control-it--pump-until
+                     10 (lambda ()
+                          (with-current-buffer sb
+                            (not tmux-control--scrollback-extending))))
+                    (should (tmux-control-it--contiguous-p
+                             (tmux-control-it--sb-indices
+                              (tmux-control-it--buffer-text sb))))
+                    (push (buffer-local-value 'tmux-control--scrollback-depth sb)
+                          depths))
+                  ;; 50 -> 150 -> 250 -> 300 (cap) -> 300 -> 300.
+                  (should (equal (nreverse depths) '(150 250 300 300 300))))
+                ;; No stuck in-flight latch after it all settles.
+                (should-not (buffer-local-value
+                             'tmux-control--scrollback-extending sb))
+                ;; The lazily-grown buffer equals one full capture at the cap.
+                (should (equal
+                         (tmux-control-it--sb-indices
+                          (tmux-control-it--buffer-text sb))
+                         (tmux-control-it--sb-indices
+                          (tmux-control-it--tmux "capture-pane" "-p"
+                                                 "-S" "-300" "-t" pane))))
+                (when (buffer-live-p sb) (kill-buffer sb))))
+          (when (buffer-live-p live)
+            (when (process-live-p
+                   (buffer-local-value 'tmux-control--process live))
+              (delete-process (buffer-local-value 'tmux-control--process live)))
+            (kill-buffer live))))))))
+
 (provide 'tmux-control-integration)
 ;;; tmux-control-integration.el ends here
