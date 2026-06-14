@@ -275,13 +275,19 @@ already-colored buffer text above the live screen.  With this enabled,
 wheel-up over a normal-screen pane scrolls **that** — in place, in the same
 buffer, with no mode switch and no capture round trip — and incoming output no
 longer yanks the view back to the bottom while you read (following resumes the
-moment you scroll back down or type, exactly like iTerm).  Only when you reach
-the top of that retained history does wheel-up open the full pager for the
-deeper, pre-session history that lives in tmux rather than Eat.
+moment you scroll back down or type, exactly like iTerm).  Scrolling back to
+the bottom returns to live; scrolling up simply stops at the top of the
+retained history.
+
+For the deeper, pre-session history that lives in tmux rather than Eat, use
+`C-c C-e` (`tmux-control-scrollback`) — the full pager, unchanged.  (Wheel-up
+also opens it directly from the live screen, when the pane is fresh or quiet
+enough that its whole history already fits on screen; from there the pager
+opens at the same tail, so it is seamless.)
 
 Off by default: it changes how the live view itself answers the wheel, so it
-is opt-in. With it off, wheel-up opens the pager immediately, as described
-above. (Requires `tmux-control-wheel-enters-scrollback` to remain non-nil.)
+is opt-in. With it off, wheel-up opens the pager immediately.  (Requires
+`tmux-control-wheel-enters-scrollback` to remain non-nil.)
 
 Line numbers are disabled locally in live and scrollback buffers.
 

@@ -2658,11 +2658,17 @@ be read, so the live behavior is otherwise unchanged."
                   (tmux-control--alt-screen-p)
                   (tmux-control--pane-grabs-mouse-p)))
             (if (and tmux-control-wheel-scrolls-live-history
-                     (not (tmux-control--live-history-at-top-p window)))
-                ;; Scroll the live view's own retained history in place.
+                     (not (tmux-control--live-history-exhausted-p window)))
+                ;; There is retained history to scroll into (or you have
+                ;; already scrolled up into it): scroll the live view in
+                ;; place.  Do NOT fling to the pager here -- being scrolled up
+                ;; and wheeling further must not jump you back to the live
+                ;; tail; it simply stops at the top.
                 (tmux-control--scroll-live-history event window)
-              ;; At the top of retained history (or the feature is off):
-              ;; open the pager for the deeper pre-session history.
+              ;; The whole retained history is already on screen (a fresh or
+              ;; quiet pane, so you are still at the live screen) -- or the
+              ;; feature is off.  Open the pager for the full history; from
+              ;; the live screen this is seamless (it opens at the same tail).
               (select-window window)
               (tmux-control-scrollback)))
            (t
@@ -2670,24 +2676,31 @@ be read, so the live behavior is otherwise unchanged."
               (eat-self-input 1 event)))))
       (eat-self-input 1 event))))
 
-(defun tmux-control--live-history-at-top-p (window)
-  "Return non-nil when WINDOW shows the top of the live view's retained history.
-That is the oldest line Eat still holds in this buffer; above it lies only
-the deeper pre-session history that lives in tmux, reachable through the
-`tmux-control-scrollback' pager."
-  (pos-visible-in-window-p (point-min) window))
+(defun tmux-control--live-history-exhausted-p (window)
+  "Return non-nil when WINDOW already shows all of the live view's history.
+True when both the top of the buffer and the live cursor are visible -- the
+whole of what Eat still holds fits on screen, so wheel-up cannot scroll it
+any further and the deeper pre-session history (which lives in tmux, not
+Eat) needs the `tmux-control-scrollback' pager.  False once there is
+retained history above the view to scroll into, or once you have scrolled up
+off the live screen -- in which case wheel-up keeps scrolling in place."
+  (and (pos-visible-in-window-p (point-min) window)
+       (or (not (and tmux-control--terminal
+                     (eat-term-live-p tmux-control--terminal)))
+           (pos-visible-in-window-p
+            (eat-term-display-cursor tmux-control--terminal) window))))
 
 (defun tmux-control--scroll-live-history (event window)
   "Scroll WINDOW up through the live view's retained history for EVENT.
 Defers to the user's ordinary wheel scrolling (`tmux-control--dispatch-wheel'
 honors `pixel-scroll-precision-mode'), so momentum and feel match every
-other buffer.  Reaching the top mid-scroll opens the pager for the deeper
-pre-session history instead of stopping at a hard edge."
+other buffer.  At the very top it simply stops -- the deeper pre-session
+history is an explicit `tmux-control-scrollback' (\\[tmux-control-scrollback])
+away, so wheeling past the top never flings the view back to the live tail."
   (with-selected-window window
     (condition-case nil
         (tmux-control--dispatch-wheel event)
-      ((beginning-of-buffer args-out-of-range)
-       (tmux-control-scrollback)))))
+      ((beginning-of-buffer end-of-buffer args-out-of-range) nil))))
 
 (defun tmux-control-wheel-down (event)
   "Handle a wheel-down EVENT in a live tmux-control buffer.
@@ -4356,23 +4369,28 @@ window by its point sitting on the current cursor, so once output moves
 the cursor the association is lost.  Captured at the start of a render
 pass and replayed by `tmux-control--flush-display'.
 
-With `tmux-control-wheel-scrolls-live-history', a window the user has
-scrolled up -- so the live cursor is no longer visible in it -- is dropped
-from the follow set: incoming output keeps accumulating below but the view
-stays where they put it (iTerm behavior), and following resumes naturally
-once the cursor scrolls back into view or a keystroke snaps to the bottom."
+With `tmux-control-wheel-scrolls-live-history' the follow set is keyed on
+CURSOR VISIBILITY instead: every window of this buffer that currently shows
+the live cursor follows, the rest do not.  So a window scrolled up off the
+live screen holds (output accumulates below without yanking the reader back),
+and one scrolled back down to it resumes following -- both regardless of where
+point happens to sit, which a mouse-wheel scroll under
+`pixel-scroll-precision-mode' leaves on the cursor rather than moving.  Eat's
+own list keys on point==cursor, which the wheel does not maintain, so it can
+neither hold reliably nor re-arm on the way back; this keys on what the user
+actually sees.  Eat's `buffer' point decision is preserved."
   (and (fboundp 'eat--synchronize-scroll-windows)
        tmux-control--terminal
        (eat-term-live-p tmux-control--terminal)
-       (let ((windows (eat--synchronize-scroll-windows)))
+       (let ((base (eat--synchronize-scroll-windows)))
          (if (not tmux-control-wheel-scrolls-live-history)
-             windows
+             base
            (let ((cursor (eat-term-display-cursor tmux-control--terminal)))
-             (seq-filter
-              (lambda (w)
-                (or (eq w 'buffer)
-                    (pos-visible-in-window-p cursor w)))
-              windows))))))
+             (append
+              (and (memq 'buffer base) '(buffer))
+              (seq-filter
+               (lambda (w) (pos-visible-in-window-p cursor w))
+               (get-buffer-window-list (current-buffer) nil t))))))))
 
 (defun tmux-control--snap-to-live-screen (window)
   "Point WINDOW, newly showing this buffer, at the live terminal screen.
