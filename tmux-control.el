@@ -2774,9 +2774,9 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
   "Turn off `visual-line-mode' / `word-wrap' in the current buffer.
 Scrollback rows are terminal grid lines; when a row overflows the window
 \(e.g. a wide remote pane captured for a narrower window) `word-wrap' reflows
-it at a WORD boundary, which smears fixed-column box borders -- the `|'/`\\='
-sidebar of a TUI -- across the wrap and mangles the layout.  Plain character
-wrapping keeps every column aligned.
+it at a WORD boundary, which smears a fixed-column box border (a TUI's │
+sidebar) across the wrap and mangles the layout.  Plain character wrapping
+keeps every column aligned.
 
 Must run AFTER the major mode is established, not from the mode body: a
 globalized `global-visual-line-mode' (in the user's config) turns
