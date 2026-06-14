@@ -3227,7 +3227,16 @@ output), :calls (side-effect invocations in order), :active-pane,
           (let ((tmux-control-wheel-scrolls-live-history t))
             (tmux-control-wheel-scroll event)
             (should (= pager 2))
-            (should (= scrolled 1))))))))
+            (should (= scrolled 1)))
+          ;; ON but TILED: the feature is scoped out -- tiled panes keep the
+          ;; plain pager-on-wheel-up, never the in-place live-history scroll.
+          (setq exhausted nil)
+          (cl-letf (((symbol-function 'tmux-control--tiled-mode-p)
+                     (lambda () t)))
+            (let ((tmux-control-wheel-scrolls-live-history t))
+              (tmux-control-wheel-scroll event)
+              (should (= pager 3))
+              (should (= scrolled 1)))))))))
 
 (ert-deftest tmux-control-test-sync-windows-holds-scrolled-away ()
   ;; The scroll-follow set.  With live-history scrolling ON it is keyed on
@@ -3253,7 +3262,13 @@ output), :calls (side-effect invocations in order), :active-pane,
       ;; ON: keep `buffer' (point) + only the window showing the cursor.
       (let ((tmux-control-wheel-scrolls-live-history t))
         (should (equal (tmux-control--current-sync-windows)
-                       '(buffer win-a)))))))
+                       '(buffer win-a))))
+      ;; ON but TILED: scoped out -- the tiling layer anchors its own panes,
+      ;; so the follow set stays exactly Eat's own list.
+      (cl-letf (((symbol-function 'tmux-control--tiled-mode-p) (lambda () t)))
+        (let ((tmux-control-wheel-scrolls-live-history t))
+          (should (equal (tmux-control--current-sync-windows)
+                         '(buffer win-a win-b))))))))
 
 (defvar tmux-control-test--audit-modal nil
   "Stands in for a modal minor mode in the key-audit test.")

@@ -2623,6 +2623,20 @@ that has not grabbed the mouse.  Pure: the decision behind
        (not alt-screen)
        (not grabs-mouse)))
 
+(defun tmux-control--tiled-mode-p ()
+  "Return non-nil when the current buffer is part of a tiled multi-pane view.
+True for the tiled controller and for each of its pane buffers.  The
+continuous live-history wheel behavior is scoped OUT of tiled mode: a tiled
+pane is anchored to the top of its own screen by the tiling layer
+\(`tmux-control--anchor-windows-to-screen-top'), which the in-place scroll and
+the cursor-visibility follow set would fight, so tiled panes keep the plain
+pager-on-wheel-up behavior regardless of
+`tmux-control-wheel-scrolls-live-history'."
+  (or tmux-control--tiled
+      (and tmux-control--controller
+           (buffer-live-p tmux-control--controller)
+           (buffer-local-value 'tmux-control--tiled tmux-control--controller))))
+
 (defun tmux-control-wheel-scroll (event)
   "Handle a mouse wheel EVENT in a live tmux-control buffer.
 
@@ -2662,6 +2676,7 @@ be read, so the live behavior is otherwise unchanged."
                   (tmux-control--alt-screen-p)
                   (tmux-control--pane-grabs-mouse-p)))
             (if (and tmux-control-wheel-scrolls-live-history
+                     (not (tmux-control--tiled-mode-p))
                      (not (tmux-control--live-history-exhausted-p window)))
                 ;; There is retained history to scroll into (or you have
                 ;; already scrolled up into it): scroll the live view in
@@ -4392,7 +4407,11 @@ actually sees.  Eat's `buffer' point decision is preserved."
        tmux-control--terminal
        (eat-term-live-p tmux-control--terminal)
        (let ((base (eat--synchronize-scroll-windows)))
-         (if (not tmux-control-wheel-scrolls-live-history)
+         (if (or (not tmux-control-wheel-scrolls-live-history)
+                 ;; Tiled panes are anchored by the tiling layer, not by this
+                 ;; cursor-visibility follow set -- leave them on Eat's own
+                 ;; list (see `tmux-control--tiled-mode-p').
+                 (tmux-control--tiled-mode-p))
              base
            (let ((cursor (eat-term-display-cursor tmux-control--terminal)))
              (append

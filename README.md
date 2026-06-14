@@ -67,9 +67,11 @@ attaches, typing a new name creates it.
   session is its own buffer with its own scrollback and tabs — with a dot
   flagging another session that wants you, or tile **every session at once**
   in a live grid (`C-c C-f`, experimental).
-- **Scrollback** as ordinary Emacs text (`C-c C-e`) — faithful by default, with
-  opt-in compaction of repeated full-screen redraws (toggle in the pager with
-  `c`).
+- **Scrollback** as ordinary Emacs text (`C-c C-e`) — opens instantly however
+  deep the history (loaded lazily, extended as you scroll), faithful by
+  default, with opt-in compaction of repeated full-screen redraws (toggle with
+  `c`). Optionally, scroll the live view's own history in place, iTerm-style,
+  rather than opening the pager.
 - **Tiled view** (`C-c C-t`, experimental) — every pane of a window at once,
   split to match tmux's layout.
 - **Persistent & remote** — the session lives on the server and outlives Emacs;

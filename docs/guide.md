@@ -289,6 +289,17 @@ Off by default: it changes how the live view itself answers the wheel, so it
 is opt-in. With it off, wheel-up opens the pager immediately.  (Requires
 `tmux-control-wheel-enters-scrollback` to remain non-nil.)
 
+A few characteristics worth knowing. The retained history is Eat's own
+scrollback (bounded, ~128KB), so it covers this session's output, not the
+deeper pre-session history — that is what `C-c C-e` is for. During a **flood**
+larger than that buffer, the oldest retained lines (including a spot you had
+scrolled up to) are trimmed away and the view drops to the top of what
+remains; it does not get yanked to the bottom, and typing your next command
+snaps straight back to live. The pager (`C-c C-e`), being a fixed capture, is
+the steadier choice for studying history while a pane is gushing output. The
+feature is also scoped to the single live view — **tiled** panes keep the
+plain pager-on-wheel-up behavior regardless of this setting.
+
 Line numbers are disabled locally in live and scrollback buffers.
 
 ## Keys, raw mode, and paste
