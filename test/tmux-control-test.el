@@ -2646,6 +2646,20 @@ output), :calls (side-effect invocations in order), :active-pane,
                      "older-1\nolder-2\nold-top line\nlive tail\n"))
       (should (= tmux-control--scrollback-depth 2500)))))
 
+(ert-deftest tmux-control-test-scrollback-populate-arms-extension ()
+  ;; The pager opens with extension HELD OFF (extending = t) so the one-line
+  ;; "capturing…" placeholder -- which makes the top trivially visible --
+  ;; cannot trip the scroll watcher into loading a second chunk before the
+  ;; first arrives.  Populating with the initial content must clear that latch
+  ;; so real scrolling can extend.
+  (let ((tmux-control-compact-scrollback nil))
+    (with-temp-buffer
+      (tmux-control-scrollback-mode)
+      (setq-local tmux-control--scrollback-extending t) ; held during placeholder
+      (tmux-control--scrollback-populate (current-buffer) "L1\nL2\nL3" nil nil)
+      (should-not tmux-control--scrollback-extending)
+      (should (string-match-p "L1" (buffer-string))))))
+
 (ert-deftest tmux-control-test-scrollback-prepend-pins-viewport ()
   ;; Prepending older history must keep the view on the same content line,
   ;; not jump it to the freshly loaded lines.  The anchor marker (insertion
