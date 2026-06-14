@@ -807,10 +807,14 @@ initial+extend instead of initial)."
                 ;; Give any extend timer that should have been suppressed an
                 ;; ample chance to (not) fire.
                 (tmux-control-it--pump 0.5)
-                ;; Still just the initial chunk -- not initial + extend.
+                ;; Still just the initial chunk -- not initial + extend --
+                ;; and nothing in flight (an extend scheduled-but-pending would
+                ;; leave depth at 50 yet `extending' non-nil, so check both).
                 (should (= (buffer-local-value
                             'tmux-control--scrollback-depth sb)
                            50))
+                (should-not (buffer-local-value
+                             'tmux-control--scrollback-extending sb))
                 (should (< (with-current-buffer sb
                              (count-lines (point-min) (point-max)))
                            120))
