@@ -264,6 +264,25 @@ view):
   copy-mode rule: the gesture that took you into history takes you back out,
   no key to remember.  `ESC` also returns to the live view.
 
+### Continuous live-view scrollback (iTerm-style, opt-in)
+
+```elisp
+(setq tmux-control-wheel-scrolls-live-history t)
+```
+
+Eat keeps everything that has streamed since you connected as ordinary,
+already-colored buffer text above the live screen.  With this enabled,
+wheel-up over a normal-screen pane scrolls **that** — in place, in the same
+buffer, with no mode switch and no capture round trip — and incoming output no
+longer yanks the view back to the bottom while you read (following resumes the
+moment you scroll back down or type, exactly like iTerm).  Only when you reach
+the top of that retained history does wheel-up open the full pager for the
+deeper, pre-session history that lives in tmux rather than Eat.
+
+Off by default: it changes how the live view itself answers the wheel, so it
+is opt-in. With it off, wheel-up opens the pager immediately, as described
+above. (Requires `tmux-control-wheel-enters-scrollback` to remain non-nil.)
+
 Line numbers are disabled locally in live and scrollback buffers.
 
 ## Keys, raw mode, and paste
