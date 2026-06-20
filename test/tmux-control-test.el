@@ -286,6 +286,24 @@
    ;; A short rule is not chrome.
    (should-not (tmux-control--scrollback-chrome-line-p "─────"))))
 
+(ert-deftest tmux-control-test-regexp-matches-p-tolerates-bad-regexp ()
+  ;; The frame-start/chrome patterns are user defcustoms tested inside the
+  ;; capture's process-filter callback; a malformed one must degrade to nil,
+  ;; not throw and abort the scrollback open.
+  (should (tmux-control--regexp-matches-p "foo" "a foo b"))
+  (should-not (tmux-control--regexp-matches-p "foo" "bar"))
+  ;; Invalid regexp -> nil, no error.
+  (should-not (tmux-control--regexp-matches-p "[" "abc"))
+  (should-not (tmux-control--regexp-matches-p "\\(" "abc"))
+  ;; A non-string element (e.g. a stray nil in the chrome list) -> nil.
+  (should-not (tmux-control--regexp-matches-p nil "abc"))
+  ;; And the predicates that route through it survive a bad user pattern.
+  (let ((tmux-control-scrollback-frame-start-regexp "["))
+    (should-not (tmux-control--scrollback-frame-start-line-p "abc")))
+  (let ((tmux-control-scrollback-chrome-regexps '("[" nil "valid")))
+    (should-not (tmux-control--scrollback-chrome-line-p "abc"))
+    (should (tmux-control--scrollback-chrome-line-p "this is valid here"))))
+
 (ert-deftest tmux-control-test-scrollback-chunks ()
   (tmux-control-test--with-compaction
    (should (equal (tmux-control--scrollback-chunks
@@ -709,6 +727,37 @@ each wrapped in an evolving prompt line and a status bar.")
                 #'tmux-control-scrollback-wheel-down))
     (should (eq (lookup-key tmux-control--scrollback-override-map ev)
                 #'tmux-control-scrollback-wheel-down))))
+
+(ert-deftest tmux-control-test-effective-alt-screen-honored ()
+  ;; The phantom-alt-screen correction is resolved only in the controller
+  ;; buffer; a render buffer (per-window or tiled pane) must defer to its
+  ;; controller, not read its own frozen-`t' local -- else wheel-up would
+  ;; forward to the pane instead of opening scrollback under
+  ;; `alternate-screen off'.
+  (let ((controller (generate-new-buffer " *tc-test-ctrl*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer controller
+            (setq-local tmux-control--alt-screen-honored nil) ; resolved: off
+            (setq-local tmux-control--controller nil))        ; it IS the controller
+          ;; A render buffer keeps the conservative `t' it was created with...
+          (with-temp-buffer
+            (setq-local tmux-control--alt-screen-honored t)
+            (setq-local tmux-control--controller controller)
+            ;; ...but the effective value comes from the controller.
+            (should (eq (tmux-control--effective-alt-screen-honored) nil)))
+          ;; The controller itself reads its own resolved local.
+          (with-current-buffer controller
+            (should (eq (tmux-control--effective-alt-screen-honored) nil))
+            (setq-local tmux-control--alt-screen-honored t)
+            (should (eq (tmux-control--effective-alt-screen-honored) t)))
+          ;; A dead controller falls back to the buffer's own local.
+          (with-temp-buffer
+            (setq-local tmux-control--alt-screen-honored t)
+            (setq-local tmux-control--controller (generate-new-buffer " *dead*"))
+            (kill-buffer tmux-control--controller)
+            (should (eq (tmux-control--effective-alt-screen-honored) t))))
+      (when (buffer-live-p controller) (kill-buffer controller)))))
 
 (ert-deftest tmux-control-test-wheel-should-enter-scrollback-p ()
   ;; The full gate: enter scrollback only on wheel-up, when enabled and
@@ -1516,9 +1565,13 @@ leaves a foreign window sharing the frame untouched -- the regression behind
       (kill-buffer foreign-buf))))
 
 (ert-deftest tmux-control-test-tiled-region-size-subtracts-foreign ()
-  "`tmux-control--tiled-region-size' is the whole frame with no foreign window
-\(the old size, so a frame-owning tiling is unchanged), and fewer columns at
-the same rows once a full-height foreign window shares the frame."
+  "`tmux-control--tiled-region-size' owns the full width with a positive row
+budget when no foreign window shares the frame, and a full-height foreign
+window steals columns while leaving the rows untouched (a side split).  The
+exact row count is a pixel measurement (inner height less the minibuffer and
+the real mode-line height, so it matches the window body and the bottom pane
+does not clip) and so is verified live, not pinned here; this locks the
+foreign-subtraction logic, which is display-independent."
   (let ((ctrl-buf (generate-new-buffer " tc-test-ctrl"))
         (foreign-buf (generate-new-buffer " tc-test-foreign")))
     (unwind-protect
@@ -1528,8 +1581,8 @@ the same rows once a full-height foreign window shares the frame."
                  (cw (selected-window)))
             (set-window-buffer cw ctrl-buf)
             (let ((whole (tmux-control--tiled-region-size frame ctrl-buf)))
-              (should (= (car whole) (frame-text-cols frame)))
-              (should (= (cdr whole) (1- (frame-text-lines frame))))
+              (should (= (car whole) (frame-text-cols frame)))  ; full width
+              (should (> (cdr whole) 0))                        ; a real row budget
               (let ((fw (split-window cw nil 'right)))
                 (set-window-buffer fw foreign-buf)
                 (let ((reduced (tmux-control--tiled-region-size frame ctrl-buf)))
@@ -2308,6 +2361,10 @@ output), :calls (side-effect invocations in order), :active-pane,
                (lambda (w h) (push (list 'resize w h) calls)))
               ((symbol-function 'tmux-control--scrollback-request)
                (lambda (&rest _) (push 'capture calls)))
+              ;; Refresh also re-queries history_size (re-wrapping on a resize
+              ;; changes it); not the subject of this ordering test.
+              ((symbol-function 'tmux-control--scrollback-update-history-rows)
+               #'ignore)
               ((symbol-function 'process-live-p)
                (lambda (p) (eq p 'fake-proc))))
       (let ((live (generate-new-buffer " *tc-sb-live*"))
@@ -2705,6 +2762,31 @@ output), :calls (side-effect invocations in order), :active-pane,
           ;; Same line is still at the top of the window.
           (should (equal (funcall line-at) "orig 05"))
           (should (= tmux-control--scrollback-depth 2500)))))))
+
+(ert-deftest tmux-control-test-scrollback-extend-result ()
+  ;; The seam math: with history_size known, depth is the requested row
+  ;; offset (NEW-DEPTH) and the top is reached when it meets history_size --
+  ;; independent of the reply's line count, which `-J' shrinks below the row
+  ;; span.  Without history_size, the old line-count heuristic is the fallback.
+  (cl-flet ((res #'tmux-control--scrollback-extend-result))
+    ;; history known, no wrapping: depth = requested, not yet at top.
+    (should (equal (res 500 2500 2000 10000) '(2500 . nil)))
+    ;; history known, -J wrapped the rows so got (1500) < the 2000-row span:
+    ;; depth still advances by the ROW span (2500), NOT old+got (2000), and it
+    ;; does NOT falsely latch at-top.  This is the #4 bug the cap fixes.
+    (should (equal (res 500 2500 1500 10000) '(2500 . nil)))
+    ;; history known, the request reaches the oldest line -> at top.
+    (should (equal (res 8000 10000 1800 10000) '(10000 . t)))
+    (should (equal (res 8000 10000 9999 10000) '(10000 . t)))
+    ;; history_size 0 (a pane with history disabled) is a valid count, not a
+    ;; failed reply: already at the top, nothing older than the screen.
+    (should (equal (res 0 0 0 0) '(0 . t)))
+    ;; history UNKNOWN (reply not yet landed): fall back to the line count.
+    ;; A full reply (got == span) advances by got and is not at top.
+    (should (equal (res 500 2500 2000 nil) '(2500 . nil)))
+    ;; A short reply means tmux clamped at the oldest line -> at top, and
+    ;; depth advances only by what was actually returned.
+    (should (equal (res 500 2500 1 nil) '(501 . t)))))
 
 (ert-deftest tmux-control-test-scrollback-scroll-watch-gates-extend ()
   ;; The scroll watcher only schedules an extend when the view is near the
