@@ -1123,6 +1123,60 @@ each wrapped in an evolving prompt line and a status bar.")
   (should (null (tmux-control--parse-layout "bf3a,80x24,0,0{40x24,0,0,1")))
   (should (null (tmux-control--parse-layout "bf3a,not-a-layout"))))
 
+(ert-deftest tmux-control-test-parse-window-state ()
+  ;; The in-band `list-panes' reply (tab-separated: layout, then each pane's
+  ;; geometry / cursor / cmd / title) parses to (LAYOUT . PANES) -- the layout
+  ;; from the first line, the panes in order with their plists.
+  (let* ((lines (list (mapconcat #'identity
+                                 '("LAY" "%0" "0" "0" "40" "24" "1"
+                                   "5" "3" "1" "bash" "tty")
+                                 "\t")
+                      (mapconcat #'identity
+                                 '("LAY" "%1" "41" "0" "39" "24" "0"
+                                   "0" "0" "0" "vim" "edit")
+                                 "\t")))
+         (state (tmux-control--parse-window-state lines))
+         (panes (cdr state)))
+    (should (equal (car state) "LAY"))
+    (should (equal (mapcar #'car panes) '("%0" "%1")))
+    (let ((p0 (cdr (assoc "%0" panes))))
+      (should (= (plist-get p0 :left) 0))
+      (should (= (plist-get p0 :width) 40))
+      (should (eq (plist-get p0 :active) t))
+      (should (equal (plist-get p0 :cursor) '(5 . 3)))
+      (should (equal (plist-get p0 :cmd) "bash"))
+      (should (equal (plist-get p0 :title) "tty")))
+    (let ((p1 (cdr (assoc "%1" panes))))
+      (should (eq (plist-get p1 :active) nil))
+      (should (equal (plist-get p1 :cmd) "vim")))
+    ;; A short/garbled line is skipped, not parsed into a bogus pane.
+    (should (null (cdr (tmux-control--parse-window-state '("LAY\t%0\t0"))))))
+  ;; Empty trailing fields (an unset pane title, sometimes an empty command)
+  ;; must NOT drop the pane or shift columns: `split-string' with an explicit
+  ;; separator keeps empty fields, so the line is still 12 fields.
+  (let* ((line (concat "LAY\t%7\t0\t0\t80\t24\t1\t0\t0\t1\t\t")) ; empty cmd + title
+         (panes (cdr (tmux-control--parse-window-state (list line))))
+         (p (cdr (assoc "%7" panes))))
+    (should (= (length panes) 1))
+    (should p)
+    (should (= (plist-get p :width) 80))     ; columns did not shift
+    (should (equal (plist-get p :cmd) ""))
+    (should (equal (plist-get p :title) ""))))
+
+(ert-deftest tmux-control-test-build-tiling-callback-aborts-when-cleared ()
+  ;; The build is async: a teardown (untile, disconnect) during an in-flight
+  ;; layout query clears `tmux-control--tiling-build-active', and the reply
+  ;; callback must then ABORT rather than rebuild the torn-down view -- so a
+  ;; late reply cannot resurrect a tiling the user just dismissed.
+  (with-temp-buffer
+    (setq-local tmux-control--tiling-build-active nil ; teardown cleared it
+                tmux-control--tiled nil
+                tmux-control--panes nil)
+    ;; No error, no apply, no resurrection.
+    (tmux-control--build-tiling-callback (current-buffer) '("ignored reply"))
+    (should-not tmux-control--tiled)
+    (should (null tmux-control--panes))))
+
 ;;; Window tab bar.
 
 (ert-deftest tmux-control-test-update-windows-parses-and-sorts ()

@@ -541,13 +541,25 @@ single command queue and process.  nil in the controller buffer itself.")
   "Non-nil when a %layout-change asked for a re-tile at the next flush.")
 (defvar-local tmux-control--retile-timer nil
   "Idle timer coalescing notification-driven re-tiles, or nil.
-Re-tiling issues synchronous tmux queries (a blocking SSH round-trip when
-remote), so it is debounced off the process filter instead of running
-inline on every %layout-change.")
+A re-tile is async -- its layout and per-pane seed queries ride the control
+connection in-band -- but it stays debounced off the process filter so a
+burst of %layout-change notifications still collapses into one rebuild
+rather than one per message.")
 (defvar-local tmux-control--tiled-client-size nil
   "(W . H) char size last requested from tmux for the tiled frame area.
 Compared on frame resize so tmux is only re-sized (and the panes re-tiled)
 when the area devoted to tiling actually changed.")
+(defvar-local tmux-control--tiling-build-active nil
+  "Non-nil while a tiling build's in-band layout query is in flight.
+The build is async (`tmux-control--build-tiling' queries the layout over the
+control connection and finishes in the reply callback), so this serializes
+overlapping builds: a build requested while one is active sets
+`tmux-control--tiling-build-again' instead of starting a second, concurrent
+reconcile.  `tmux-control--teardown-tiling' clears it, which makes an
+in-flight build's callback abort rather than re-create a torn-down tiling.")
+(defvar-local tmux-control--tiling-build-again nil
+  "Non-nil when a tiling build was requested while one was already in flight.
+The active build re-runs once when it finishes, coalescing the burst.")
 (defvar-local tmux-control--unmatched-retries 0
   "Consecutive re-tiles where a layout leaf matched no pane.
 Bounds the retry so a persistent mismatch cannot reschedule forever.")
@@ -5698,24 +5710,34 @@ controller or pane render buffer where those locals are bound."
                        (tmux-control--tmux-command-string full))))
       (tmux-control--call "tmux" full))))
 
-(defun tmux-control--query-window-state ()
-  "Return (LAYOUT . PANES) for the active window in one tmux query.
+(defconst tmux-control--window-state-format
+  (concat "#{window_layout}\t#{pane_id}\t#{pane_left}\t#{pane_top}\t"
+          "#{pane_width}\t#{pane_height}\t#{pane_active}\t"
+          "#{cursor_x}\t#{cursor_y}\t#{cursor_flag}\t#{pane_current_command}\t"
+          "#{pane_title}")
+  "`list-panes -F' format folding the layout and every pane's geometry,
+cursor, command, and title into one query, so a (re)tile costs a single
+round trip rather than a `display-message' for the layout plus one per pane
+for the cursor.")
+
+(defun tmux-control--window-state-command ()
+  "Return the in-band `list-panes' command for the active window's state.
+Targets `tmux-control--session' (its current window) over the control
+connection -- no -L socket, no ssh, unlike the old out-of-band CLI query --
+so the layout/geometry read rides the same channel as `%output' and works
+identically for a local or remote session.  Parse the reply with
+`tmux-control--parse-window-state'."
+  (format "list-panes -t %s -F \"%s\""
+          tmux-control--session tmux-control--window-state-format))
+
+(defun tmux-control--parse-window-state (lines)
+  "Parse `list-panes' reply LINES into (LAYOUT . PANES).
 LAYOUT is the `window_layout' string; PANES is an alist (PANE-ID . INFO)
-with INFO a plist of :left :top :width :height :active :cmd :title :cursor
-and :cursor-visible.
-Folding the layout, every pane's geometry, and every pane's cursor into a
-single `list-panes' call avoids a separate `display-message' for the layout
-and one per pane for the cursor -- each a blocking (possibly SSH) round-trip
-that previously ran for every re-tile."
-  (let* ((fmt (concat "#{window_layout}\t#{pane_id}\t#{pane_left}\t#{pane_top}\t"
-                      "#{pane_width}\t#{pane_height}\t#{pane_active}\t"
-                      "#{cursor_x}\t#{cursor_y}\t#{cursor_flag}\t#{pane_current_command}\t"
-                      "#{pane_title}"))
-         (text (tmux-control--run-tmux
-                (list "list-panes" "-t" tmux-control--session "-F" fmt)))
-         (layout nil)
-         (panes nil))
-    (dolist (line (split-string (string-trim text) "\n" t))
+with INFO a plist of :left :top :width :height :active :cursor
+:cursor-visible :cmd and :title.  See `tmux-control--window-state-format'.
+Pure, so the reply shape is unit-testable without a live tmux."
+  (let ((layout nil) (panes nil))
+    (dolist (line lines)
       (let ((f (split-string line "\t")))
         (when (>= (length f) 12)
           (unless layout (setq layout (nth 0 f)))
@@ -5934,11 +5956,36 @@ so there is no reseed or flicker."
               (tmux-control--send-command
                (format "select-pane -t %s" tmux-control--active-pane)))))))))
 
+(defun tmux-control--pane-screen-command (pane &optional trailing)
+  "Return the in-band `capture-pane' command for PANE's visible screen.
+TRAILING keeps trailing blanks (`-N').  Rides the control connection via
+`tmux-control--query', so a tiled-pane seed costs no out-of-band process."
+  (concat "capture-pane -p -e"
+          (when trailing " -N")
+          (format " -t %s" pane)))
+
+(defun tmux-control--paint-seed (buffer text cursor cursor-visible)
+  "Paint BUFFER's terminal from screen TEXT with CURSOR / CURSOR-VISIBLE.
+Shared by the synchronous and in-band seed paths."
+  (when (and (buffer-live-p buffer) text)
+    (with-current-buffer buffer
+      (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+        (setq tmux-control--seed-cursor cursor)
+        (setq tmux-control--seed-cursor-visible (or cursor-visible :unknown))
+        ;; Clear the scrollback (\e[3J) before painting, not just the screen,
+        ;; so a reseed (e.g. after a resize) does not leave the previous,
+        ;; now-reflowed frame stacked above the fresh one -- an app on a tmux
+        ;; with `alternate-screen off' repaints by appending.
+        (tmux-control--write-terminal
+         (concat "\e[3J"
+                 (tmux-control--screen-seed-sequence
+                  text cursor cursor-visible)))))))
+
 (defun tmux-control--seed-pane-buffer-sync (buffer)
   "Paint BUFFER's terminal from its pane's current screen (synchronous CLI).
-Used on (re)tile; live %output keeps the pane current afterward.  The cursor
-comes from the batched window-state query (stored in `tmux-control--pane-info'),
-so only the screen capture costs a round-trip here."
+Used by the one-off reseeds (a paused pane, returning to the single-pane
+view), where one blocking capture is cheaper than wiring an async callback;
+the (re)tile build uses `tmux-control--seed-pane-buffer-async' instead."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
@@ -5949,17 +5996,37 @@ so only the screen capture costs a round-trip here."
                                               :cursor-visible)
                                   :unknown))
                (text (ignore-errors (tmux-control--capture-pane-screen pane))))
-          (when text
-            (setq tmux-control--seed-cursor cursor)
-            (setq tmux-control--seed-cursor-visible cursor-visible)
-            ;; Clear the scrollback (\e[3J) before painting, not just the
-            ;; screen, so a reseed (e.g. after a resize) does not leave the
-            ;; previous, now-reflowed frame stacked above the fresh one -- an
-            ;; app on a tmux with `alternate-screen off' repaints by appending.
-            (tmux-control--write-terminal
-             (concat "\e[3J"
-                     (tmux-control--screen-seed-sequence
-                      text cursor cursor-visible)))))))))
+          (tmux-control--paint-seed buffer text cursor cursor-visible))))))
+
+(defun tmux-control--seed-pane-buffer-async (buffer controller)
+  "Capture BUFFER's pane screen in-band and paint it when the reply lands.
+The capture rides CONTROLLER's control connection (`tmux-control--query'),
+so on a (re)tile the per-pane seeds no longer each cost a blocking,
+possibly-SSH round trip; the cursor comes from the batched window-state
+query stashed in `tmux-control--pane-info'.  After painting, point the
+pane's window at the terminal cursor so a non-selected pane shows its hollow
+cursor where tmux has it.  Every callback re-checks `buffer-live-p', so a
+pane killed by a teardown or a faster retile before its reply arrives is a
+safe no-op."
+  (when (and (buffer-live-p buffer) (buffer-live-p controller))
+    (let* ((info (buffer-local-value 'tmux-control--pane-info buffer))
+           (pane (buffer-local-value 'tmux-control--active-pane buffer))
+           (trailing (buffer-local-value 'tmux-control--capture-trailing-p buffer))
+           (cursor (plist-get info :cursor))
+           (cursor-visible (or (plist-get info :cursor-visible) :unknown)))
+      (when pane
+        (with-current-buffer controller
+          (tmux-control--query
+           (tmux-control--pane-screen-command pane trailing)
+           (lambda (reply)
+             (when (buffer-live-p buffer)
+               (tmux-control--paint-seed
+                buffer (and reply (string-join reply "\n"))
+                cursor cursor-visible)
+               (let ((term (buffer-local-value 'tmux-control--terminal buffer))
+                     (win (get-buffer-window buffer t)))
+                 (when (and term (eat-term-live-p term) (window-live-p win))
+                   (set-window-point win (eat-term-display-cursor term))))))))))))
 
 ;;; Window arrangement from the parsed layout tree.
 
@@ -6140,19 +6207,53 @@ buffer captured its scroll-following windows just before its own feed."
 
 (defun tmux-control--build-tiling (controller)
   "Build or refresh the tiled view of CONTROLLER's current tmux window.
-Queries the live layout and pane geometry, reconciles the per-pane render
-buffers (reusing survivors, creating new panes, killing gone ones),
-arranges the Emacs windows to match, and seeds each pane from its current
-screen.  Safe to call repeatedly; a %layout-change routes here."
+Queries the live layout and pane geometry IN-BAND over the control
+connection, then in the reply callback reconciles the per-pane render
+buffers (reusing survivors, creating new panes, killing gone ones), arranges
+the Emacs windows to match, and seeds each new pane.  Safe to call
+repeatedly; a %layout-change routes here.  Builds are serialized: one
+requested while another's query is in flight coalesces into a single re-run
+\(see `tmux-control--tiling-build-active'), so two reconciles never overlap."
   (when (buffer-live-p controller)
     (with-current-buffer controller
       (when (process-live-p tmux-control--process)
-        ;; One batched query: layout + every pane's geometry and cursor,
-        ;; read atomically so the layout and the pane list never disagree.
-        (let* ((state (ignore-errors (tmux-control--query-window-state)))
-               (layout (car state))
-               (geometry (cdr state))
-               (tree (tmux-control--parse-layout layout))
+        (if tmux-control--tiling-build-active
+            (setq tmux-control--tiling-build-again t)
+          (setq tmux-control--tiling-build-active t)
+          ;; One batched query: layout + every pane's geometry and cursor,
+          ;; read atomically so the layout and the pane list never disagree.
+          (tmux-control--query
+           (tmux-control--window-state-command)
+           (lambda (reply)
+             (tmux-control--build-tiling-callback controller reply))))))))
+
+(defun tmux-control--build-tiling-callback (controller reply)
+  "Apply a tiling build from the in-band window-state REPLY, with bookkeeping.
+Runs in CONTROLLER from the process filter.  A teardown that cleared
+`tmux-control--tiling-build-active' while the query was in flight makes this
+abort rather than rebuild a torn-down tiling; otherwise it clears the flag
+and re-runs once when a retile was requested mid-build."
+  (when (buffer-live-p controller)
+    (with-current-buffer controller
+      (when tmux-control--tiling-build-active
+        (unwind-protect
+            (when (process-live-p tmux-control--process)
+              (let ((state (tmux-control--parse-window-state reply)))
+                (tmux-control--build-tiling-apply
+                 controller (car state) (cdr state))))
+          (setq tmux-control--tiling-build-active nil)
+          (when tmux-control--tiling-build-again
+            (setq tmux-control--tiling-build-again nil)
+            (tmux-control--build-tiling controller)))))))
+
+(defun tmux-control--build-tiling-apply (controller layout geometry)
+  "Reconcile and arrange CONTROLLER's tiled view from LAYOUT and GEOMETRY.
+The body of a tiling build, run from `tmux-control--build-tiling-callback'
+once the in-band window-state reply has been parsed."
+  (when (buffer-live-p controller)
+    (with-current-buffer controller
+      (when (process-live-p tmux-control--process)
+        (let* ((tree (tmux-control--parse-layout layout))
                (leaves (tmux-control--layout-leaves tree)))
           (cond
            ((or (null tree) (null leaves) (null geometry))
@@ -6262,8 +6363,13 @@ screen.  Safe to call repeatedly; a %layout-change routes here."
                   ;; of truth for what the app draws); fringe/scroll-bar
                   ;; removal makes the body span the full pane width, so it
                   ;; fits without shrinking the grid (which would drop a row).
+                  ;; Seed each new pane in-band: the captures stream back over
+                  ;; the connection and paint as they land, so the build never
+                  ;; blocks on N (possibly-SSH) round trips.  Each capture's
+                  ;; cursor is the geometry query's, stashed in the pane's
+                  ;; `tmux-control--pane-info' just above.
                   (dolist (buf to-seed)
-                    (tmux-control--seed-pane-buffer-sync buf))
+                    (tmux-control--seed-pane-buffer-async buf controller))
                   ;; Point every pane window at its terminal cursor, so a
                   ;; non-selected pane draws its hollow cursor where tmux has
                   ;; it (like iTerm) instead of at point-min.  A freshly
@@ -6301,7 +6407,11 @@ window.  Does not reseed; callers that resume single-pane do that."
               tmux-control--panes nil
               tmux-control--tiled-layout nil
               tmux-control--retile-pending nil
-              tmux-control--suppress-focus-follow nil)
+              tmux-control--suppress-focus-follow nil
+              ;; Cancel any in-flight build: clearing the active flag makes its
+              ;; reply callback abort instead of rebuilding this torn-down view.
+              tmux-control--tiling-build-active nil
+              tmux-control--tiling-build-again nil)
         (unless keep-windows
           (let ((win (or (cl-some (lambda (np) (get-buffer-window (cdr np) t))
                                   panes)

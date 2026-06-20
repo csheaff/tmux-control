@@ -311,6 +311,76 @@ the full async pipeline (process filter -> batch -> Eat), not just the seed."
       (ignore-errors (delete-file fa))
       (ignore-errors (delete-file fb)))))
 
+;;; Tiling build: the in-band (re)tile creates and seeds each pane buffer.
+
+(ert-deftest tmux-control-it-tile-builds-and-seeds-panes ()
+  "`tmux-control-tile' builds the tiled view entirely over the control
+connection: it queries the layout in-band, creates a render buffer per pane,
+and seeds each from its own screen via an in-band capture -- no out-of-band
+tmux/ssh process.  Asserts both pane buffers appear and render their own
+content (no cross-feed), exercising the async build end to end."
+  (skip-unless (tmux-control-it--available-p))
+  (let ((fa (make-temp-file "tc-ert-tile-a"))
+        (fb (make-temp-file "tc-ert-tile-b")))
+    (unwind-protect
+        (progn
+          (with-temp-file fa (insert "LEFT pane alpha\nstill LEFT\n"))
+          (with-temp-file fb (insert "RIGHT pane bravo\nstill RIGHT\n"))
+          (tmux-control-it--tmux-ok "kill-server")
+          (tmux-control-it--tmux
+           "new-session" "-d" "-s" "t" "-x" "80" "-y" "24"
+           (format "cat %s; sleep 600" (shell-quote-argument fa)))
+          (tmux-control-it--tmux
+           "split-window" "-h" "-t" "t"
+           (format "cat %s; sleep 600" (shell-quote-argument fb)))
+          (let* ((ids (split-string
+                       (string-trim
+                        (tmux-control-it--tmux "list-panes" "-t" "t"
+                                               "-F" "#{pane_id}"))
+                       "\n" t))
+                 (pa (nth 0 ids)) (pb (nth 1 ids)))
+            (tmux-control-it--wait-settle pa)
+            (tmux-control-it--wait-settle pb)
+            ;; A frame big enough for the tiling window split in batch.
+            (set-frame-size (selected-frame) 80 24)
+            (let ((buf (tmux-control-connect nil tmux-control-it--socket "t")))
+              (unwind-protect
+                  (with-current-buffer buf
+                    (tmux-control-it--pump 1.0)   ; initial connect/seed
+                    (tmux-control-tile)
+                    ;; The async build must create BOTH pane buffers and seed
+                    ;; them (non-blank) -- all via the control connection.
+                    (should
+                     (tmux-control-it--pump-until
+                      8 (lambda ()
+                          (and (= (length tmux-control--panes) 2)
+                               (cl-every
+                                (lambda (np)
+                                  (let ((b (cdr np)))
+                                    (and (buffer-live-p b)
+                                         (not (string-empty-p
+                                               (string-trim
+                                                (tmux-control-it--buffer-text b)))))))
+                                tmux-control--panes)))))
+                    ;; Each pane buffer holds ITS pane's content, not its
+                    ;; neighbor's -- the in-band seed painted the right pane.
+                    (let ((ba (cdr (assoc pa tmux-control--panes)))
+                          (bb (cdr (assoc pb tmux-control--panes))))
+                      (should (buffer-live-p ba))
+                      (should (buffer-live-p bb))
+                      (let ((ta (tmux-control-it--buffer-text ba))
+                            (tb (tmux-control-it--buffer-text bb)))
+                        (should (string-match-p "LEFT pane alpha" ta))
+                        (should (string-match-p "RIGHT pane bravo" tb))
+                        (should-not (string-match-p "RIGHT pane bravo" ta))
+                        (should-not (string-match-p "LEFT pane alpha" tb)))))
+                (when (buffer-live-p buf)
+                  (with-current-buffer buf (ignore-errors (tmux-control-disconnect)))
+                  (kill-buffer buf))
+                (tmux-control-it--tmux-ok "kill-server")))))
+      (ignore-errors (delete-file fa))
+      (ignore-errors (delete-file fb)))))
+
 ;;; Layout-leaf -> pane-id matching must be by id, not coordinates.
 
 (ert-deftest tmux-control-it-leaf-id-matches-pane-id ()
