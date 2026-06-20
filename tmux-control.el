@@ -559,9 +559,11 @@ kills, which are deliberate.")
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
     (define-key map [wheel-down] #'tmux-control-wheel-down)
     ;; A fast flick coalesces into double-/triple-wheel events; bind them to
-    ;; the same handlers (which normalize via `event-basic-type') so they
-    ;; route like a single tick instead of falling through to the user's
-    ;; pixel-scroll and scrolling the buffer past a mouse-grabbing app.
+    ;; the same handlers so they route like a single tick instead of falling
+    ;; through to the user's pixel-scroll and scrolling the buffer past a
+    ;; mouse-grabbing app.  Both handlers cope with the coalesced variants:
+    ;; `tmux-control-wheel-scroll' matches on `event-basic-type', and
+    ;; `tmux-control-wheel-down' forwards/dispatches the event as-is.
     (define-key map [double-wheel-up] #'tmux-control-wheel-scroll)
     (define-key map [triple-wheel-up] #'tmux-control-wheel-scroll)
     (define-key map [double-wheel-down] #'tmux-control-wheel-down)
