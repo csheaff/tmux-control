@@ -229,6 +229,17 @@ window's scrollback and anything printed while it was in the
 background."
   :type 'boolean)
 
+(defcustom tmux-control-split-pane-tiles t
+  "Non-nil tiles the window after a `tmux-control-split-pane-right'/`-below'.
+
+A split makes the NEW pane the active one, so without tiling the
+single-pane view would just follow it and the pane you split from would
+drop out of sight.  Tiling shows every pane of the window at once -- the
+point of splitting.  Set nil to leave the view alone and tile yourself
+\(e.g. on a slow remote link, where the tiling build costs a few extra
+round trips)."
+  :type 'boolean)
+
 (defcustom tmux-control-wheel-enters-scrollback t
   "Non-nil means scrolling up with the mouse wheel enters scrollback view.
 
@@ -563,6 +574,10 @@ kills, which are deliberate.")
     (define-key map (kbd "C-c C-r") #'tmux-control-reconnect)
     (define-key map (kbd "C-c C-s") #'tmux-control-select-session)
     (define-key map (kbd "C-c C-f") #'tmux-control-toggle-flock)
+    ;; Split the active pane: `|' is the side-by-side divider, `-' the stacked
+    ;; one (the popular tmux `.conf' rebinding).
+    (define-key map (kbd "C-c |") #'tmux-control-split-pane-right)
+    (define-key map (kbd "C-c -") #'tmux-control-split-pane-below)
     ;; NB: ESC is deliberately NOT bound here.  It belongs in the major
     ;; mode map (low precedence) so a modal package's own ESC binding
     ;; wins -- see `tmux-control-mode-map'.
@@ -651,6 +666,8 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     (define-key map (kbd "C-c C-r") #'tmux-control-reconnect)
     (define-key map (kbd "C-c C-s") #'tmux-control-select-session)
     (define-key map (kbd "C-c C-f") #'tmux-control-toggle-flock)
+    (define-key map (kbd "C-c |") #'tmux-control-split-pane-right)
+    (define-key map (kbd "C-c -") #'tmux-control-split-pane-below)
     ;; A bare ESC press should reach the pane immediately; see
     ;; `tmux-control-send-escape'.  Bound ONLY here, in the major mode
     ;; map, on purpose: a modal package (xah-fly-keys, evil, viper) that
@@ -6403,6 +6420,52 @@ Bound to \\`C-c C-t'."
   (if (or tmux-control--controller tmux-control--tiled)
       (tmux-control-untile)
     (tmux-control-tile)))
+
+(defun tmux-control--split-pane (flag)
+  "Split the active pane via tmux `split-window' FLAG (\"-h\" or \"-v\").
+The split rides the control connection, like the window commands, and
+targets the buffer's active pane.  When `tmux-control-split-pane-tiles' is
+on and the view is not already tiled, tiles afterward so both panes show;
+an already-tiled view re-tiles itself on the echoed `%layout-change'."
+  (tmux-control--ensure-live)
+  (let ((pane tmux-control--active-pane)
+        (already-tiled (tmux-control--tiled-mode-p)))
+    (tmux-control--send-command
+     (concat "split-window " flag
+             (when pane (format " -t %s" pane))))
+    ;; Auto-tile only from the single-pane controller view (a render buffer
+    ;; has `tmux-control--controller' set and must untile, not tile); an
+    ;; already-tiled session re-tiles itself on the %layout-change.
+    (when (and tmux-control-split-pane-tiles
+               (not already-tiled)
+               (not tmux-control--controller))
+      (tmux-control-tile))))
+
+(defun tmux-control-split-pane-right ()
+  "Split the active tmux pane in two, side by side (new pane on the right).
+The new pane runs your shell; unless `tmux-control-split-pane-tiles' is nil
+the view tiles so both panes show at once.  Select a pane's Emacs window to
+type into it.  Bound to \\`C-c |'."
+  (interactive)
+  (tmux-control--split-pane "-h"))
+
+(defun tmux-control-split-pane-below ()
+  "Split the active tmux pane in two, stacked (new pane below).
+Like `tmux-control-split-pane-right' but vertically.  Bound to \\`C-c -'."
+  (interactive)
+  (tmux-control--split-pane "-v"))
+
+(defun tmux-control-kill-pane ()
+  "Kill the active tmux pane, after confirmation.
+Killing a window's last pane closes the window; the session's last window
+ends the session.  Not bound by default."
+  (interactive)
+  (tmux-control--ensure-live)
+  (when (yes-or-no-p "Kill this tmux pane? ")
+    (tmux-control--send-command
+     (concat "kill-pane"
+             (when tmux-control--active-pane
+               (format " -t %s" tmux-control--active-pane))))))
 
 (provide 'tmux-control)
 

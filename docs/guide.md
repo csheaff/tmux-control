@@ -194,6 +194,20 @@ view).  Move between panes with:
 Switching the pane sets the window's active pane, so other clients follow
 along and the live view repaints on the chosen pane.
 
+**Split the active pane** to open a second terminal beside the current one:
+
+- `C-c |` (`tmux-control-split-pane-right`) — split side by side, the new pane
+  on the right.
+- `C-c -` (`tmux-control-split-pane-below`) — split stacked, the new pane below.
+- `M-x tmux-control-kill-pane` — close the active pane (with confirmation).
+
+A split runs tmux's own `split-window` over the control connection and, by
+default, enters the tiled view (below) so both panes show at once — otherwise
+the single-pane view would just follow the new active pane and the one you
+split from would drop out of sight.  Set `tmux-control-split-pane-tiles` to nil
+to leave the view alone and tile yourself (e.g. on a slow remote link, where
+the tiling build costs a few extra round trips).
+
 ## Tiling
 
 `C-c C-t` (`tmux-control-toggle-tiling`) flips between the single-pane view
@@ -213,8 +227,9 @@ In the tiled view:
   nothing is interleaved.
 - Type into a pane to send input to it; selecting a pane's Emacs
   window makes it tmux's active pane too (other clients follow).
-- Splitting, resizing, or closing a pane in tmux re-tiles automatically,
-  and the mode line labels each pane by its id, command, and title.
+- Splitting (`C-c |` / `C-c -`, or from tmux), resizing, or closing a pane
+  re-tiles automatically, and the mode line labels each pane by its id,
+  command, and title.
 - Resizing the Emacs frame re-divides the tmux window to match, so the
   panes re-fit instead of clipping.
 - Each pane is a normal `tmux-control` buffer, so `C-c C-e` scrollback and

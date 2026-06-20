@@ -972,6 +972,53 @@ each wrapped in an evolving prompt line and a status bar.")
                  (lambda () (tmux-control-rename-window "1" "")))
                 :type 'user-error))
 
+(ert-deftest tmux-control-test-split-pane-command ()
+  ;; Split rides the control connection (`split-window -h'/`-v' at the active
+  ;; pane).  From the single-pane controller view it auto-tiles so both panes
+  ;; show; NOT from a render buffer (which must untile, not tile), NOT when
+  ;; already tiled (the %layout-change re-tiles), and NOT when the option is
+  ;; off.  `kill-pane' targets the active pane after confirmation.
+  (let ((cmds '()) (tiles 0) (tiled-p nil))
+    (cl-letf (((symbol-function 'tmux-control--ensure-live) #'ignore)
+              ((symbol-function 'tmux-control--send-command)
+               (lambda (c &optional _k) (push c cmds)))
+              ((symbol-function 'tmux-control--tiled-mode-p)
+               (lambda () tiled-p))
+              ((symbol-function 'tmux-control-tile) (lambda () (cl-incf tiles))))
+      (with-temp-buffer
+        (setq-local tmux-control--active-pane "%3")
+        (setq-local tmux-control--controller nil)
+        ;; single-pane view, option on -> split + auto-tile
+        (let ((tmux-control-split-pane-tiles t))
+          (tmux-control-split-pane-right)
+          (should (equal (car cmds) "split-window -h -t %3"))
+          (should (= tiles 1))
+          (tmux-control-split-pane-below)
+          (should (equal (car cmds) "split-window -v -t %3"))
+          (should (= tiles 2)))
+        ;; option off -> split only
+        (setq cmds nil tiles 0)
+        (let ((tmux-control-split-pane-tiles nil))
+          (tmux-control-split-pane-right)
+          (should (equal cmds '("split-window -h -t %3")))
+          (should (= tiles 0)))
+        ;; render buffer (controller set) -> split only
+        (setq cmds nil tiles 0 tmux-control--controller (current-buffer))
+        (let ((tmux-control-split-pane-tiles t))
+          (tmux-control-split-pane-right)
+          (should (= tiles 0)))
+        ;; already tiled -> no auto-tile
+        (setq cmds nil tiles 0 tmux-control--controller nil tiled-p (current-buffer))
+        (let ((tmux-control-split-pane-tiles t))
+          (tmux-control-split-pane-right)
+          (should (= tiles 0)))
+        (setq tiled-p nil)
+        ;; kill-pane targets the active pane after confirm
+        (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+          (setq cmds nil)
+          (tmux-control-kill-pane)
+          (should (equal cmds '("kill-pane -t %3"))))))))
+
 ;;; ANSI escape stripping / display width (seed-screen color handling).
 
 (ert-deftest tmux-control-test-strip-ansi-plain ()
