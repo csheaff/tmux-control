@@ -692,6 +692,24 @@ each wrapped in an evolving prompt line and a status bar.")
   ;; Always returns a normalized boolean, never a truthy non-t value.
   (should (eq (tmux-control--alt-screen-effective-p t "alt") t)))
 
+(ert-deftest tmux-control-test-coalesced-wheel-events-bound ()
+  ;; A fast flick coalesces into double-/triple-wheel; those must route to
+  ;; the same handlers as a single tick, not fall through to pixel-scroll.
+  (dolist (ev '([double-wheel-up] [triple-wheel-up]))
+    (should (eq (lookup-key tmux-control--override-map ev)
+                #'tmux-control-wheel-scroll))
+    (should (eq (lookup-key tmux-control--char-mode-map ev)
+                #'tmux-control-wheel-scroll)))
+  (dolist (ev '([double-wheel-down] [triple-wheel-down]))
+    (should (eq (lookup-key tmux-control--override-map ev)
+                #'tmux-control-wheel-down))
+    (should (eq (lookup-key tmux-control--char-mode-map ev)
+                #'tmux-control-wheel-down))
+    (should (eq (lookup-key tmux-control-scrollback-mode-map ev)
+                #'tmux-control-scrollback-wheel-down))
+    (should (eq (lookup-key tmux-control--scrollback-override-map ev)
+                #'tmux-control-scrollback-wheel-down))))
+
 (ert-deftest tmux-control-test-wheel-should-enter-scrollback-p ()
   ;; The full gate: enter scrollback only on wheel-up, when enabled and
   ;; detectable, over a normal-screen pane that has not grabbed the mouse.
