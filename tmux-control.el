@@ -3378,10 +3378,14 @@ whole (up to several-thousand-line) scrollback each time."
 `tmux-control-scrollback-chrome-regexps' are user `defcustom's tested
 here from inside the capture's process-filter callback; a malformed
 pattern (or a non-string element) must degrade to \"no match\" rather
-than throw out of the filter and abort every scrollback open."
-  (condition-case nil
-      (string-match-p regexp string)
-    (error nil)))
+than throw out of the filter and abort every scrollback open.
+The `stringp' guard short-circuits a non-string element without paying the
+`condition-case' error path, which matters since this runs per line over a
+several-thousand-line scrollback."
+  (and (stringp regexp)
+       (condition-case nil
+           (string-match-p regexp string)
+         (error nil))))
 
 (defun tmux-control--scrollback-frame-start-line-p (line)
   "Return non-nil when LINE looks like the start of a TUI redraw frame.
