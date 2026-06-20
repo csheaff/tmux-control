@@ -3372,6 +3372,17 @@ whole (up to several-thousand-line) scrollback each time."
       (push (nreverse current) chunks))
     (nreverse chunks)))
 
+(defun tmux-control--regexp-matches-p (regexp string)
+  "Like `string-match-p' but nil, not an error, on an invalid REGEXP.
+`tmux-control-scrollback-frame-start-regexp' and the elements of
+`tmux-control-scrollback-chrome-regexps' are user `defcustom's tested
+here from inside the capture's process-filter callback; a malformed
+pattern (or a non-string element) must degrade to \"no match\" rather
+than throw out of the filter and abort every scrollback open."
+  (condition-case nil
+      (string-match-p regexp string)
+    (error nil)))
+
 (defun tmux-control--scrollback-frame-start-line-p (line)
   "Return non-nil when LINE looks like the start of a TUI redraw frame.
 Matches `tmux-control-scrollback-frame-start-regexp' when configured, else the
@@ -3380,7 +3391,8 @@ Nil when neither is available, so compaction does nothing without a frame
 marker."
   (cond
    (tmux-control-scrollback-frame-start-regexp
-    (string-match-p tmux-control-scrollback-frame-start-regexp line))
+    (tmux-control--regexp-matches-p
+     tmux-control-scrollback-frame-start-regexp line))
    (tmux-control--auto-frame-start
     (string= (tmux-control--scrollback-match-key line)
              tmux-control--auto-frame-start))))
@@ -3485,8 +3497,8 @@ whitespace, so an anchored pattern matches regardless of indentation.
 Returns nil when no chrome patterns are configured."
   (let ((trimmed (string-trim line)))
     (seq-some (lambda (re)
-                (or (string-match-p re line)
-                    (string-match-p re trimmed)))
+                (or (tmux-control--regexp-matches-p re line)
+                    (tmux-control--regexp-matches-p re trimmed)))
               tmux-control-scrollback-chrome-regexps)))
 
 (defun tmux-control--merge-scrollback-chunk (out chunk)

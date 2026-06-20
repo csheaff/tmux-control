@@ -286,6 +286,24 @@
    ;; A short rule is not chrome.
    (should-not (tmux-control--scrollback-chrome-line-p "─────"))))
 
+(ert-deftest tmux-control-test-regexp-matches-p-tolerates-bad-regexp ()
+  ;; The frame-start/chrome patterns are user defcustoms tested inside the
+  ;; capture's process-filter callback; a malformed one must degrade to nil,
+  ;; not throw and abort the scrollback open.
+  (should (tmux-control--regexp-matches-p "foo" "a foo b"))
+  (should-not (tmux-control--regexp-matches-p "foo" "bar"))
+  ;; Invalid regexp -> nil, no error.
+  (should-not (tmux-control--regexp-matches-p "[" "abc"))
+  (should-not (tmux-control--regexp-matches-p "\\(" "abc"))
+  ;; A non-string element (e.g. a stray nil in the chrome list) -> nil.
+  (should-not (tmux-control--regexp-matches-p nil "abc"))
+  ;; And the predicates that route through it survive a bad user pattern.
+  (let ((tmux-control-scrollback-frame-start-regexp "["))
+    (should-not (tmux-control--scrollback-frame-start-line-p "abc")))
+  (let ((tmux-control-scrollback-chrome-regexps '("[" nil "valid")))
+    (should-not (tmux-control--scrollback-chrome-line-p "abc"))
+    (should (tmux-control--scrollback-chrome-line-p "this is valid here"))))
+
 (ert-deftest tmux-control-test-scrollback-chunks ()
   (tmux-control-test--with-compaction
    (should (equal (tmux-control--scrollback-chunks
