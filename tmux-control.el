@@ -568,6 +568,16 @@ kills, which are deliberate.")
     ;; wins -- see `tmux-control-mode-map'.
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
     (define-key map [wheel-down] #'tmux-control-wheel-down)
+    ;; A fast flick coalesces into double-/triple-wheel events; bind them to
+    ;; the same handlers so they route like a single tick instead of falling
+    ;; through to the user's pixel-scroll and scrolling the buffer past a
+    ;; mouse-grabbing app.  Both handlers cope with the coalesced variants:
+    ;; `tmux-control-wheel-scroll' matches on `event-basic-type', and
+    ;; `tmux-control-wheel-down' forwards/dispatches the event as-is.
+    (define-key map [double-wheel-up] #'tmux-control-wheel-scroll)
+    (define-key map [triple-wheel-up] #'tmux-control-wheel-scroll)
+    (define-key map [double-wheel-down] #'tmux-control-wheel-down)
+    (define-key map [triple-wheel-down] #'tmux-control-wheel-down)
     map)
   "High-precedence keymap for tmux-control buffers.
 Active in semi-char mode (`tmux-control--keys-active').  In char mode it
@@ -578,6 +588,11 @@ shadowing the pane's own C-c.")
   (let ((map (make-sparse-keymap)))
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
     (define-key map [wheel-down] #'tmux-control-wheel-down)
+    ;; Coalesced fast flicks, as in `tmux-control--override-map'.
+    (define-key map [double-wheel-up] #'tmux-control-wheel-scroll)
+    (define-key map [triple-wheel-up] #'tmux-control-wheel-scroll)
+    (define-key map [double-wheel-down] #'tmux-control-wheel-down)
+    (define-key map [triple-wheel-down] #'tmux-control-wheel-down)
     map)
   "High-precedence keymap for tmux-control buffers in char mode.
 Char mode exists to send EVERY key to the pane -- C-c above all, the
@@ -692,6 +707,8 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     (define-key map (kbd "q") #'tmux-control-live)
     (define-key map [escape] #'tmux-control-live)
     (define-key map [wheel-down] #'tmux-control-scrollback-wheel-down)
+    (define-key map [double-wheel-down] #'tmux-control-scrollback-wheel-down)
+    (define-key map [triple-wheel-down] #'tmux-control-scrollback-wheel-down)
     (define-key map [remap eat-semi-char-mode] #'tmux-control-live)
     (define-key map [remap self-insert-command] #'tmux-control-live-self-insert)
     map)
@@ -700,6 +717,8 @@ the cross-session activity strip (see `tmux-control-session-activity').")
 (defvar tmux-control--scrollback-override-map
   (let ((map (make-sparse-keymap)))
     (define-key map [wheel-down] #'tmux-control-scrollback-wheel-down)
+    (define-key map [double-wheel-down] #'tmux-control-scrollback-wheel-down)
+    (define-key map [triple-wheel-down] #'tmux-control-scrollback-wheel-down)
     map)
   "High-precedence keymap for the scrollback pager.
 A global minor mode that binds the wheel -- `pixel-scroll-precision-mode'
