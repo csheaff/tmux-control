@@ -2604,9 +2604,20 @@ display path -- keep the conservative `t' they were created with and are
 never updated, so reading their own local would defeat the
 phantom-alternate-screen correction (wheel-up would forward to the pane
 instead of opening scrollback under `alternate-screen off').  When this
-is such a render buffer, defer to its controller's resolved value; the
-`alternate-screen' option is a server/window setting shared across the
-panes we render, so the active window's resolution applies."
+is such a render buffer, defer to its controller's resolved value.
+
+The controller resolves the option for its OWN active window, so this is
+exact when `alternate-screen' is uniform across the session -- which is how
+it is used in practice (a server/global `.tmux.conf' setting).  It assumes
+that uniformity: a sibling render buffer showing a different window that
+*overrode* `alternate-screen' would read the active window's value instead
+of its own.  That is a deliberate trade -- still strictly better than the
+conservative `t' these buffers used to freeze (wrong under a global
+`alternate-screen off'), and it avoids an extra two-stage `show-options'
+round trip per render buffer for a per-window override that essentially
+never occurs.  The strictly-correct alternative, if it ever matters, is to
+resolve the option per render buffer at seed time (or cache it on the
+controller keyed by window id)."
   (if (and tmux-control--controller
            (buffer-live-p tmux-control--controller))
       (buffer-local-value 'tmux-control--alt-screen-honored
