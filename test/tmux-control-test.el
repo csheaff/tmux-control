@@ -2294,6 +2294,10 @@ output), :calls (side-effect invocations in order), :active-pane,
                (lambda (w h) (push (list 'resize w h) calls)))
               ((symbol-function 'tmux-control--scrollback-request)
                (lambda (&rest _) (push 'capture calls)))
+              ;; Refresh also re-queries history_size (re-wrapping on a resize
+              ;; changes it); not the subject of this ordering test.
+              ((symbol-function 'tmux-control--scrollback-update-history-rows)
+               #'ignore)
               ((symbol-function 'process-live-p)
                (lambda (p) (eq p 'fake-proc))))
       (let ((live (generate-new-buffer " *tc-sb-live*"))
@@ -2691,6 +2695,31 @@ output), :calls (side-effect invocations in order), :active-pane,
           ;; Same line is still at the top of the window.
           (should (equal (funcall line-at) "orig 05"))
           (should (= tmux-control--scrollback-depth 2500)))))))
+
+(ert-deftest tmux-control-test-scrollback-extend-result ()
+  ;; The seam math: with history_size known, depth is the requested row
+  ;; offset (NEW-DEPTH) and the top is reached when it meets history_size --
+  ;; independent of the reply's line count, which `-J' shrinks below the row
+  ;; span.  Without history_size, the old line-count heuristic is the fallback.
+  (cl-flet ((res #'tmux-control--scrollback-extend-result))
+    ;; history known, no wrapping: depth = requested, not yet at top.
+    (should (equal (res 500 2500 2000 10000) '(2500 . nil)))
+    ;; history known, -J wrapped the rows so got (1500) < the 2000-row span:
+    ;; depth still advances by the ROW span (2500), NOT old+got (2000), and it
+    ;; does NOT falsely latch at-top.  This is the #4 bug the cap fixes.
+    (should (equal (res 500 2500 1500 10000) '(2500 . nil)))
+    ;; history known, the request reaches the oldest line -> at top.
+    (should (equal (res 8000 10000 1800 10000) '(10000 . t)))
+    (should (equal (res 8000 10000 9999 10000) '(10000 . t)))
+    ;; history_size 0 (a pane with history disabled) is a valid count, not a
+    ;; failed reply: already at the top, nothing older than the screen.
+    (should (equal (res 0 0 0 0) '(0 . t)))
+    ;; history UNKNOWN (reply not yet landed): fall back to the line count.
+    ;; A full reply (got == span) advances by got and is not at top.
+    (should (equal (res 500 2500 2000 nil) '(2500 . nil)))
+    ;; A short reply means tmux clamped at the oldest line -> at top, and
+    ;; depth advances only by what was actually returned.
+    (should (equal (res 500 2500 1 nil) '(501 . t)))))
 
 (ert-deftest tmux-control-test-scrollback-scroll-watch-gates-extend ()
   ;; The scroll watcher only schedules an extend when the view is near the
