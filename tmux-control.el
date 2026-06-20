@@ -5819,15 +5819,21 @@ the size never disagrees with itself and never forces a spurious re-tile."
                 windows))
          (ml-h (if ours (window-mode-line-height (car ours)) char-h))
          (mini-h (window-pixel-height (minibuffer-window frame)))
+         ;; Full non-minibuffer height in rows: the threshold for "full-height
+         ;; side column" (steals columns) vs "top/bottom band" (steals rows).
+         ;; Classify against the FULL height, not the smaller body-row budget
+         ;; below -- a tall band whose total height reached the body budget
+         ;; would otherwise be misread as a full-height column.
+         (usable-rows (- (frame-text-lines frame)
+                         (window-total-height (minibuffer-window frame))))
          (cols (frame-text-cols frame))
          (rows (max 1 (floor (- (frame-inner-height frame) mini-h ml-h)
                              char-h))))
     (dolist (w windows)
       (unless (tmux-control--our-tiling-window-p w controller)
-        (if (>= (window-total-height w) rows)
+        (if (>= (window-total-height w) usable-rows)
             (setq cols (- cols (window-total-width w)))     ; a side column
-          ;; a top/bottom band: its pixel height in rows
-          (setq rows (- rows (round (window-pixel-height w) char-h))))))
+          (setq rows (- rows (window-total-height w))))))    ; a top/bottom band
     (cons (max 1 cols) (max 1 rows))))
 
 (defun tmux-control--collapse-tile-windows (keep)
