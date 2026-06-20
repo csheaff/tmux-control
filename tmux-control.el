@@ -5059,6 +5059,13 @@ client (e.g. iTerm2) for the trade-offs."
 
 (defun tmux-control--kill-process ()
   "Delete the tmux control process and any dependent render buffers."
+  ;; Cancel the command watchdog: its timer lives on the global `timer-list'
+  ;; and holds this buffer as its argument, so without this the killed
+  ;; controller is retained until the timer next fires.  Mirrors the
+  ;; cancellation in `tmux-control--reset-buffer'.
+  (when tmux-control--command-watchdog-timer
+    (cancel-timer tmux-control--command-watchdog-timer)
+    (setq tmux-control--command-watchdog-timer nil))
   (when tmux-control--panes
     (dolist (np tmux-control--panes)
       (when (buffer-live-p (cdr np))
