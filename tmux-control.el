@@ -691,6 +691,11 @@ the cross-session activity strip (see `tmux-control-session-activity').")
   "Major mode for tmux-control buffers."
   (tmux-control--disable-line-numbers)
   (tmux-control--disable-margins)
+  ;; Terminal rows are fixed grid lines and must never be re-wrapped, but the
+  ;; setting that ensures it (`tmux-control--no-line-wrap') cannot live here:
+  ;; it must run AFTER the mode, once `after-change-major-mode-hook' has fired
+  ;; (a globalized `visual-line-mode' re-wraps from there).  The render-buffer
+  ;; setup calls it; see `tmux-control--reset-buffer' and friends.
   ;; Arriving at a live buffer always shows the live screen, however the
   ;; buffer got into the window; see `tmux-control--snap-to-live-screen'.
   (add-hook 'window-buffer-change-functions
@@ -2881,6 +2886,24 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
   (dolist (window (get-buffer-window-list (current-buffer) nil t))
     (set-window-margins window 0 0)))
 
+(defun tmux-control--no-line-wrap ()
+  "Make the current buffer truncate terminal rows instead of wrapping them.
+Terminal rows are fixed grid lines that tmux already wrapped, so Emacs must
+not re-wrap them: with the fringes removed on a tiled pane window a row whose
+width equals the window body reserves the last column for a continuation
+glyph and soft-wraps to two screen lines, doubling its height and mangling a
+full-width TUI.  Truncating shows a fitting row in full on one line, and the
+grid is sized to the window so nothing real overflows.
+
+Must run AFTER the major mode is established, not from the mode body: a
+globalized `visual-line-mode' (in the user's config) turns itself -- and
+`word-wrap' -- back on from the `after-change-major-mode-hook' that fires
+when the mode is set, so a mode-body setting would be undone at once."
+  (when (bound-and-true-p visual-line-mode)
+    (visual-line-mode -1))
+  (setq-local word-wrap nil)
+  (setq-local truncate-lines t))
+
 (defun tmux-control--eat-semi-char-mode-advice (orig-fn &rest args)
   "Make `eat-semi-char-mode' return tmux-control scrollback buffers live.
 In a live tmux-control buffer, also restore the full override keymap
@@ -2957,6 +2980,7 @@ so the tmux-control keys get out of the way; the mode line shows
     (remove-hook 'kill-buffer-hook #'tmux-control--kill-process t)
     (erase-buffer)
     (tmux-control-mode)
+    (tmux-control--no-line-wrap)
     (setq-local emulation-mode-map-alists
                 (cons tmux-control--emulation-mode-map-alist
                       (delq tmux-control--emulation-mode-map-alist
@@ -5321,6 +5345,7 @@ it asynchronously over the control connection."
       (with-current-buffer buffer
         (let ((inhibit-read-only t)) (erase-buffer))
         (tmux-control-mode)
+        (tmux-control--no-line-wrap)
         (setq-local emulation-mode-map-alists
                     (cons tmux-control--emulation-mode-map-alist
                           (delq tmux-control--emulation-mode-map-alist
@@ -5761,6 +5786,7 @@ its own and routes commands through CONTROLLER."
     (with-current-buffer buffer
       (let ((inhibit-read-only t)) (erase-buffer))
       (tmux-control-mode)
+      (tmux-control--no-line-wrap)
       (setq-local emulation-mode-map-alists
                   (cons tmux-control--emulation-mode-map-alist
                         (delq tmux-control--emulation-mode-map-alist

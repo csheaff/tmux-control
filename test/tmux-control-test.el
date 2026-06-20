@@ -710,6 +710,26 @@ each wrapped in an evolving prompt line and a status bar.")
   ;; Always returns a normalized boolean, never a truthy non-t value.
   (should (eq (tmux-control--alt-screen-effective-p t "alt") t)))
 
+(ert-deftest tmux-control-test-no-line-wrap ()
+  ;; Terminal grid rows must truncate, not wrap.  The helper runs AFTER the
+  ;; major mode because a globalized `visual-line-mode' re-enables itself (and
+  ;; `word-wrap') on `after-change-major-mode-hook', undoing a mode-body
+  ;; setting -- so it must force truncation even when visual-line-mode is
+  ;; already on (stood in for here).
+  (with-temp-buffer
+    (visual-line-mode 1)
+    (should (bound-and-true-p visual-line-mode))
+    (should word-wrap)                  ; precondition: visual-line set it
+    (tmux-control--no-line-wrap)
+    (should-not (bound-and-true-p visual-line-mode))
+    (should-not word-wrap)
+    (should truncate-lines))
+  ;; The scrollback pager deliberately keeps the opposite: it wraps to show
+  ;; overflowing history, so the two must not drift into agreement.
+  (with-temp-buffer
+    (tmux-control-scrollback-mode)
+    (should-not truncate-lines)))
+
 (ert-deftest tmux-control-test-coalesced-wheel-events-bound ()
   ;; A fast flick coalesces into double-/triple-wheel; those must route to
   ;; the same handlers as a single tick, not fall through to pixel-scroll.
