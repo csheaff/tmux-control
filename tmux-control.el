@@ -5795,22 +5795,39 @@ is a foreign window -- a user's non-tmux buffer the tiling must not consume."
 
 (defun tmux-control--tiled-region-size (frame controller)
   "Return (COLS . ROWS): the size tmux should lay CONTROLLER's panes out in.
-This is FRAME's text area (its columns, and its lines minus the minibuffer
-row -- the rows must budget each stacked pane's mode line) reduced by any
-foreign window sharing the frame: a full-height neighbor steals columns, a
-full-width one steals rows.  With no foreign window it is exactly the old
-whole-frame size, so a tiling that owns the frame is unchanged; with one it
-is the smaller region the tiling may use, so panes never overrun a non-tmux
-window's space.  Computed the same way whether called before tiling (from
-the controller's own window) or while tiled (from the pane windows), so the
-size never disagrees with itself and never forces a spurious re-tile."
-  (let ((cols (frame-text-cols frame))
-        (rows (1- (frame-text-lines frame))))
-    (dolist (w (window-list frame 'no-mini))
+ROWS is how many terminal rows actually fit below the tiling: FRAME's inner
+pixel height less the minibuffer and one mode line, divided by the line
+height.  Measuring the mode line in PIXELS is the point -- it is commonly a
+hair taller than a text row (a larger mode-line face), so any fixed
+`frame-text-lines' row offset over-counts and the bottom pane's last row --
+a full-screen TUI's bottom border -- clips.  The grids are sized to the tmux
+pane heights this size produces, and `tmux-control--tile-arrange-node'
+budgets each stacked pane's mode line, so making the total match the real
+body keeps every pane's grid within its window.  This is the same height the
+single-pane path derives from `window-screen-lines' (the real body), so the
+two paths agree.  Reduced by any foreign window sharing the frame: a
+full-height neighbor steals columns, a full-width one steals rows.  Computed
+from frame-level measures (stable across the split, whether called before
+tiling from the controller's window or while tiled from a pane window), so
+the size never disagrees with itself and never forces a spurious re-tile."
+  (let* ((char-h (max 1 (frame-char-height frame)))
+         (windows (window-list frame 'no-mini))
+         ;; The mode line's real pixel height, read from one of our own
+         ;; windows (they share the face); a text row if none is up yet.
+         (ours (cl-remove-if-not
+                (lambda (w) (tmux-control--our-tiling-window-p w controller))
+                windows))
+         (ml-h (if ours (window-mode-line-height (car ours)) char-h))
+         (mini-h (window-pixel-height (minibuffer-window frame)))
+         (cols (frame-text-cols frame))
+         (rows (max 1 (floor (- (frame-inner-height frame) mini-h ml-h)
+                             char-h))))
+    (dolist (w windows)
       (unless (tmux-control--our-tiling-window-p w controller)
         (if (>= (window-total-height w) rows)
             (setq cols (- cols (window-total-width w)))     ; a side column
-          (setq rows (- rows (window-total-height w))))))    ; a top/bottom band
+          ;; a top/bottom band: its pixel height in rows
+          (setq rows (- rows (round (window-pixel-height w) char-h))))))
     (cons (max 1 cols) (max 1 rows))))
 
 (defun tmux-control--collapse-tile-windows (keep)
