@@ -2583,16 +2583,35 @@ effective `alternate-screen' option is on (`tmux-control--alt-screen-honored').
 When that option is off, tmux keeps the pane on its normal screen and
 forwards a phantom alternate-screen request to the control client, so
 Eat's state alone is unreliable.  Read locally, with no tmux query."
-  (and tmux-control--alt-screen-honored
-       tmux-control--terminal
-       (eat-term-live-p tmux-control--terminal)
-       (tmux-control--alt-screen-effective-p
-        tmux-control--alt-screen-honored
-        (cond
-         ((fboundp 'eat-term-in-alternative-display-p)
-          (eat-term-in-alternative-display-p tmux-control--terminal))
-         ((fboundp 'eat--t-term-main-display)
-          (eat--t-term-main-display tmux-control--terminal))))))
+  (let ((honored (tmux-control--effective-alt-screen-honored)))
+    (and honored
+         tmux-control--terminal
+         (eat-term-live-p tmux-control--terminal)
+         (tmux-control--alt-screen-effective-p
+          honored
+          (cond
+           ((fboundp 'eat-term-in-alternative-display-p)
+            (eat-term-in-alternative-display-p tmux-control--terminal))
+           ((fboundp 'eat--t-term-main-display)
+            (eat--t-term-main-display tmux-control--terminal)))))))
+
+(defun tmux-control--effective-alt-screen-honored ()
+  "Return whether the rendered pane's window honors the alternate screen.
+`tmux-control--alt-screen-honored' is resolved (via the two-stage
+`show-options' query) only in the controller buffer.  Render buffers --
+the per-window buffers and tiled pane buffers that are the default
+display path -- keep the conservative `t' they were created with and are
+never updated, so reading their own local would defeat the
+phantom-alternate-screen correction (wheel-up would forward to the pane
+instead of opening scrollback under `alternate-screen off').  When this
+is such a render buffer, defer to its controller's resolved value; the
+`alternate-screen' option is a server/window setting shared across the
+panes we render, so the active window's resolution applies."
+  (if (and tmux-control--controller
+           (buffer-live-p tmux-control--controller))
+      (buffer-local-value 'tmux-control--alt-screen-honored
+                          tmux-control--controller)
+    tmux-control--alt-screen-honored))
 
 (defun tmux-control--pane-grabs-mouse-p ()
   "Return non-nil when the pane's application has requested mouse tracking.
