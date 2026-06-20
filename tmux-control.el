@@ -404,9 +404,19 @@ Grows as `tmux-control--scrollback-extend' prepends older lines, up to
   "Non-nil while an extend capture is in flight, to coalesce scrolls.")
 (defvar-local tmux-control--scrollback-at-top nil
   "Non-nil once extension has reached the oldest available pane-history line.
-Set when an extend capture returns fewer lines than requested -- there is
+Set when an extend reaches the pane's `history_size' (or, when that is not
+known, when a capture returns fewer lines than requested) -- there is
 nothing older to load -- so the scroll watcher stops firing futile
 captures.  Reset when the pager opens or is refreshed.")
+(defvar-local tmux-control--scrollback-history-rows nil
+  "The pane's `#{history_size}' (history lines above the screen), or nil.
+Queried asynchronously when the pager opens or refreshes.  When known it
+bounds extension exactly: the requested `-S' depth is capped at it, so a
+capture can never run off the oldest line and re-fetch tmux's clamped
+oldest row as a duplicate, and depth tracks the requested row offset
+rather than the reply's line count -- which `-J' (join-wrapped-lines)
+makes smaller than the row span.  Nil until the query lands, where the
+old line-count heuristic is used as a fallback.")
 (defvar-local tmux-control--command-queue nil
   "Pending control-mode command entries, oldest first.
 Each entry is a cons (KIND . SEND-TIME): the reply-handler kind enqueued
@@ -558,6 +568,16 @@ kills, which are deliberate.")
     ;; wins -- see `tmux-control-mode-map'.
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
     (define-key map [wheel-down] #'tmux-control-wheel-down)
+    ;; A fast flick coalesces into double-/triple-wheel events; bind them to
+    ;; the same handlers so they route like a single tick instead of falling
+    ;; through to the user's pixel-scroll and scrolling the buffer past a
+    ;; mouse-grabbing app.  Both handlers cope with the coalesced variants:
+    ;; `tmux-control-wheel-scroll' matches on `event-basic-type', and
+    ;; `tmux-control-wheel-down' forwards/dispatches the event as-is.
+    (define-key map [double-wheel-up] #'tmux-control-wheel-scroll)
+    (define-key map [triple-wheel-up] #'tmux-control-wheel-scroll)
+    (define-key map [double-wheel-down] #'tmux-control-wheel-down)
+    (define-key map [triple-wheel-down] #'tmux-control-wheel-down)
     map)
   "High-precedence keymap for tmux-control buffers.
 Active in semi-char mode (`tmux-control--keys-active').  In char mode it
@@ -568,6 +588,11 @@ shadowing the pane's own C-c.")
   (let ((map (make-sparse-keymap)))
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
     (define-key map [wheel-down] #'tmux-control-wheel-down)
+    ;; Coalesced fast flicks, as in `tmux-control--override-map'.
+    (define-key map [double-wheel-up] #'tmux-control-wheel-scroll)
+    (define-key map [triple-wheel-up] #'tmux-control-wheel-scroll)
+    (define-key map [double-wheel-down] #'tmux-control-wheel-down)
+    (define-key map [triple-wheel-down] #'tmux-control-wheel-down)
     map)
   "High-precedence keymap for tmux-control buffers in char mode.
 Char mode exists to send EVERY key to the pane -- C-c above all, the
@@ -687,6 +712,8 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     (define-key map (kbd "q") #'tmux-control-live)
     (define-key map [escape] #'tmux-control-live)
     (define-key map [wheel-down] #'tmux-control-scrollback-wheel-down)
+    (define-key map [double-wheel-down] #'tmux-control-scrollback-wheel-down)
+    (define-key map [triple-wheel-down] #'tmux-control-scrollback-wheel-down)
     (define-key map [remap eat-semi-char-mode] #'tmux-control-live)
     (define-key map [remap self-insert-command] #'tmux-control-live-self-insert)
     map)
@@ -695,6 +722,8 @@ the cross-session activity strip (see `tmux-control-session-activity').")
 (defvar tmux-control--scrollback-override-map
   (let ((map (make-sparse-keymap)))
     (define-key map [wheel-down] #'tmux-control-scrollback-wheel-down)
+    (define-key map [double-wheel-down] #'tmux-control-scrollback-wheel-down)
+    (define-key map [triple-wheel-down] #'tmux-control-scrollback-wheel-down)
     map)
   "High-precedence keymap for the scrollback pager.
 A global minor mode that binds the wheel -- `pixel-scroll-precision-mode'
@@ -2183,17 +2212,72 @@ inside redisplay."
         (setq tmux-control--scrollback-extending t))
       (run-at-time 0 nil #'tmux-control--scrollback-extend buffer))))
 
+(defun tmux-control--scrollback-extend-result (old-depth new-depth got history-rows)
+  "Return (DEPTH . AT-TOP) for an extend that asked for OLD-DEPTH..NEW-DEPTH.
+GOT is the reply's line count; HISTORY-ROWS is the pane's `history_size'
+when known, else nil.  With HISTORY-ROWS known the requested range is
+always within history (NEW-DEPTH is capped at it before the query), so the
+loaded top sits exactly NEW-DEPTH rows back regardless of how `-J' joined
+wrapped rows, and the top is reached when NEW-DEPTH meets HISTORY-ROWS.
+Without it, fall back to the line-count heuristic: assume one reply line
+per requested row, so a short reply means tmux clamped at the oldest line.
+Pure: the seam math behind `tmux-control--scrollback-extend', for testing
+the `-J' and short-pane cases that the heuristic alone gets wrong."
+  (if history-rows
+      (cons new-depth (>= new-depth history-rows))
+    (cons (+ old-depth got) (< got (- new-depth old-depth)))))
+
+(defun tmux-control--scrollback-update-history-rows (buffer)
+  "Query BUFFER's pane `#{history_size}' and cap its loaded depth to it.
+Resolves `tmux-control--scrollback-history-rows' so extension knows the
+exact oldest line (see that variable).  A short pane's open capture
+over-states `tmux-control--scrollback-depth' (it asks for more lines than
+exist); capping it here keeps the first extend from requesting a range
+entirely past the top and prepending tmux's clamped oldest line as a
+duplicate.  Async over the live connection; a no-op when disconnected."
+  (when (buffer-live-p buffer)
+    (let* ((live (buffer-local-value 'tmux-control--live-buffer buffer))
+           (target (buffer-local-value 'tmux-control--scrollback-target buffer))
+           (proc (and (buffer-live-p live)
+                      (buffer-local-value 'tmux-control--process live))))
+      (when (and (process-live-p proc) target)
+        (with-current-buffer live
+          (tmux-control--query
+           (format "display-message -p -t %s '#{history_size}'" target)
+           (lambda (reply)
+             (when (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 ;; Only a digits reply is a real count -- accept 0 (a pane
+                 ;; with history disabled: nothing older than the screen, so
+                 ;; cap depth at 0 and latch at-top at once), but keep nil on
+                 ;; an empty/garbled reply so the heuristic stays the fallback
+                 ;; (`string-to-number' would turn both into a spurious 0).
+                 (let* ((s (string-trim (or (car reply) "")))
+                        (h (and (string-match-p "\\`[0-9]+\\'" s)
+                                (string-to-number s))))
+                   (when h
+                     (setq tmux-control--scrollback-history-rows h)
+                     (setq tmux-control--scrollback-depth
+                           (min tmux-control--scrollback-depth h))
+                     (when (>= tmux-control--scrollback-depth h)
+                       (setq tmux-control--scrollback-at-top t)))))))))))))
+
 (defun tmux-control--scrollback-extend (buffer)
   "Capture the next older chunk of history and prepend it to BUFFER.
 Loads `tmux-control-scrollback-extend-lines' more lines (capped at
-`tmux-control-scrollback-lines') strictly above what is already shown,
-keeping the viewport fixed.  Over the live control connection, async;
-a dead connection just stops extending (the snapshot stays put)."
+`tmux-control-scrollback-lines', and at the pane's `history_size' once
+known) strictly above what is already shown, keeping the viewport fixed.
+Over the live control connection, async; a dead connection just stops
+extending (the snapshot stays put)."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (let* ((old-depth tmux-control--scrollback-depth)
+             (history-rows tmux-control--scrollback-history-rows)
              (new-depth (min tmux-control-scrollback-lines
-                             (+ old-depth tmux-control-scrollback-extend-lines)))
+                             (+ old-depth tmux-control-scrollback-extend-lines)
+                             ;; Never ask past the oldest line: that is what
+                             ;; made a short pane re-fetch the clamped top row.
+                             (or history-rows tmux-control-scrollback-lines)))
              (target tmux-control--scrollback-target)
              (trailing tmux-control--capture-trailing-p)
              (live tmux-control--live-buffer)
@@ -2216,29 +2300,22 @@ a dead connection just stops extending (the snapshot stays put)."
           (with-current-buffer live
             (tmux-control--query
              ;; Strictly older than the current top line (OLD-DEPTH back):
-             ;; from NEW-DEPTH back down to OLD-DEPTH+1 back.  This delta is
-             ;; pure history (its end is above the visible screen), so the
-             ;; reply's line count is exactly how many older lines exist.
+             ;; from NEW-DEPTH back down to OLD-DEPTH+1 back.
              (tmux-control--scrollback-capture-command
               target new-depth trailing (1+ old-depth))
              (lambda (reply-lines)
                (when (buffer-live-p buffer)
                  (with-current-buffer buffer
-                   (let ((got (length reply-lines)))
+                   (let* ((got (length reply-lines))
+                          (res (tmux-control--scrollback-extend-result
+                                old-depth new-depth got history-rows)))
                      (when reply-lines
-                       ;; Advance depth by the lines ACTUALLY received, not
-                       ;; the lines requested: tmux clamps the capture to the
-                       ;; oldest available line, so a short reply means the
-                       ;; loaded top really sits OLD-DEPTH+GOT back, and the
-                       ;; next extend must continue from there to stay
-                       ;; seam-accurate.
                        (tmux-control--scrollback-prepend
-                        (string-join reply-lines "\n") (+ old-depth got)))
-                     ;; Fewer lines than asked for: that was the top of the
-                     ;; available history -- stop extending until reopen or
-                     ;; refresh, instead of re-querying an empty range on
-                     ;; every further scroll.
-                     (when (< got (- new-depth old-depth))
+                        (string-join reply-lines "\n") (car res)))
+                     ;; Reached the oldest available line: stop extending
+                     ;; until reopen or refresh, instead of re-querying an
+                     ;; empty/clamped range on every further scroll.
+                     (when (cdr res)
                        (setq tmux-control--scrollback-at-top t)))
                    (setq tmux-control--scrollback-extending nil)))))))))))
 
@@ -2354,6 +2431,7 @@ the live interactive pane."
         ;; second chunk before the first has even arrived.
         (setq-local tmux-control--scrollback-extending t)
         (setq-local tmux-control--scrollback-at-top nil)
+        (setq-local tmux-control--scrollback-history-rows nil)
         (add-hook 'window-scroll-functions
                   #'tmux-control--scrollback-scroll-watch nil t)
         ;; Fresh pager: not yet scrolled up into history, so a wheel-down
@@ -2380,6 +2458,10 @@ the live interactive pane."
       (when-let* ((window (get-buffer-window scrollback-buffer t)))
         (setq tmux-control--scrollback-size
               (tmux-control--scrollback-window-size window)))
+      ;; Queue the history_size query first so its reply (a single number)
+      ;; lands before the larger capture populates and clears the extend
+      ;; latch -- then the first extend already knows the exact oldest line.
+      (tmux-control--scrollback-update-history-rows scrollback-buffer)
       (tmux-control--scrollback-request
        scrollback-buffer target
        (min tmux-control-scrollback-initial-lines
@@ -2404,6 +2486,9 @@ the initial chunk or ballooning to the cap."
     ;; Hold extension off while the reload is in flight; the populate callback
     ;; clears it once the content lands (as on first open).
     (setq tmux-control--scrollback-extending t)
+    ;; Re-query history_size in case the pane grew (or its history was
+    ;; trimmed) since the pager opened; resolved before the reload populates.
+    (tmux-control--scrollback-update-history-rows (current-buffer))
     (tmux-control--scrollback-request
      (current-buffer)
      tmux-control--scrollback-target
@@ -2588,16 +2673,46 @@ effective `alternate-screen' option is on (`tmux-control--alt-screen-honored').
 When that option is off, tmux keeps the pane on its normal screen and
 forwards a phantom alternate-screen request to the control client, so
 Eat's state alone is unreliable.  Read locally, with no tmux query."
-  (and tmux-control--alt-screen-honored
-       tmux-control--terminal
-       (eat-term-live-p tmux-control--terminal)
-       (tmux-control--alt-screen-effective-p
-        tmux-control--alt-screen-honored
-        (cond
-         ((fboundp 'eat-term-in-alternative-display-p)
-          (eat-term-in-alternative-display-p tmux-control--terminal))
-         ((fboundp 'eat--t-term-main-display)
-          (eat--t-term-main-display tmux-control--terminal))))))
+  (let ((honored (tmux-control--effective-alt-screen-honored)))
+    (and honored
+         tmux-control--terminal
+         (eat-term-live-p tmux-control--terminal)
+         (tmux-control--alt-screen-effective-p
+          honored
+          (cond
+           ((fboundp 'eat-term-in-alternative-display-p)
+            (eat-term-in-alternative-display-p tmux-control--terminal))
+           ((fboundp 'eat--t-term-main-display)
+            (eat--t-term-main-display tmux-control--terminal)))))))
+
+(defun tmux-control--effective-alt-screen-honored ()
+  "Return whether the rendered pane's window honors the alternate screen.
+`tmux-control--alt-screen-honored' is resolved (via the two-stage
+`show-options' query) only in the controller buffer.  Render buffers --
+the per-window buffers and tiled pane buffers that are the default
+display path -- keep the conservative `t' they were created with and are
+never updated, so reading their own local would defeat the
+phantom-alternate-screen correction (wheel-up would forward to the pane
+instead of opening scrollback under `alternate-screen off').  When this
+is such a render buffer, defer to its controller's resolved value.
+
+The controller resolves the option for its OWN active window, so this is
+exact when `alternate-screen' is uniform across the session -- which is how
+it is used in practice (a server/global `.tmux.conf' setting).  It assumes
+that uniformity: a sibling render buffer showing a different window that
+*overrode* `alternate-screen' would read the active window's value instead
+of its own.  That is a deliberate trade -- still strictly better than the
+conservative `t' these buffers used to freeze (wrong under a global
+`alternate-screen off'), and it avoids an extra two-stage `show-options'
+round trip per render buffer for a per-window override that essentially
+never occurs.  The strictly-correct alternative, if it ever matters, is to
+resolve the option per render buffer at seed time (or cache it on the
+controller keyed by window id)."
+  (if (and tmux-control--controller
+           (buffer-live-p tmux-control--controller))
+      (buffer-local-value 'tmux-control--alt-screen-honored
+                          tmux-control--controller)
+    tmux-control--alt-screen-honored))
 
 (defun tmux-control--pane-grabs-mouse-p ()
   "Return non-nil when the pane's application has requested mouse tracking.
@@ -3396,6 +3511,21 @@ whole (up to several-thousand-line) scrollback each time."
       (push (nreverse current) chunks))
     (nreverse chunks)))
 
+(defun tmux-control--regexp-matches-p (regexp string)
+  "Like `string-match-p' but nil, not an error, on an invalid REGEXP.
+`tmux-control-scrollback-frame-start-regexp' and the elements of
+`tmux-control-scrollback-chrome-regexps' are user `defcustom's tested
+here from inside the capture's process-filter callback; a malformed
+pattern (or a non-string element) must degrade to \"no match\" rather
+than throw out of the filter and abort every scrollback open.
+The `stringp' guard short-circuits a non-string element without paying the
+`condition-case' error path, which matters since this runs per line over a
+several-thousand-line scrollback."
+  (and (stringp regexp)
+       (condition-case nil
+           (string-match-p regexp string)
+         (error nil))))
+
 (defun tmux-control--scrollback-frame-start-line-p (line)
   "Return non-nil when LINE looks like the start of a TUI redraw frame.
 Matches `tmux-control-scrollback-frame-start-regexp' when configured, else the
@@ -3404,7 +3534,8 @@ Nil when neither is available, so compaction does nothing without a frame
 marker."
   (cond
    (tmux-control-scrollback-frame-start-regexp
-    (string-match-p tmux-control-scrollback-frame-start-regexp line))
+    (tmux-control--regexp-matches-p
+     tmux-control-scrollback-frame-start-regexp line))
    (tmux-control--auto-frame-start
     (string= (tmux-control--scrollback-match-key line)
              tmux-control--auto-frame-start))))
@@ -3509,8 +3640,8 @@ whitespace, so an anchored pattern matches regardless of indentation.
 Returns nil when no chrome patterns are configured."
   (let ((trimmed (string-trim line)))
     (seq-some (lambda (re)
-                (or (string-match-p re line)
-                    (string-match-p re trimmed)))
+                (or (tmux-control--regexp-matches-p re line)
+                    (tmux-control--regexp-matches-p re trimmed)))
               tmux-control-scrollback-chrome-regexps)))
 
 (defun tmux-control--merge-scrollback-chunk (out chunk)
@@ -5083,6 +5214,13 @@ client (e.g. iTerm2) for the trade-offs."
 
 (defun tmux-control--kill-process ()
   "Delete the tmux control process and any dependent render buffers."
+  ;; Cancel the command watchdog: its timer lives on the global `timer-list'
+  ;; and holds this buffer as its argument, so without this the killed
+  ;; controller is retained until the timer next fires.  Mirrors the
+  ;; cancellation in `tmux-control--reset-buffer'.
+  (when tmux-control--command-watchdog-timer
+    (cancel-timer tmux-control--command-watchdog-timer)
+    (setq tmux-control--command-watchdog-timer nil))
   (when tmux-control--panes
     (dolist (np tmux-control--panes)
       (when (buffer-live-p (cdr np))
@@ -5821,20 +5959,43 @@ is a foreign window -- a user's non-tmux buffer the tiling must not consume."
 
 (defun tmux-control--tiled-region-size (frame controller)
   "Return (COLS . ROWS): the size tmux should lay CONTROLLER's panes out in.
-This is FRAME's text area (its columns, and its lines minus the minibuffer
-row -- the rows must budget each stacked pane's mode line) reduced by any
-foreign window sharing the frame: a full-height neighbor steals columns, a
-full-width one steals rows.  With no foreign window it is exactly the old
-whole-frame size, so a tiling that owns the frame is unchanged; with one it
-is the smaller region the tiling may use, so panes never overrun a non-tmux
-window's space.  Computed the same way whether called before tiling (from
-the controller's own window) or while tiled (from the pane windows), so the
-size never disagrees with itself and never forces a spurious re-tile."
-  (let ((cols (frame-text-cols frame))
-        (rows (1- (frame-text-lines frame))))
-    (dolist (w (window-list frame 'no-mini))
+ROWS is how many terminal rows actually fit below the tiling: FRAME's inner
+pixel height less the minibuffer and one mode line, divided by the line
+height.  Measuring the mode line in PIXELS is the point -- it is commonly a
+hair taller than a text row (a larger mode-line face), so any fixed
+`frame-text-lines' row offset over-counts and the bottom pane's last row --
+a full-screen TUI's bottom border -- clips.  The grids are sized to the tmux
+pane heights this size produces, and `tmux-control--tile-arrange-node'
+budgets each stacked pane's mode line, so making the total match the real
+body keeps every pane's grid within its window.  This is the same height the
+single-pane path derives from `window-screen-lines' (the real body), so the
+two paths agree.  Reduced by any foreign window sharing the frame: a
+full-height neighbor steals columns, a full-width one steals rows.  Computed
+from frame-level measures (stable across the split, whether called before
+tiling from the controller's window or while tiled from a pane window), so
+the size never disagrees with itself and never forces a spurious re-tile."
+  (let* ((char-h (max 1 (frame-char-height frame)))
+         (windows (window-list frame 'no-mini))
+         ;; The mode line's real pixel height, read from one of our own
+         ;; windows (they share the face); a text row if none is up yet.
+         (ours (cl-remove-if-not
+                (lambda (w) (tmux-control--our-tiling-window-p w controller))
+                windows))
+         (ml-h (if ours (window-mode-line-height (car ours)) char-h))
+         (mini-h (window-pixel-height (minibuffer-window frame)))
+         ;; Full non-minibuffer height in rows: the threshold for "full-height
+         ;; side column" (steals columns) vs "top/bottom band" (steals rows).
+         ;; Classify against the FULL height, not the smaller body-row budget
+         ;; below -- a tall band whose total height reached the body budget
+         ;; would otherwise be misread as a full-height column.
+         (usable-rows (- (frame-text-lines frame)
+                         (window-total-height (minibuffer-window frame))))
+         (cols (frame-text-cols frame))
+         (rows (max 1 (floor (- (frame-inner-height frame) mini-h ml-h)
+                             char-h))))
+    (dolist (w windows)
       (unless (tmux-control--our-tiling-window-p w controller)
-        (if (>= (window-total-height w) rows)
+        (if (>= (window-total-height w) usable-rows)
             (setq cols (- cols (window-total-width w)))     ; a side column
           (setq rows (- rows (window-total-height w))))))    ; a top/bottom band
     (cons (max 1 cols) (max 1 rows))))
