@@ -710,6 +710,37 @@ each wrapped in an evolving prompt line and a status bar.")
   ;; Always returns a normalized boolean, never a truthy non-t value.
   (should (eq (tmux-control--alt-screen-effective-p t "alt") t)))
 
+(ert-deftest tmux-control-test-effective-alt-screen-honored ()
+  ;; The phantom-alt-screen correction is resolved only in the controller
+  ;; buffer; a render buffer (per-window or tiled pane) must defer to its
+  ;; controller, not read its own frozen-`t' local -- else wheel-up would
+  ;; forward to the pane instead of opening scrollback under
+  ;; `alternate-screen off'.
+  (let ((controller (generate-new-buffer " *tc-test-ctrl*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer controller
+            (setq-local tmux-control--alt-screen-honored nil) ; resolved: off
+            (setq-local tmux-control--controller nil))        ; it IS the controller
+          ;; A render buffer keeps the conservative `t' it was created with...
+          (with-temp-buffer
+            (setq-local tmux-control--alt-screen-honored t)
+            (setq-local tmux-control--controller controller)
+            ;; ...but the effective value comes from the controller.
+            (should (eq (tmux-control--effective-alt-screen-honored) nil)))
+          ;; The controller itself reads its own resolved local.
+          (with-current-buffer controller
+            (should (eq (tmux-control--effective-alt-screen-honored) nil))
+            (setq-local tmux-control--alt-screen-honored t)
+            (should (eq (tmux-control--effective-alt-screen-honored) t)))
+          ;; A dead controller falls back to the buffer's own local.
+          (with-temp-buffer
+            (setq-local tmux-control--alt-screen-honored t)
+            (setq-local tmux-control--controller (generate-new-buffer " *dead*"))
+            (kill-buffer tmux-control--controller)
+            (should (eq (tmux-control--effective-alt-screen-honored) t))))
+      (when (buffer-live-p controller) (kill-buffer controller)))))
+
 (ert-deftest tmux-control-test-wheel-should-enter-scrollback-p ()
   ;; The full gate: enter scrollback only on wheel-up, when enabled and
   ;; detectable, over a normal-screen pane that has not grabbed the mouse.
