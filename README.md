@@ -75,6 +75,8 @@ attaches, typing a new name creates it.
   make.
 - **Tiled view** (`C-c C-t`, experimental) — every pane of a window at once,
   split to match tmux's layout.
+- **Split a pane from Emacs** — `C-c |` (side by side) or `C-c -` (stacked)
+  opens a second terminal beside the current one, tiled so both show at once.
 - **Persistent & remote** — the session lives on the server and outlives Emacs;
   detach, restart, reconnect from another machine.
 - **Stays responsive** under a flood of output (optional flow control).
