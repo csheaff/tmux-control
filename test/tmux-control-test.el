@@ -1150,7 +1150,18 @@ each wrapped in an evolving prompt line and a status bar.")
       (should (eq (plist-get p1 :active) nil))
       (should (equal (plist-get p1 :cmd) "vim")))
     ;; A short/garbled line is skipped, not parsed into a bogus pane.
-    (should (null (cdr (tmux-control--parse-window-state '("LAY\t%0\t0")))))))
+    (should (null (cdr (tmux-control--parse-window-state '("LAY\t%0\t0"))))))
+  ;; Empty trailing fields (an unset pane title, sometimes an empty command)
+  ;; must NOT drop the pane or shift columns: `split-string' with an explicit
+  ;; separator keeps empty fields, so the line is still 12 fields.
+  (let* ((line (concat "LAY\t%7\t0\t0\t80\t24\t1\t0\t0\t1\t\t")) ; empty cmd + title
+         (panes (cdr (tmux-control--parse-window-state (list line))))
+         (p (cdr (assoc "%7" panes))))
+    (should (= (length panes) 1))
+    (should p)
+    (should (= (plist-get p :width) 80))     ; columns did not shift
+    (should (equal (plist-get p :cmd) ""))
+    (should (equal (plist-get p :title) ""))))
 
 (ert-deftest tmux-control-test-build-tiling-callback-aborts-when-cleared ()
   ;; The build is async: a teardown (untile, disconnect) during an in-flight
