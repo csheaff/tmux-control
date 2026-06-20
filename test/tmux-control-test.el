@@ -982,7 +982,7 @@ each wrapped in an evolving prompt line and a status bar.")
     (cl-letf (((symbol-function 'tmux-control--ensure-live) #'ignore)
               ((symbol-function 'tmux-control--send-command)
                (lambda (c &optional _k) (push c cmds)))
-              ((symbol-function 'tmux-control--tiling-controller)
+              ((symbol-function 'tmux-control--tiled-mode-p)
                (lambda () tiled-p))
               ((symbol-function 'tmux-control-tile) (lambda () (cl-incf tiles))))
       (with-temp-buffer

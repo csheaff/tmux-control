@@ -6429,7 +6429,7 @@ on and the view is not already tiled, tiles afterward so both panes show;
 an already-tiled view re-tiles itself on the echoed `%layout-change'."
   (tmux-control--ensure-live)
   (let ((pane tmux-control--active-pane)
-        (already-tiled (tmux-control--tiling-controller)))
+        (already-tiled (tmux-control--tiled-mode-p)))
     (tmux-control--send-command
      (concat "split-window " flag
              (when pane (format " -t %s" pane))))
