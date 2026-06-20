@@ -2223,9 +2223,15 @@ duplicate.  Async over the live connection; a no-op when disconnected."
            (lambda (reply)
              (when (buffer-live-p buffer)
                (with-current-buffer buffer
-                 (let ((h (string-to-number
-                           (string-trim (or (car reply) "")))))
-                   (when (> h 0)
+                 ;; Only a digits reply is a real count -- accept 0 (a pane
+                 ;; with history disabled: nothing older than the screen, so
+                 ;; cap depth at 0 and latch at-top at once), but keep nil on
+                 ;; an empty/garbled reply so the heuristic stays the fallback
+                 ;; (`string-to-number' would turn both into a spurious 0).
+                 (let* ((s (string-trim (or (car reply) "")))
+                        (h (and (string-match-p "\\`[0-9]+\\'" s)
+                                (string-to-number s))))
+                   (when h
                      (setq tmux-control--scrollback-history-rows h)
                      (setq tmux-control--scrollback-depth
                            (min tmux-control--scrollback-depth h))

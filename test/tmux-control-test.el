@@ -2707,6 +2707,9 @@ output), :calls (side-effect invocations in order), :active-pane,
     ;; history known, the request reaches the oldest line -> at top.
     (should (equal (res 8000 10000 1800 10000) '(10000 . t)))
     (should (equal (res 8000 10000 9999 10000) '(10000 . t)))
+    ;; history_size 0 (a pane with history disabled) is a valid count, not a
+    ;; failed reply: already at the top, nothing older than the screen.
+    (should (equal (res 0 0 0 0) '(0 . t)))
     ;; history UNKNOWN (reply not yet landed): fall back to the line count.
     ;; A full reply (got == span) advances by got and is not at top.
     (should (equal (res 500 2500 2000 nil) '(2500 . nil)))
