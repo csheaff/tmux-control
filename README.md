@@ -107,6 +107,15 @@ The **tiled view** (`C-c C-t`) is **experimental** — whole-frame only, with a
 few [known limits](docs/guide.md#tiling) — but renders every pane cell-for-cell
 with live per-pane I/O and automatic re-tiling.
 
+## Troubleshooting
+
+**If the live view ever drifts a row or looks scrambled**, press **`C-c C-l`**
+(`M-x tmux-control-clear-and-repaint`) — it reseeds the buffer from tmux's own
+screen and clears the glitch instantly.  The cause is a bug in Eat's terminal
+emulation that drops a display row when a full-screen TUI repaints, so the
+offset can accumulate over redraws; it's tracked upstream at
+[emacs-eat#263](https://codeberg.org/akib/emacs-eat/issues/263).
+
 ## Terminal agent frameworks
 
 Some CLI coding-agent tools run a session per agent in tmux — one **pane** per
