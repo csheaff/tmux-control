@@ -32,6 +32,21 @@
 ;; emulator.  The tmux session outlives Emacs: detach, restart Emacs, or
 ;; reconnect from another machine and the pane is still there.
 ;;
+;; Why Eat: tmux-control renders a pane by feeding the byte stream tmux emits
+;; over control mode (the escape-laden `%output' notifications) into a
+;; terminal emulator.  That calls for an emulator decoupled from any
+;; subprocess -- one built headlessly and fed arbitrary bytes
+;; (`eat-term-make' plus `eat-term-process-output', with input routed back
+;; through callbacks) rather than one wrapped around a shell it spawns
+;; itself.  Eat fits exactly, in pure Emacs Lisp with no native module to
+;; build.  vterm and term.el are both tied to a process they own and do not
+;; fit this "render an external stream" model -- and vterm needs a compiled C
+;; module besides.  The trade-off: Eat is a quiet single-maintainer project,
+;; so tmux-control stays ready to pin or fork it and carries its own
+;; resilience for emulator quirks -- e.g. `tmux-control-clear-and-repaint',
+;; which reseeds the view from `capture-pane' (see
+;; https://codeberg.org/akib/emacs-eat/issues/263 for one such quirk).
+;;
 ;; See `tmux-control-connect' to attach.
 
 ;;; Code:
