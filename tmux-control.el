@@ -4029,6 +4029,14 @@ the matching pane's render buffer instead, so every pane updates at once."
             (funcall kind nil)
           (tmux-control--message
            (format "tmux command failed (%s)" kind)))))
+     ;; While collecting a reply block, any other line is block CONTENT --
+     ;; including lines that merely LOOK like notifications (a captured
+     ;; control-mode transcript can hold %exit/%pause/%continue).  This sits
+     ;; ABOVE those clauses so a captured token is collected verbatim instead
+     ;; of acted on: a stray %pause would reseed and enqueue a bogus continue,
+     ;; a stray %exit would print a false "tmux session ended".
+     (tmux-control--collecting-command
+      (push line tmux-control--command-output))
      ((or (string= line "%exit") (string-prefix-p "%exit " line))
       ;; tmux is closing the control connection (the session was killed,
       ;; the server exited, or the client was detached).  The process
@@ -4044,8 +4052,6 @@ the matching pane's render buffer instead, so every pane updates at once."
      ((string-prefix-p "%continue " line)
       ;; tmux resumed streaming the pane; nothing further to do.
       nil)
-     (tmux-control--collecting-command
-      (push line tmux-control--command-output))
      ((string-match "\\`%window-pane-changed \\([^ ]+\\) \\(%[0-9]+\\)\\'" line)
       ;; The window's active pane changed (a split, a select-pane, a closed
       ;; pane).  In single-pane mode only the active pane is mirrored, so
@@ -4458,7 +4464,11 @@ unchanged."
                   lines))
          (lines (last lines (min height (length lines))))
          (row 1)
-         (out '("\e[H\e[2J")))
+         ;; A freshly consed list, never a quoted literal: the `nreverse'
+         ;; below rewires the tail in place, so a shared literal would leak
+         ;; the previous frame's escapes into every later seed (cf. the same
+         ;; note in `tmux-control--quote-tmux-data').
+         (out (list "\e[H\e[2J")))
     (dolist (line lines)
       ;; Clip to terminal width by visible columns, ignoring the
       ;; non-printing color escapes; only over-wide lines (rare and
@@ -6309,8 +6319,16 @@ once the in-band window-state reply has been parsed."
               ;; mapping that leaves a pane blank, try again shortly -- but only
               ;; a few times, so a persistent mismatch can't reschedule forever.
               (if unmatched
-                  (when (< (cl-incf tmux-control--unmatched-retries) 5)
-                    (tmux-control--schedule-retile controller))
+                  (if (< (cl-incf tmux-control--unmatched-retries) 5)
+                      (tmux-control--schedule-retile controller)
+                    ;; Gave up after repeated layout/pane-list disagreement.
+                    ;; Reset the retry count and release any focus-follow
+                    ;; suppression a window switch armed -- it is otherwise
+                    ;; cleared only by a successful build (below), so without
+                    ;; this a persistent mismatch would strand it and silently
+                    ;; stop a focused pane from selecting itself in tmux.
+                    (setq tmux-control--unmatched-retries 0)
+                    (setq tmux-control--suppress-focus-follow nil))
                 (setq tmux-control--unmatched-retries 0)
                 (let* ((old-panes tmux-control--panes)
                    (meta (list :host tmux-control--host
