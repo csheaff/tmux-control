@@ -2915,6 +2915,49 @@ output), :calls (side-effect invocations in order), :active-pane,
                      "older-1\nolder-2\nold-top line\nlive tail\n"))
       (should (= tmux-control--scrollback-depth 2500)))))
 
+(ert-deftest tmux-control-test-scrollback-drop-seam-overlap ()
+  ;; Drops the new (older) chunk's tail when it duplicates the buffer head --
+  ;; the drift overlap from a pane that scrolled while the pager was open --
+  ;; but only on a SAFE (>=2 distinctive nonblank) overlap.
+  (let ((tmux-control-compact-scrollback-window 200))
+    ;; Two-line distinctive overlap: dropped.
+    (should (equal (tmux-control--scrollback-drop-seam-overlap
+                    '("old-1" "old-2" "dup-a" "dup-b")
+                    '("dup-a" "dup-b" "loaded-1"))
+                   '("old-1" "old-2")))
+    ;; No overlap (the normal, non-drifting extend): unchanged.
+    (should (equal (tmux-control--scrollback-drop-seam-overlap
+                    '("old-1" "old-2" "old-3")
+                    '("loaded-1" "loaded-2"))
+                   '("old-1" "old-2" "old-3")))
+    ;; A lone blank coincidental overlap is not safe, so not dropped.
+    (should (equal (tmux-control--scrollback-drop-seam-overlap
+                    '("old-1" "")
+                    '("" "loaded-1"))
+                   '("old-1" "")))))
+
+(ert-deftest tmux-control-test-scrollback-prepend-dedups-seam ()
+  ;; A pane that scrolls while the pager is open makes an extend re-capture
+  ;; lines already at the top (tmux's -S/-E slide with the screen).  The
+  ;; prepend must drop that overlapping tail instead of doubling it.
+  (let ((tmux-control-compact-scrollback nil)
+        (tmux-control-compact-scrollback-window 200))
+    (with-temp-buffer
+      (tmux-control-scrollback-mode)
+      (let ((inhibit-read-only t))
+        (insert "dup one\ndup two\nloaded tail\n"))
+      (setq-local tmux-control--scrollback-depth 100)
+      ;; The captured older chunk ends with the two lines already shown at the
+      ;; top (the drift overlap); only "older A/B" are genuinely new.
+      (tmux-control--scrollback-prepend
+       "older A\nolder B\ndup one\ndup two" 200)
+      (should (equal (buffer-string)
+                     "older A\nolder B\ndup one\ndup two\nloaded tail\n"))
+      ;; Depth is the captured -S depth of the TOP line ("older A"), which the
+      ;; seam drop preserves (only the duplicate tail is removed), so it is
+      ;; stored unchanged.
+      (should (= tmux-control--scrollback-depth 200)))))
+
 (ert-deftest tmux-control-test-scrollback-populate-arms-extension ()
   ;; The pager opens with extension HELD OFF (extending = t) so the one-line
   ;; "capturing…" placeholder -- which makes the top trivially visible --
