@@ -6656,17 +6656,16 @@ panes against a now-smaller Emacs window."
       (user-error "Not tiling"))
     (tmux-control--teardown-tiling controller)
     (with-current-buffer controller
-      ;; Hard-clear the terminal (it still holds the frozen pre-tiling screen)
-      ;; and size the grid to the window, so the returning single-pane view
-      ;; starts from one clean screen.
+      ;; Hard-clear the frozen pre-tiling screen immediately, so the returning
+      ;; single-pane view starts blank rather than showing stale tiled content.
       (tmux-control--write-terminal "\e[3J\e[H\e[2J")
-      (tmux-control--resize-to-window)
       ;; Re-resolve the session's real active pane (the cached one can be stale
-      ;; after window switches) and seed it -- both over the live control
-      ;; connection (in-band, non-blocking).  The previous out-of-band ssh
-      ;; `display-message' plus a synchronous capture froze Emacs for one or
-      ;; two full SSH round trips -- a fresh, unmultiplexed connection -- on
-      ;; every untile of a remote session.
+      ;; after window switches), THEN resize and seed -- all over the live
+      ;; control connection (in-band, non-blocking).  The previous out-of-band
+      ;; ssh `display-message' plus a synchronous capture froze Emacs for one
+      ;; or two full SSH round trips -- a fresh, unmultiplexed connection -- on
+      ;; every untile of a remote session.  Resizing AFTER the pane is resolved
+      ;; keeps the resize-time pane-size reconciliation on the right pane.
       (tmux-control--query
        "display-message -p \"#{pane_id}\""
        (lambda (lines)
@@ -6675,6 +6674,7 @@ panes against a now-smaller Emacs window."
              (let ((pane (and lines (string-trim (car lines)))))
                (when (and pane (string-match-p "\\`%[0-9]+\\'" pane))
                  (setq tmux-control--active-pane pane)))
+             (tmux-control--resize-to-window)
              (tmux-control--seed-screen)
              ;; The tab bar's window/activity state was not tracked while
              ;; tiled; refresh it for the returning single-pane view.
