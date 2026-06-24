@@ -70,6 +70,40 @@
   ;; the session with no specific window, like a nil index.
   (should (equal (tmux-control--window-target "main" "") "\"main\":")))
 
+(ert-deftest tmux-control-test-quote-tmux-name-neutralizes-hash ()
+  ;; A window NAME is format-expanded by rename-window/new-window -n, so a
+  ;; literal #{...}/#(...) must be doubled to ## (tmux collapses ## back to a
+  ;; single # when it expands the argument).  --quote-tmux-arg, which is for
+  ;; targets, must NOT do this -- hence a separate name quoter.
+  (should (equal (tmux-control--quote-tmux-name "plain") "\"plain\""))
+  (should (equal (tmux-control--quote-tmux-name "a#{pane_id}b")
+                 "\"a##{pane_id}b\""))
+  (should (equal (tmux-control--quote-tmux-name "x#(echo hi)y")
+                 "\"x##(echo hi)y\""))
+  ;; A lone # is doubled too -- harmless, it round-trips back to a literal #.
+  (should (equal (tmux-control--quote-tmux-name "feat#1") "\"feat##1\"")))
+
+(ert-deftest tmux-control-test-window-state-command-quotes-session ()
+  ;; The in-band window-state query drives tiling and every %layout-change
+  ;; retile.  A spaced session name must be quoted or tmux's parser errors
+  ;; ("too many arguments") and tiling reads no layout.
+  (with-temp-buffer
+    (setq-local tmux-control--session "my proj")
+    (should (string-prefix-p "list-panes -t \"my proj\": -F \""
+                             (tmux-control--window-state-command)))))
+
+(ert-deftest tmux-control-test-fallback-control-target-quotes-session ()
+  ;; The connect-window fallback target (send-keys/paste before the pane id
+  ;; is known) must quote the session for the control-mode parser, while the
+  ;; raw --fallback-target stays unquoted for CLI argv use.
+  (with-temp-buffer
+    (setq-local tmux-control--fallback-target "my proj:")
+    (should (equal (tmux-control--fallback-control-target) "\"my proj\":"))
+    (setq-local tmux-control--fallback-target "main:")
+    (should (equal (tmux-control--fallback-control-target) "\"main\":"))
+    (setq-local tmux-control--fallback-target nil)
+    (should (null (tmux-control--fallback-control-target)))))
+
 ;;; Control-mode output decoding.
 
 (ert-deftest tmux-control-test-octal-digit-p ()
@@ -3449,7 +3483,7 @@ output), :calls (side-effect invocations in order), :active-pane,
         ;; The connect-time fallback (NOT homeless) still works.
         (setq tmux-control--homeless nil)
         (tmux-control--send-input nil "x")
-        (should (cl-some (lambda (c) (string-match-p "send-keys -t s:" c))
+        (should (cl-some (lambda (c) (string-match-p "send-keys -t \"s\":" c))
                          sent))))))
 
 (ert-deftest tmux-control-test-homeless-controller-stays-out-of-routing ()

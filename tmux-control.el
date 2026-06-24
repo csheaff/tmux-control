@@ -1576,6 +1576,18 @@ prompt."
   "Return STRING quoted for the tmux command parser."
   (concat "\"" (replace-regexp-in-string "[\"\\]" "\\\\\\&" string) "\""))
 
+(defun tmux-control--quote-tmux-name (name)
+  "Quote NAME for a tmux command that FORMAT-EXPANDS its argument.
+Like `tmux-control--quote-tmux-arg', but first doubles `#' to `##' so a
+literal `#{...}'/`#(...)'/`#[...]' typed into a window name renders
+literally instead of being taken as a tmux format/command/style
+expansion -- `rename-window' and `new-window -n' expand their name
+argument, so a name of `a#{pane_id}b' would otherwise become `a%0b' and
+`#(cmd)' would run CMD on the tmux host.  tmux collapses each `##' back
+to a single `#' when it expands the argument.  `--quote-tmux-arg' alone
+is for *targets*, which tmux does not format-expand."
+  (tmux-control--quote-tmux-arg (replace-regexp-in-string "#" "##" name)))
+
 (defun tmux-control--window-target (session &optional index)
   "Return a control-mode window target for SESSION, quoted for tmux's parser.
 SESSION is wrapped in quotes so a name with spaces or shell/tmux specials
@@ -1591,6 +1603,20 @@ nil (or empty) the target is \"SESSION:\" -- the session, no specific window."
           (if (and index (not (equal index "")))
               (format "%s" index)
             "")))
+
+(defun tmux-control--fallback-control-target ()
+  "Quoted control-mode target for the connect-window session fallback.
+`tmux-control--fallback-target' is the raw \"SESSION:\" string kept for
+CLI argv use (`call-process' passes it as one argument, so quoting there
+would inject literal quote characters).  A control-mode command string
+instead needs the session quoted for tmux's parser, so a spaced or
+special session name parses as one token rather than splitting the
+argument.  tmux session names cannot contain `:', so stripping the
+trailing window separator and re-quoting via `tmux-control--window-target'
+is unambiguous.  Returns nil when there is no fallback target."
+  (when tmux-control--fallback-target
+    (tmux-control--window-target
+     (replace-regexp-in-string ":\\'" "" tmux-control--fallback-target))))
 
 (defun tmux-control-select-window (&optional index)
   "Switch the live tmux-control view to window INDEX in the same session.
@@ -1713,7 +1739,7 @@ With a NAME, give the new window that name."
    (concat (format "new-window -t %s"
                    (tmux-control--window-target tmux-control--session))
            (when (and name (not (string-empty-p name)))
-             (concat " -n " (tmux-control--quote-tmux-arg name)))))
+             (concat " -n " (tmux-control--quote-tmux-name name)))))
   ;; Per-window buffers: the echoed %session-window-changed creates and
   ;; displays the new window's buffer; re-querying the active pane here
   ;; would aim THIS buffer at the new window's pane while it still renders
@@ -1761,7 +1787,7 @@ is left untouched."
   (tmux-control--send-command
    (format "rename-window -t %s %s"
            (tmux-control--window-target tmux-control--session index)
-           (tmux-control--quote-tmux-arg name))))
+           (tmux-control--quote-tmux-name name))))
 
 ;;;; Window tab bar
 ;;
@@ -4872,7 +4898,7 @@ terminal, so make them the recovery path instead of a silent no-op."
     ;; from a frozen view (Copilot review).
     (let ((target (or tmux-control--active-pane
                       (and (not tmux-control--homeless)
-                           tmux-control--fallback-target))))
+                           (tmux-control--fallback-control-target)))))
       (if target
           (let* ((bytes (encode-coding-string string 'utf-8-unix))
                  (n (length bytes))
@@ -4966,7 +4992,7 @@ bracketed-paste state, but tmux does."
     ;; the session's current pane from a buffer that renders nothing.
     (let ((target (or tmux-control--active-pane
                       (and (not tmux-control--homeless)
-                           tmux-control--fallback-target))))
+                           (tmux-control--fallback-control-target)))))
       (if (not target)
           (tmux-control--message "No active tmux pane yet")
         (let* ((bytes (encode-coding-string text 'utf-8-unix))
@@ -5810,7 +5836,8 @@ so the layout/geometry read rides the same channel as `%output' and works
 identically for a local or remote session.  Parse the reply with
 `tmux-control--parse-window-state'."
   (format "list-panes -t %s -F \"%s\""
-          tmux-control--session tmux-control--window-state-format))
+          (tmux-control--window-target tmux-control--session)
+          tmux-control--window-state-format))
 
 (defun tmux-control--parse-window-state (lines)
   "Parse `list-panes' reply LINES into (LAYOUT . PANES).
