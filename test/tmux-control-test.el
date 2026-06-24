@@ -3725,5 +3725,32 @@ output), :calls (side-effect invocations in order), :active-pane,
         (when (buffer-live-p b)
           (let ((kill-buffer-query-functions nil)) (kill-buffer b)))))))
 
+(ert-deftest tmux-control-test-scrollback-cancel-resize-timer ()
+  ;; A pager killed within its resize-debounce window must not leak the timer.
+  (with-temp-buffer
+    (setq-local tmux-control--scrollback-resize-timer
+                (run-with-timer 100 nil #'ignore))
+    (let ((tm tmux-control--scrollback-resize-timer))
+      (should (memq tm timer-list))
+      (tmux-control--scrollback-cancel-resize-timer)
+      (should-not (memq tm timer-list))
+      (should (null tmux-control--scrollback-resize-timer)))))
+
+(ert-deftest tmux-control-test-kill-process-cancels-retile-timer ()
+  ;; Killing a tiled controller must cancel its pending re-tile timer -- it
+  ;; lives on the global timer-list holding the dead controller, exactly like
+  ;; the command watchdog the function already cancels.
+  (with-temp-buffer
+    (let ((tm (run-with-timer 100 nil #'ignore)))
+      (setq-local tmux-control--retile-timer tm
+                  tmux-control--tiled t
+                  tmux-control--panes nil
+                  tmux-control--window-buffers nil
+                  tmux-control--process nil
+                  tmux-control--command-watchdog-timer nil)
+      (tmux-control--kill-process)
+      (should-not (memq tm timer-list))
+      (should (null tmux-control--retile-timer)))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
