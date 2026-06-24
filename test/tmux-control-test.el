@@ -58,6 +58,18 @@
   ;; A backslash is doubled.
   (should (equal (tmux-control--quote-tmux-arg "back\\slash") "\"back\\\\slash\"")))
 
+(ert-deftest tmux-control-test-window-target-quotes-session ()
+  ;; A session name with a space must be quoted so tmux's control-mode parser
+  ;; reads "name with space":INDEX as a single target token; an unquoted
+  ;; space splits the argument and tmux errors ("too many arguments").  A
+  ;; normal name is quoted too -- harmless, tmux strips the quotes.
+  (should (equal (tmux-control--window-target "my proj" 2) "\"my proj\":2"))
+  (should (equal (tmux-control--window-target "my proj") "\"my proj\":"))
+  (should (equal (tmux-control--window-target "main" 0) "\"main\":0"))
+  ;; An empty index (the pinned-size warn path's empty current-window) targets
+  ;; the session with no specific window, like a nil index.
+  (should (equal (tmux-control--window-target "main" "") "\"main\":")))
+
 ;;; Control-mode output decoding.
 
 (ert-deftest tmux-control-test-octal-digit-p ()
@@ -957,27 +969,29 @@ each wrapped in an evolving prompt line and a status bar.")
     (nreverse sent)))
 
 (ert-deftest tmux-control-test-select-window-command ()
+  ;; The session is quoted in the target so a name with spaces parses as one
+  ;; token; tmux strips the quotes from a plain name like "0".
   (should (equal (tmux-control-test--capture-commands
                   (lambda () (tmux-control-select-window "2")))
-                 '("select-window -t 0:2"))))
+                 '("select-window -t \"0\":2"))))
 
 (ert-deftest tmux-control-test-new-window-command ()
   (should (equal (tmux-control-test--capture-commands
                   (lambda () (tmux-control-new-window "my win")))
-                 '("new-window -t 0: -n \"my win\"")))
+                 '("new-window -t \"0\": -n \"my win\"")))
   (should (equal (tmux-control-test--capture-commands
                   (lambda () (tmux-control-new-window nil)))
-                 '("new-window -t 0:"))))
+                 '("new-window -t \"0\":"))))
 
 (ert-deftest tmux-control-test-kill-window-command ()
   (should (equal (tmux-control-test--capture-commands
                   (lambda () (tmux-control-kill-window "1")))
-                 '("kill-window -t 0:1"))))
+                 '("kill-window -t \"0\":1"))))
 
 (ert-deftest tmux-control-test-rename-window-command ()
   (should (equal (tmux-control-test--capture-commands
                   (lambda () (tmux-control-rename-window "1" "new name")))
-                 '("rename-window -t 0:1 \"new name\"")))
+                 '("rename-window -t \"0\":1 \"new name\"")))
   ;; An empty name is rejected.
   (should-error (tmux-control-test--capture-commands
                  (lambda () (tmux-control-rename-window "1" "")))
@@ -2633,7 +2647,7 @@ output), :calls (side-effect invocations in order), :active-pane,
                     tmux-control--size-pin-warned t)
         (tmux-control-adopt-window-size)
         ;; Targets the window THIS buffer renders (@2 -> index 1).
-        (should (equal (car sent) "set-option -w -t s:1 window-size latest"))
+        (should (equal (car sent) "set-option -w -t \"s\":1 window-size latest"))
         (should resized)
         (should-not tmux-control--size-pin-warned)))))
 

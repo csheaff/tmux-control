@@ -1576,6 +1576,16 @@ prompt."
   "Return STRING quoted for the tmux command parser."
   (concat "\"" (replace-regexp-in-string "[\"\\]" "\\\\\\&" string) "\""))
 
+(defun tmux-control--window-target (session &optional index)
+  "Return a control-mode window target for SESSION, quoted for tmux's parser.
+SESSION is wrapped in quotes so a name with spaces or shell/tmux specials
+parses as a single token -- tmux concatenates the adjacent quoted session and
+the \":INDEX\" suffix (\"my proj\":0 resolves to the my-proj session, window
+0; an unquoted space would split the argument and tmux errors).  With INDEX
+nil (or empty) the target is \"SESSION:\" -- the session, no specific window."
+  (concat (tmux-control--quote-tmux-arg session) ":"
+          (if index (format "%s" index) "")))
+
 (defun tmux-control-select-window (&optional index)
   "Switch the live tmux-control view to window INDEX in the same session.
 
@@ -1613,7 +1623,8 @@ to the new window's panes, so only the single-pane view reseeds here."
       (with-current-buffer ctrl
         (setq tmux-control--suppress-focus-follow t)))
     (tmux-control--send-command
-     (format "select-window -t %s:%s" tmux-control--session index))
+     (format "select-window -t %s"
+             (tmux-control--window-target tmux-control--session index)))
     (unless ctrl
       (if tmux-control-window-buffers
           (progn
@@ -1652,7 +1663,7 @@ window, so any other client attached to the session follows along."
       (with-current-buffer ctrl
         (setq tmux-control--suppress-focus-follow t)))
     (tmux-control--send-command
-     (format "%s -t %s" verb tmux-control--session))
+     (format "%s -t %s" verb (tmux-control--quote-tmux-arg tmux-control--session)))
     (unless ctrl
       ;; See `tmux-control--do-select-window' on the per-window-buffers case.
       (if tmux-control-window-buffers
@@ -1693,7 +1704,8 @@ With a NAME, give the new window that name."
            (unless (string-empty-p n) n))))
   (tmux-control--ensure-live)
   (tmux-control--send-command
-   (concat (format "new-window -t %s:" tmux-control--session)
+   (concat (format "new-window -t %s"
+                   (tmux-control--window-target tmux-control--session))
            (when (and name (not (string-empty-p name)))
              (concat " -n " (tmux-control--quote-tmux-arg name)))))
   ;; Per-window buffers: the echoed %session-window-changed creates and
@@ -1718,7 +1730,8 @@ window in the session ends the session and disconnects this client."
   (tmux-control--ensure-live)
   (setq index (tmux-control--normalize-window-index index))
   (tmux-control--send-command
-   (format "kill-window -t %s:%s" tmux-control--session index))
+   (format "kill-window -t %s"
+           (tmux-control--window-target tmux-control--session index)))
   ;; Mirror tmux-control-new-window: with per-window buffers the
   ;; %window-close/%session-window-changed echoes do all the work.
   (if tmux-control-window-buffers
@@ -1740,8 +1753,8 @@ is left untouched."
     (user-error "Window name must not be empty"))
   (setq index (tmux-control--normalize-window-index index))
   (tmux-control--send-command
-   (format "rename-window -t %s:%s %s"
-           tmux-control--session index
+   (format "rename-window -t %s %s"
+           (tmux-control--window-target tmux-control--session index)
            (tmux-control--quote-tmux-arg name))))
 
 ;;;; Window tab bar
@@ -5186,8 +5199,8 @@ Resolving it is one command: `tmux-control-adopt-window-size'."
                           'tmux-control--window-id
                           (tmux-control--session-display-buffer buffer)))
              (target (or display-id
-                         (format "%s:%s" tmux-control--session
-                                 (or tmux-control--current-window "")))))
+                         (tmux-control--window-target
+                          tmux-control--session tmux-control--current-window))))
         (tmux-control--query
          (format "show-options -wqv -t %s window-size" target)
          (lambda (lines)
@@ -5225,9 +5238,8 @@ client (e.g. iTerm2) for the trade-offs."
                                   return (plist-get w :index))))
                   (buffer-local-value 'tmux-control--current-window ctrl))))
     (tmux-control--send-command
-     (format "set-option -w -t %s%s window-size latest"
-             tmux-control--session
-             (if idx (concat ":" idx) ":")))
+     (format "set-option -w -t %s window-size latest"
+             (tmux-control--window-target tmux-control--session idx)))
     (with-current-buffer ctrl
       (setq tmux-control--size-pin-warned nil))
     (tmux-control--resize-to-window)
