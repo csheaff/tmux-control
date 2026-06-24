@@ -1584,7 +1584,13 @@ the \":INDEX\" suffix (\"my proj\":0 resolves to the my-proj session, window
 0; an unquoted space would split the argument and tmux errors).  With INDEX
 nil (or empty) the target is \"SESSION:\" -- the session, no specific window."
   (concat (tmux-control--quote-tmux-arg session) ":"
-          (if index (format "%s" index) "")))
+          ;; Treat an empty-string INDEX like nil -- both mean "no specific
+          ;; window" (target "SESSION:") -- so the behavior matches the
+          ;; docstring rather than relying on `(format "%s" "")' happening to
+          ;; return "".
+          (if (and index (not (equal index "")))
+              (format "%s" index)
+            "")))
 
 (defun tmux-control-select-window (&optional index)
   "Switch the live tmux-control view to window INDEX in the same session.
