@@ -2679,6 +2679,39 @@ output), :calls (side-effect invocations in order), :active-pane,
           (kill-buffer sb)
           (kill-buffer live))))))
 
+(ert-deftest tmux-control-test-resize-skips-unchanged ()
+  ;; Emacs core fires the window-size hook on many redisplays where the size
+  ;; did not change; a same-size resize must not re-send refresh-client or
+  ;; re-query the pane size (the redundant remote round trips).  A real size
+  ;; change still fires.
+  (let ((sent '()) (refreshed 0))
+    (cl-letf (((symbol-function 'tmux-control--send-command)
+               (lambda (cmd &optional _k) (push cmd sent)))
+              ((symbol-function 'tmux-control--refresh-pane-size)
+               (lambda () (cl-incf refreshed)))
+              ((symbol-function 'tmux-control--apply-eat-size) (lambda (_w _h) nil))
+              ((symbol-function 'tmux-control--wb-controller)
+               (lambda () (current-buffer))))
+      (with-temp-buffer
+        (let ((tmux-control-window-buffers nil))
+          (setq-local tmux-control--requested-client-size nil)
+          ;; First resize: cache nil -> fires.
+          (tmux-control--resize 120 40)
+          (should (= refreshed 1))
+          (should (cl-some (lambda (c) (string-match-p "refresh-client -C 120x40" c))
+                           sent))
+          (should (equal tmux-control--requested-client-size '(120 . 40)))
+          ;; Same size again: skipped (no round trips).
+          (setq sent nil)
+          (tmux-control--resize 120 40)
+          (should (= refreshed 1))
+          (should (null sent))
+          ;; A real change: fires again.
+          (tmux-control--resize 100 30)
+          (should (= refreshed 2))
+          (should (cl-some (lambda (c) (string-match-p "refresh-client -C 100x30" c))
+                           sent)))))))
+
 (ert-deftest tmux-control-test-pinned-size-warns-once-and-recovers ()
   ;; tmux silently refusing our size requests (window-size manual after any
   ;; resize-window, or a competing client) must be surfaced: one probe+warn
