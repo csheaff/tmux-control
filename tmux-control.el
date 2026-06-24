@@ -1618,6 +1618,21 @@ is unambiguous.  Returns nil when there is no fallback target."
     (tmux-control--window-target
      (replace-regexp-in-string ":\\'" "" tmux-control--fallback-target))))
 
+(defun tmux-control--quote-target (target)
+  "Return control-mode TARGET with any session name quoted for tmux's parser.
+A pane (\"%N\") or window (\"@N\") id is already a single safe token and is
+returned unchanged; the connect-window session fallback \"SESSION:\" is
+re-quoted so a spaced or special session name parses as one token (tmux
+session names cannot contain `:', so stripping the trailing window separator
+is unambiguous).  TARGET nil returns nil.  For in-band command strings only --
+a CLI argv target rides `call-process' as one argument and must stay raw."
+  (cond
+   ((null target) nil)
+   ((or (string-prefix-p "%" target) (string-prefix-p "@" target)) target)
+   ((string-suffix-p ":" target)
+    (tmux-control--window-target (substring target 0 -1)))
+   (t target)))
+
 (defun tmux-control-select-window (&optional index)
   "Switch the live tmux-control view to window INDEX in the same session.
 
@@ -2234,7 +2249,7 @@ lazy extension; without it the capture runs to the bottom as before."
           (when trailing " -N")
           (format " -S -%d" lines)
           (when end-back (format " -E -%d" end-back))
-          (when target (format " -t %s" target))))
+          (when target (format " -t %s" (tmux-control--quote-target target)))))
 
 (defun tmux-control--scrollback-populate (buffer text &optional line column)
   "Fill scrollback BUFFER with prepared TEXT and restore the view.
@@ -2332,7 +2347,8 @@ duplicate.  Async over the live connection; a no-op when disconnected."
       (when (and (process-live-p proc) target)
         (with-current-buffer live
           (tmux-control--query
-           (format "display-message -p -t %s '#{history_size}'" target)
+           (format "display-message -p -t %s '#{history_size}'"
+                   (tmux-control--quote-target target))
            (lambda (reply)
              (when (buffer-live-p buffer)
                (with-current-buffer buffer

@@ -104,6 +104,17 @@
     (setq-local tmux-control--fallback-target nil)
     (should (null (tmux-control--fallback-control-target)))))
 
+(ert-deftest tmux-control-test-quote-target-quotes-session-fallback ()
+  ;; In-band control-mode targets (the scrollback pager's capture and
+  ;; history_size queries): a pane/window id is already a safe token; the
+  ;; connect-window session fallback "SESSION:" must be re-quoted so a spaced
+  ;; name parses as one token.  The CLI argv capture keeps the raw target.
+  (should (equal (tmux-control--quote-target "%3") "%3"))
+  (should (equal (tmux-control--quote-target "@2") "@2"))
+  (should (equal (tmux-control--quote-target "my proj:") "\"my proj\":"))
+  (should (equal (tmux-control--quote-target "main:") "\"main\":"))
+  (should (equal (tmux-control--quote-target nil) nil)))
+
 ;;; Control-mode output decoding.
 
 (ert-deftest tmux-control-test-octal-digit-p ()
