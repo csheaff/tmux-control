@@ -5888,7 +5888,12 @@ Pure, so the reply shape is unit-testable without a live tmux."
                             :cursor-visible
                             (tmux-control--cursor-visible-from-flag (nth 9 f))
                             :cmd (nth 10 f)
-                            :title (nth 11 f)))
+                            ;; `pane_title' is the last field, but an app can set
+                            ;; an arbitrary title (OSC 2) including a literal TAB;
+                            ;; rejoin any TAB-split fragments so the title is not
+                            ;; truncated to its pre-TAB piece (and the pane is not
+                            ;; mis-counted).
+                            :title (string-join (nthcdr 11 f) "\t")))
                 panes))))
     (cons layout (nreverse panes))))
 
