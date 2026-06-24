@@ -2562,6 +2562,10 @@ the live interactive pane."
         (setq-local tmux-control--scrollback-history-rows nil)
         (add-hook 'window-scroll-functions
                   #'tmux-control--scrollback-scroll-watch nil t)
+        ;; Cancel the resize-debounce timer if the pager is killed before it
+        ;; fires -- it lives on the global `timer-list' holding this buffer.
+        (add-hook 'kill-buffer-hook
+                  #'tmux-control--scrollback-cancel-resize-timer nil t)
         ;; Fresh pager: not yet scrolled up into history, so a wheel-down
         ;; cannot leave to live yet (see `tmux-control-scrollback-wheel-down').
         (setq-local tmux-control--scrollback-left-bottom nil)
@@ -2636,6 +2640,16 @@ agree on the pane size for the Emacs window they share."
   (cons (max 1 (window-max-chars-per-line window))
         (max 1 (with-selected-window window
                  (floor (window-screen-lines))))))
+
+(defun tmux-control--scrollback-cancel-resize-timer ()
+  "Cancel the pager's pending resize-debounce timer.
+Run from the scrollback buffer's `kill-buffer-hook': the debounce timer
+\(armed by `tmux-control--scrollback-follow-resize') lives on the global
+`timer-list' holding this buffer, so a pager killed within the debounce
+window would otherwise leak it until it fires."
+  (when (timerp tmux-control--scrollback-resize-timer)
+    (cancel-timer tmux-control--scrollback-resize-timer)
+    (setq tmux-control--scrollback-resize-timer nil)))
 
 (defun tmux-control--scrollback-follow-resize (frame)
   "Re-capture scrollback views on FRAME whose window changed size.
@@ -3155,19 +3169,6 @@ so the tmux-control keys get out of the way; the mode line shows
               #'eat--manipulate-kill-ring
             #'ignore))
     (tmux-control--disable-line-numbers)))
-
-(defun tmux-control--stop-live-process ()
-  "Stop the live tmux control process without killing the tmux session."
-  (when (process-live-p tmux-control--process)
-    ;; Deliberate shutdown: keep the deferred sentinel from announcing it.
-    (set-process-sentinel tmux-control--process #'ignore)
-    (delete-process tmux-control--process))
-  (setq tmux-control--process nil)
-  (setq tmux-control--terminal nil)
-  (setq eat-terminal nil)
-  (setq tmux-control--keys-active nil)
-  (setq tmux-control--char-mode-keys nil)
-  (remove-hook 'kill-buffer-hook #'tmux-control--kill-process t))
 
 (defun tmux-control--command (host socket-name session)
   "Return process command for HOST, SOCKET-NAME, and SESSION."
@@ -5358,12 +5359,22 @@ client (e.g. iTerm2) for the trade-offs."
   (when tmux-control--command-watchdog-timer
     (cancel-timer tmux-control--command-watchdog-timer)
     (setq tmux-control--command-watchdog-timer nil))
-  (when tmux-control--panes
-    (dolist (np tmux-control--panes)
-      (when (buffer-live-p (cdr np))
-        (let ((kill-buffer-query-functions nil))
-          (kill-buffer (cdr np)))))
-    (setq tmux-control--panes nil))
+  ;; Cancel a pending re-tile too: like the watchdog it lives on the global
+  ;; `timer-list' holding this controller, and killing the pane buffers below
+  ;; would otherwise schedule a fresh one -- each pane's `kill-buffer-hook'
+  ;; re-tiles while `tmux-control--tiled' is still set.  Mirrors
+  ;; `tmux-control--teardown-tiling'.
+  (when tmux-control--retile-timer
+    (cancel-timer tmux-control--retile-timer)
+    (setq tmux-control--retile-timer nil))
+  ;; Suppress those per-pane re-tile schedules while killing the pane buffers.
+  (let ((tmux-control--killing-pane t))
+    (when tmux-control--panes
+      (dolist (np tmux-control--panes)
+        (when (buffer-live-p (cdr np))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer (cdr np)))))
+      (setq tmux-control--panes nil)))
   (let ((self (current-buffer)))
     (dolist (entry tmux-control--window-buffers)
       (let ((buf (cdr entry)))
