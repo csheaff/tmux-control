@@ -1233,6 +1233,20 @@ each wrapped in an evolving prompt line and a status bar.")
     (should (equal (plist-get p :cmd) ""))
     (should (equal (plist-get p :title) ""))))
 
+(ert-deftest tmux-control-test-parse-window-state-tab-in-title ()
+  ;; `pane_title' is the last field, but an app can set a title containing a
+  ;; literal TAB (OSC 2).  It must be preserved whole, not truncated to its
+  ;; pre-TAB fragment, and the pane must not be dropped or mis-counted.
+  (let* ((line (mapconcat #'identity
+                          '("LAY" "%0" "0" "0" "80" "24" "1"
+                            "5" "6" "1" "bash" "a\tb\tc")
+                          "\t"))
+         (panes (cdr (tmux-control--parse-window-state (list line))))
+         (p (cdr (assoc "%0" panes))))
+    (should (= (length panes) 1))
+    (should (equal (plist-get p :cmd) "bash"))
+    (should (equal (plist-get p :title) "a\tb\tc"))))
+
 (ert-deftest tmux-control-test-build-tiling-callback-aborts-when-cleared ()
   ;; The build is async: a teardown (untile, disconnect) during an in-flight
   ;; layout query clears `tmux-control--tiling-build-active', and the reply
