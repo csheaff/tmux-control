@@ -2420,6 +2420,10 @@ doubled."
         (insert "\n")))
     (when (and window (marker-position anchor))
       (set-window-start window anchor t))
+    ;; NEW-DEPTH still describes the top line: the seam dedup drops the chunk's
+    ;; NEWER tail (the lines duplicating the existing head), never its oldest
+    ;; line, so the top stays at the captured -S depth and the next extend
+    ;; continues from there without skipping history.
     (setq tmux-control--scrollback-depth new-depth)))
 
 (defun tmux-control--scrollback-request (buffer target lines trailing

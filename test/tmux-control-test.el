@@ -2939,6 +2939,9 @@ output), :calls (side-effect invocations in order), :active-pane,
        "older A\nolder B\ndup one\ndup two" 200)
       (should (equal (buffer-string)
                      "older A\nolder B\ndup one\ndup two\nloaded tail\n"))
+      ;; Depth is the captured -S depth of the TOP line ("older A"), which the
+      ;; seam drop preserves (only the duplicate tail is removed), so it is
+      ;; stored unchanged.
       (should (= tmux-control--scrollback-depth 200)))))
 
 (ert-deftest tmux-control-test-scrollback-populate-arms-extension ()
