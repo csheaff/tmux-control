@@ -2363,11 +2363,30 @@ extending (the snapshot stays put)."
                        (setq tmux-control--scrollback-at-top t)))
                    (setq tmux-control--scrollback-extending nil)))))))))))
 
+(defun tmux-control--scrollback-drop-seam-overlap (new-lines head-lines)
+  "Drop NEW-LINES' tail that already appears at the head of HEAD-LINES.
+NEW-LINES is the older chunk about to be prepended; HEAD-LINES is the
+current top of the loaded buffer.  When the pane scrolls while the pager is
+open, tmux's -S/-E capture offsets are relative to the moving screen top, so
+an extend re-captures lines already shown -- the chunk's tail then
+duplicates the buffer's head.  Drop that safe suffix/prefix overlap (the
+same distinctive-run test `tmux-control--line-list-overlap' uses for the
+live-history merge), leaving the genuinely older lines.  Returns NEW-LINES
+unchanged when there is no safe overlap, so a normal non-drifting extend --
+whose chunk abuts the head without overlapping it -- is untouched."
+  (let ((overlap (tmux-control--line-list-overlap new-lines head-lines)))
+    (if (> overlap 0)
+        (butlast new-lines overlap)
+      new-lines)))
+
 (defun tmux-control--scrollback-prepend (text new-depth)
   "Prepend colorized older history TEXT to the current scrollback buffer.
 Keeps the viewport on the same content -- the window start sits on a
 marker that the insertion at point-min shifts forward with the text --
-and records the loaded depth as NEW-DEPTH."
+and records the loaded depth as NEW-DEPTH.  Any tail of TEXT the pager
+already shows at its head (a drift-induced re-capture; see
+`tmux-control--scrollback-drop-seam-overlap') is dropped so the seam is not
+doubled."
   (let* ((window (get-buffer-window (current-buffer) t))
          ;; Insertion-type t so the anchor tracks the content line it sits on
          ;; even when the view is at the very top (window-start = point-min):
@@ -2375,14 +2394,30 @@ and records the loaded depth as NEW-DEPTH."
          ;; would jump to the freshly loaded older lines instead of staying
          ;; pinned where you were reading.
          (anchor (and window (copy-marker (window-start window) t)))
-         (inhibit-read-only t))
+         (inhibit-read-only t)
+         (prepared (tmux-control--prepare-scrollback-text text))
+         ;; Dedup the seam against the lines already at the buffer head, in
+         ;; the buffer's own prepared form (ANSI already folded to faces, so
+         ;; the match keys line up).  The first window-worth of lines is all
+         ;; `tmux-control--line-list-overlap' ever inspects.
+         (head (save-excursion
+                 (goto-char (point-min))
+                 (split-string
+                  (buffer-substring-no-properties
+                   (point-min)
+                   (line-end-position tmux-control-compact-scrollback-window))
+                  "\n")))
+         (prepared (string-join
+                    (tmux-control--scrollback-drop-seam-overlap
+                     (split-string (string-trim-right prepared "\n+") "\n")
+                     head)
+                    "\n")))
     (save-excursion
       (goto-char (point-min))
-      (let ((prepared (tmux-control--prepare-scrollback-text text)))
-        (insert prepared)
-        (unless (or (string-suffix-p "\n" prepared)
-                    (bolp))
-          (insert "\n"))))
+      (insert prepared)
+      (unless (or (string-suffix-p "\n" prepared)
+                  (bolp))
+        (insert "\n")))
     (when (and window (marker-position anchor))
       (set-window-start window anchor t))
     (setq tmux-control--scrollback-depth new-depth)))
