@@ -5158,32 +5158,38 @@ may keep the pane at another size (for example when another, larger client
 is attached under `window-size latest').  `tmux-control--refresh-pane-size'
 then reconciles the Eat grid with the pane's real size so cursor-addressed
 redraws stay aligned."
-  (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
-    (let ((inhibit-read-only t))
-      (eat-term-resize tmux-control--terminal width height)
-      (eat-term-redisplay tmux-control--terminal)
-      (when (fboundp 'eat--synchronize-scroll-windows)
-        (tmux-control--keep-cursor-visible
-         (eat--synchronize-scroll-windows)))))
-  (tmux-control--send-command (format "refresh-client -C %dx%d" width height))
-  ;; Remember what we asked for, so the :pane-size reconciliation can
-  ;; notice tmux NOT following (a pinned window-size, a competing client)
-  ;; and say so instead of silently snapping the grid back.
-  (with-current-buffer (tmux-control--wb-controller)
-    (setq tmux-control--requested-client-size (cons width height)))
-  ;; refresh-client sizes the CLIENT, so tmux resizes every window to it;
-  ;; keep the sibling window render buffers' grids in step so background
-  ;; output renders at the size tmux is actually emitting for.
-  (when tmux-control-window-buffers
-    (let ((self (current-buffer)))
-      (with-current-buffer (tmux-control--wb-controller)
-        (dolist (entry tmux-control--window-buffers)
-          (let ((buf (cdr entry)))
-            (when (and (buffer-live-p buf)
-                       (not (eq buf self)))
-              (with-current-buffer buf
-                (tmux-control--apply-eat-size width height))))))))
-  (tmux-control--refresh-pane-size))
+  ;; The local grid resize is idempotent -- a no-op when the size is unchanged.
+  (tmux-control--apply-eat-size width height)
+  (let ((ctrl (tmux-control--wb-controller)))
+    ;; The remote round trips -- `refresh-client -C' and the pane-size
+    ;; reconciliation query -- only when the requested CLIENT size actually
+    ;; changed.  Emacs core invokes the window-size hook on many redisplays
+    ;; where the size did not change; each such call otherwise costs ~2 round
+    ;; trips on a remote link.  The first call after connect or a window switch
+    ;; has a nil cache and still fires, and an external pane-size change arrives
+    ;; via %layout-change (which runs `tmux-control--refresh-pane-size' on its
+    ;; own), so this drops only genuine no-ops.
+    (unless (equal (cons width height)
+                   (buffer-local-value 'tmux-control--requested-client-size ctrl))
+      (tmux-control--send-command (format "refresh-client -C %dx%d" width height))
+      ;; Remember what we asked for, so the :pane-size reconciliation can
+      ;; notice tmux NOT following (a pinned window-size, a competing client)
+      ;; and say so instead of silently snapping the grid back.
+      (with-current-buffer ctrl
+        (setq tmux-control--requested-client-size (cons width height)))
+      ;; refresh-client sizes the CLIENT, so tmux resizes every window to it;
+      ;; keep the sibling window render buffers' grids in step so background
+      ;; output renders at the size tmux is actually emitting for.
+      (when tmux-control-window-buffers
+        (let ((self (current-buffer)))
+          (with-current-buffer ctrl
+            (dolist (entry tmux-control--window-buffers)
+              (let ((buf (cdr entry)))
+                (when (and (buffer-live-p buf)
+                           (not (eq buf self)))
+                  (with-current-buffer buf
+                    (tmux-control--apply-eat-size width height))))))))
+      (tmux-control--refresh-pane-size))))
 
 (defun tmux-control--apply-eat-size (width height)
   "Resize the Eat grid to WIDTH by HEIGHT when it differs from the current.
