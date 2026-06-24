@@ -1772,6 +1772,31 @@ each wrapped in an evolving prompt line and a status bar.")
           (should (equal committed "b")))       ; committed b
       (kill-buffer bbuf))))
 
+(ert-deftest tmux-control-test-untile-resolves-pane-in-band ()
+  ;; Untile must re-resolve the active pane and seed over the live control
+  ;; connection (in-band, async) -- NOT via a blocking out-of-band ssh
+  ;; display-message, which freezes Emacs for a full SSH round trip on remote.
+  (let ((queries '()) (seeded 0) (ran-tmux nil))
+    (cl-letf (((symbol-function 'tmux-control--teardown-tiling) #'ignore)
+              ((symbol-function 'tmux-control--write-terminal) #'ignore)
+              ((symbol-function 'tmux-control--resize-to-window) #'ignore)
+              ((symbol-function 'tmux-control--run-tmux)
+               (lambda (_args) (setq ran-tmux t) ""))
+              ((symbol-function 'tmux-control--query)
+               (lambda (cmd cb) (push cmd queries) (funcall cb '("%7"))))
+              ((symbol-function 'tmux-control--seed-screen)
+               (lambda () (cl-incf seeded))))
+      (with-temp-buffer
+        (setq-local tmux-control--tiled t
+                    tmux-control--controller nil
+                    tmux-control--active-pane "%0"
+                    tmux-control-window-tab-bar nil)
+        (tmux-control-untile)
+        (should-not ran-tmux)                ; no blocking out-of-band ssh
+        (should (cl-some (lambda (q) (string-match-p "pane_id" q)) queries))
+        (should (equal tmux-control--active-pane "%7")) ; reply applied
+        (should (= seeded 1))))))            ; seeded in the callback
+
 ;;; Tiling preserves a foreign (non-tmux) window sharing the frame.
 
 (ert-deftest tmux-control-test-our-tiling-window-p ()

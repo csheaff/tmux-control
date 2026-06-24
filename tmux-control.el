@@ -6821,27 +6821,32 @@ panes against a now-smaller Emacs window."
       (user-error "Not tiling"))
     (tmux-control--teardown-tiling controller)
     (with-current-buffer controller
-      ;; Re-query the session's real active pane synchronously (the cached
-      ;; one can be stale after window switches) BEFORE anything repaints, so
-      ;; every subsequent seed and any live %output route to the right pane.
-      (let ((pane (ignore-errors
-                    (string-trim
-                     (tmux-control--run-tmux
-                      (list "display-message" "-p" "#{pane_id}"))))))
-        (when (and pane (string-match-p "\\`%[0-9]+\\'" pane))
-          (setq tmux-control--active-pane pane)))
-      (tmux-control--resize-to-window)
-      ;; Hard-clear the terminal (it still holds the frozen pre-tiling
-      ;; screen) and paint the active pane synchronously, so the single-pane
-      ;; view is exactly one clean screen rather than old content plus new.
+      ;; Hard-clear the frozen pre-tiling screen immediately, so the returning
+      ;; single-pane view starts blank rather than showing stale tiled content.
       (tmux-control--write-terminal "\e[3J\e[H\e[2J")
-      (tmux-control--seed-pane-buffer-sync controller)
-      ;; The tab bar's window/activity state was not tracked while tiled;
-      ;; refresh it for the returning single-pane view.
-      (when tmux-control-window-tab-bar
-        (tmux-control--quiet-activity)
-        (tmux-control--refresh-windows)
-        (tmux-control--refresh-pane-window-map)))))
+      ;; Re-resolve the session's real active pane (the cached one can be stale
+      ;; after window switches), THEN resize and seed -- all over the live
+      ;; control connection (in-band, non-blocking).  The previous out-of-band
+      ;; ssh `display-message' plus a synchronous capture froze Emacs for one
+      ;; or two full SSH round trips -- a fresh, unmultiplexed connection -- on
+      ;; every untile of a remote session.  Resizing AFTER the pane is resolved
+      ;; keeps the resize-time pane-size reconciliation on the right pane.
+      (tmux-control--query
+       "display-message -p \"#{pane_id}\""
+       (lambda (lines)
+         (when (buffer-live-p controller)
+           (with-current-buffer controller
+             (let ((pane (and lines (string-trim (car lines)))))
+               (when (and pane (string-match-p "\\`%[0-9]+\\'" pane))
+                 (setq tmux-control--active-pane pane)))
+             (tmux-control--resize-to-window)
+             (tmux-control--seed-screen)
+             ;; The tab bar's window/activity state was not tracked while
+             ;; tiled; refresh it for the returning single-pane view.
+             (when tmux-control-window-tab-bar
+               (tmux-control--quiet-activity)
+               (tmux-control--refresh-windows)
+               (tmux-control--refresh-pane-window-map)))))))))
 
 (defun tmux-control-toggle-tiling ()
   "Toggle between the tiled multi-pane view and the single-pane view.
