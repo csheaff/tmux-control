@@ -891,6 +891,17 @@ each wrapped in an evolving prompt line and a status bar.")
       (should (string-match-p (concat "box" (make-string 5 ?\s)) seq))
       (should (string-match-p "\e\\[1;1H\e\\[m\e\\[K\e\\[42mbox" seq)))))
 
+(ert-deftest tmux-control-test-screen-seed-sequence-no-shared-literal ()
+  ;; The escape list ends in `nreverse', which rewires its tail in place.
+  ;; Built from a shared quoted literal it leaked the prior frame into every
+  ;; later seed and buried the home+clear mid-stream.  Built fresh, every
+  ;; call -- not just the first -- must still BEGIN with the home+clear so no
+  ;; stale content can survive ahead of it.
+  (let ((tmux-control--terminal nil))
+    (dotimes (_ 5)
+      (let ((seq (tmux-control--screen-seed-sequence "alpha\nbeta\n" '(1 . 1))))
+        (should (string-prefix-p "\e[H\e[2J" seq))))))
+
 ;;; Session and window listing (parsing only; the process call is stubbed).
 
 (ert-deftest tmux-control-test-list-sessions-parses ()
@@ -1176,6 +1187,32 @@ each wrapped in an evolving prompt line and a status bar.")
     (tmux-control--build-tiling-callback (current-buffer) '("ignored reply"))
     (should-not tmux-control--tiled)
     (should (null tmux-control--panes))))
+
+(ert-deftest tmux-control-test-build-tiling-unmatched-exhaustion-clears-suppression ()
+  ;; A persistent layout/pane-list mismatch retries a few times then gives
+  ;; up.  The give-up path must reset the retry count AND release any
+  ;; focus-follow suppression a window switch armed -- the flag is otherwise
+  ;; cleared only by a SUCCESSFUL build, so a stuck mismatch would strand it
+  ;; and silently stop a focused pane from selecting itself in tmux.
+  (with-temp-buffer
+    (let ((proc (make-pipe-process :name "tc-tile-test" :buffer (current-buffer)
+                                   :noquery t)))
+      (unwind-protect
+          (cl-letf (((symbol-function 'tmux-control--schedule-retile)
+                     (lambda (_controller) nil)))
+            (setq-local tmux-control--process proc
+                        tmux-control--tiled-layout nil
+                        tmux-control--panes nil
+                        tmux-control--unmatched-retries 4 ; one short of the cap
+                        tmux-control--suppress-focus-follow t)
+            ;; Leaf pane "0" at (0,0); geometry names a different pane at
+            ;; different coords, so the leaf cannot be matched and the build
+            ;; exhausts its retries.
+            (tmux-control--build-tiling-apply
+             (current-buffer) "bf3a,80x24,0,0,0" '(("%9" . (:left 5 :top 5))))
+            (should (= tmux-control--unmatched-retries 0))
+            (should-not tmux-control--suppress-focus-follow))
+        (delete-process proc)))))
 
 ;;; Window tab bar.
 
@@ -1816,6 +1853,28 @@ buffer's own directory with a prefix arg or when the option is off."
      (tmux-control--handle-line "%error 2 9 0")
      (should (null called))
      (should-not tmux-control--collecting-command))))
+
+(ert-deftest tmux-control-test-block-collects-notification-shaped-content ()
+  ;; Lines that look like %exit/%pause/%continue but arrive INSIDE a reply
+  ;; block are captured pane content (a control-mode transcript), not
+  ;; protocol: collect them verbatim and fire no side effects -- a stray
+  ;; %pause must not reseed/enqueue a continue, a stray %exit must not print
+  ;; a false "session ended".
+  (tmux-control-test--with-reply-buffer
+   (let (got (paused nil))
+     (cl-letf (((symbol-function 'tmux-control--handle-pause)
+                (lambda (pane) (setq paused pane))))
+       (setq tmux-control--command-queue
+             (list (cons (lambda (lines) (setq got lines)) (float-time))))
+       (tmux-control--handle-line "%begin 1 7 0")
+       (tmux-control--handle-line "%pause %0")
+       (tmux-control--handle-line "%exit")
+       (tmux-control--handle-line "%continue %0")
+       (should tmux-control--collecting-command)
+       (tmux-control--handle-line "%end 2 7 0")
+       (should-not tmux-control--collecting-command)
+       (should (null paused))
+       (should (equal got '("%pause %0" "%exit" "%continue %0")))))))
 
 (ert-deftest tmux-control-test-scrollback-capture-command ()
   ;; The DEFAULT is raw rows, no -J: tmux re-wraps pane history to the
