@@ -376,6 +376,11 @@ Set by `tmux-control--feed-terminal' and cleared by
   "Reverse-order list of decoded %output payloads awaiting a single feed.
 Accumulated by `tmux-control--handle-line' and drained by
 `tmux-control--flush-output-batch'.")
+(defvar-local tmux-control--render-dirty nil
+  "Non-nil after %output has been fed since the last drift check.
+The opt-in `tmux-control-auto-heal-drift' check skips a buffer whose render
+has not changed, so an idle pane costs no round trip; set when output is
+flushed (`tmux-control--flush-output-batch'), cleared when the check runs.")
 (defvar-local tmux-control--utf8-carry ""
   "Unibyte bytes of an incomplete trailing UTF-8 sequence held for the next feed.
 tmux can split a multibyte character across two %output messages; the
@@ -933,7 +938,8 @@ session (tmux attaches if it exists, otherwise creates it)."
         ;; notifies with %pause instead of streaming an unbounded backlog.
         (tmux-control--send-command
          (format "refresh-client -f pause-after=%d" tmux-control-pause-after)))
-      (tmux-control--disable-line-numbers))
+      (tmux-control--disable-line-numbers)
+      (tmux-control--ensure-heal-timer))
     buffer))
 
 (defun tmux-control--session-live-buffer (host session)
@@ -4026,6 +4032,9 @@ per message."
   (when tmux-control--output-batch
     (let ((out (apply #'concat (nreverse tmux-control--output-batch))))
       (setq tmux-control--output-batch nil)
+      ;; Mark the render changed so the opt-in drift check (idle) knows this
+      ;; pane is worth re-examining; an idle pane with no output stays clean.
+      (setq tmux-control--render-dirty t)
       (tmux-control--feed-terminal out))))
 
 (defun tmux-control--batch-pane-output (pane payload)
@@ -4400,6 +4409,140 @@ swallowed as content and the reply queue would desynchronize."
          (mapconcat #'identity (nreverse output) "\n")
          tmux-control--seed-cursor
          tmux-control--seed-cursor-visible))))))
+
+;;;; Optional auto-heal of render drift
+;;
+;; Eat can accumulate a one-row scroll/content divergence from a pane's true
+;; screen over a long incremental %output stream (an upstream Eat issue),
+;; which `tmux-control--verify-seed' -- cursor-only -- does not catch.  When
+;; `tmux-control-auto-heal-drift' is on, an idle timer compares the rendered
+;; screen to tmux's `capture-pane' and repaints from it on a real divergence.
+;; Off by default; one in-band capture per burst-then-idle, only for a
+;; displayed, normal-screen pane.
+
+(defcustom tmux-control-auto-heal-drift nil
+  "When non-nil, auto-repaint the live view if it drifts from tmux's screen.
+Eat (the terminal emulator tmux-control renders through) can accumulate a
+scroll/content divergence from a pane's true screen over a long stream of
+incremental `%output' -- an upstream Eat issue -- which shows as a stale or
+\"scrambled\" frame until the next reseed.  Enabling this arms an idle check
+that compares the rendered screen to tmux's `capture-pane' and, when they
+differ on an otherwise-quiet pane, repaints from the capture (the same heal
+as \\[tmux-control-clear-and-repaint], applied automatically).
+
+Off by default: the check costs one in-band `capture-pane' round trip, taken
+only when a tmux-control buffer is displayed, Emacs has been idle for
+`tmux-control-auto-heal-interval', the pane received output since the last
+check, its command queue is drained, and it is on the normal screen (not a
+full-screen application, which repaints itself and does not drift).  So an
+idle session costs nothing, and a busy remote shell costs at most one capture
+per burst-then-idle.  Enable it if the occasional stale frame bothers you."
+  :type 'boolean
+  :group 'tmux-control
+  :set (lambda (sym val)
+         (set-default sym val)
+         (when val (tmux-control--ensure-heal-timer))))
+
+(defcustom tmux-control-auto-heal-interval 2.0
+  "Seconds of Emacs idle before `tmux-control-auto-heal-drift' checks a pane."
+  :type 'number
+  :group 'tmux-control)
+
+(defvar tmux-control--heal-timer nil
+  "The shared idle timer driving `tmux-control-auto-heal-drift'.")
+
+(defun tmux-control--ensure-heal-timer ()
+  "Arm the shared drift-heal idle timer once (idempotent).
+The timer lives for the Emacs session but is a cheap no-op whenever
+`tmux-control-auto-heal-drift' is nil or nothing is displayed."
+  (unless (and (timerp tmux-control--heal-timer)
+               (memq tmux-control--heal-timer timer-idle-list))
+    (setq tmux-control--heal-timer
+          (run-with-idle-timer (max 0.3 tmux-control-auto-heal-interval) t
+                               #'tmux-control--maybe-heal-drift))))
+
+(defun tmux-control--rtrim-screen-lines (lines)
+  "Right-trim each of LINES and drop TRAILING blank lines (leading kept).
+Leading blanks are preserved so a one-row scroll drift -- the exact Eat
+divergence this heals -- is not normalized away."
+  (let ((ls (nreverse (mapcar #'string-trim-right lines))))
+    (while (and ls (string-empty-p (car ls)))
+      (setq ls (cdr ls)))
+    (nreverse ls)))
+
+(defun tmux-control--displayed-render-buffers ()
+  "Live tmux-control render buffers currently visible on the selected frame."
+  (let (bufs)
+    (dolist (win (window-list nil 'no-minibuffer))
+      (let ((b (window-buffer win)))
+        (when (and (buffer-live-p b)
+                   (not (memq b bufs))
+                   (with-current-buffer b
+                     (and (derived-mode-p 'tmux-control-mode)
+                          tmux-control--active-pane
+                          (process-live-p tmux-control--process))))
+          (push b bufs))))
+    bufs))
+
+(defun tmux-control--maybe-heal-drift ()
+  "Idle check for `tmux-control-auto-heal-drift': reseed a drifted pane.
+For each displayed render buffer that received output since its last check,
+is on the normal screen, and whose command queue is drained, capture the
+pane in-band and repaint only if the rendered screen no longer matches."
+  (when tmux-control-auto-heal-drift
+    (dolist (buf (tmux-control--displayed-render-buffers))
+      (with-current-buffer buf
+        (when (and tmux-control--render-dirty
+                   (let ((term tmux-control--terminal))
+                     (not (and term
+                               (fboundp 'eat-term-in-alternative-display-p)
+                               (eat-term-in-alternative-display-p term))))
+                   (let ((ctrl (tmux-control--wb-controller)))
+                     (and (buffer-live-p ctrl)
+                          (with-current-buffer ctrl
+                            (and (null tmux-control--command-queue)
+                                 (not tmux-control--collecting-command))))))
+          (setq tmux-control--render-dirty nil)
+          (tmux-control--heal-if-drifted buf))))))
+
+(defun tmux-control--visible-screen-lines (buffer)
+  "Return BUFFER's Eat visible screen as right-trimmed plain-text lines.
+Invisible padding cells (the second half of a wide glyph) are dropped so a
+wide character does not read as spurious trailing space, matching tmux's
+`capture-pane'; trailing blank lines are trimmed, leading ones kept."
+  (with-current-buffer buffer
+    (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+      (let ((beg (eat-term-display-beginning tmux-control--terminal))
+            (end (eat-term-end tmux-control--terminal))
+            (out nil))
+        (let ((i beg))
+          (while (< i end)
+            (unless (get-text-property i 'invisible)
+              (push (char-after i) out))
+            (setq i (1+ i))))
+        (tmux-control--rtrim-screen-lines
+         (split-string (apply #'string (nreverse out)) "\n"))))))
+
+(defun tmux-control--heal-if-drifted (buffer)
+  "Capture BUFFER's pane in-band; reseed it only if its render has drifted."
+  (let ((target buffer)
+        (pane (buffer-local-value 'tmux-control--active-pane buffer))
+        (ctrl (with-current-buffer buffer (tmux-control--wb-controller))))
+    (when (and pane (buffer-live-p ctrl))
+      (with-current-buffer ctrl
+        (tmux-control--query
+         (format "capture-pane -p -t %s" pane)
+         (lambda (lines)
+           (when (and (buffer-live-p target)
+                      (equal pane (buffer-local-value 'tmux-control--active-pane
+                                                      target)))
+             (let ((cap (tmux-control--rtrim-screen-lines (or lines '())))
+                   (eat (tmux-control--visible-screen-lines target)))
+               ;; Only reseed on a real divergence: a match means the
+               ;; incremental stream is still aligned, so no needless repaint.
+               (when (and eat (not (equal eat cap)))
+                 (with-current-buffer target
+                   (tmux-control--seed-screen)))))))))))
 
 (defun tmux-control--seed-screen ()
   "Seed the Eat buffer with the current tmux pane contents.
