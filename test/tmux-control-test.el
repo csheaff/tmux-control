@@ -3495,6 +3495,7 @@ output), :calls (side-effect invocations in order), :active-pane,
   (let ((healed 0))
     (cl-letf (((symbol-function 'tmux-control--heal-if-drifted)
                (lambda (_b) (cl-incf healed)))
+              ((symbol-function 'tmux-control--alt-screen-p) (lambda () nil))
               ((symbol-function 'tmux-control--wb-controller)
                (lambda () (current-buffer))))
       (with-temp-buffer

@@ -135,6 +135,45 @@ error) and never pause."
   :type '(choice (const :tag "Off (stream everything)" nil)
                  (integer :tag "Seconds behind before pausing")))
 
+(defvar tmux-control--heal-timer nil
+  "The shared idle timer driving `tmux-control-auto-heal-drift'.")
+
+(defcustom tmux-control-auto-heal-drift nil
+  "When non-nil, auto-repaint the live view if it drifts from tmux's screen.
+Eat (the terminal emulator tmux-control renders through) can accumulate a
+scroll/content divergence from a pane's true screen over a long stream of
+incremental `%output' -- an upstream Eat issue -- which shows as a stale or
+\"scrambled\" frame until the next reseed.  Enabling this arms an idle check
+that compares the rendered screen to tmux's `capture-pane' and, when they
+differ on an otherwise-quiet pane, repaints from the capture (the same heal
+as \\[tmux-control-clear-and-repaint], applied automatically).
+
+Off by default: the check costs one in-band `capture-pane' round trip, taken
+only when a tmux-control buffer is displayed, Emacs has been idle for
+`tmux-control-auto-heal-interval', the pane received output since the last
+check, its command queue is drained, and it is on the normal screen (not a
+full-screen application, which repaints itself and does not drift).  So an
+idle session costs nothing, and a busy remote shell costs at most one capture
+per burst-then-idle.  Enable it if the occasional stale frame bothers you."
+  :type 'boolean
+  :group 'tmux-control
+  :set (lambda (sym val)
+         (set-default sym val)
+         (when val (tmux-control--ensure-heal-timer))))
+
+(defcustom tmux-control-auto-heal-interval 2.0
+  "Seconds of Emacs idle before `tmux-control-auto-heal-drift' checks a pane."
+  :type 'number
+  :group 'tmux-control
+  :set (lambda (sym val)
+         (set-default sym val)
+         ;; Re-arm with the new interval if the heal timer is already running.
+         (when (and (timerp tmux-control--heal-timer)
+                    (memq tmux-control--heal-timer timer-idle-list))
+           (cancel-timer tmux-control--heal-timer)
+           (setq tmux-control--heal-timer nil)
+           (tmux-control--ensure-heal-timer))))
+
 (defcustom tmux-control-scrollback-join-wrapped-lines nil
   "Non-nil means join soft-wrapped pane lines in scrollback captures.
 Joining (`capture-pane -J') glues rows tmux wrapped back into single
@@ -939,7 +978,11 @@ session (tmux attaches if it exists, otherwise creates it)."
         (tmux-control--send-command
          (format "refresh-client -f pause-after=%d" tmux-control-pause-after)))
       (tmux-control--disable-line-numbers)
-      (tmux-control--ensure-heal-timer))
+      ;; Arm the drift-heal idle timer only when the feature is on, so a user
+      ;; who never enables it has no extra background timer; Customize toggles
+      ;; it live via the option's `:set'.
+      (when tmux-control-auto-heal-drift
+        (tmux-control--ensure-heal-timer)))
     buffer))
 
 (defun tmux-control--session-live-buffer (host session)
@@ -4418,38 +4461,9 @@ swallowed as content and the reply queue would desynchronize."
 ;; `tmux-control-auto-heal-drift' is on, an idle timer compares the rendered
 ;; screen to tmux's `capture-pane' and repaints from it on a real divergence.
 ;; Off by default; one in-band capture per burst-then-idle, only for a
-;; displayed, normal-screen pane.
-
-(defcustom tmux-control-auto-heal-drift nil
-  "When non-nil, auto-repaint the live view if it drifts from tmux's screen.
-Eat (the terminal emulator tmux-control renders through) can accumulate a
-scroll/content divergence from a pane's true screen over a long stream of
-incremental `%output' -- an upstream Eat issue -- which shows as a stale or
-\"scrambled\" frame until the next reseed.  Enabling this arms an idle check
-that compares the rendered screen to tmux's `capture-pane' and, when they
-differ on an otherwise-quiet pane, repaints from the capture (the same heal
-as \\[tmux-control-clear-and-repaint], applied automatically).
-
-Off by default: the check costs one in-band `capture-pane' round trip, taken
-only when a tmux-control buffer is displayed, Emacs has been idle for
-`tmux-control-auto-heal-interval', the pane received output since the last
-check, its command queue is drained, and it is on the normal screen (not a
-full-screen application, which repaints itself and does not drift).  So an
-idle session costs nothing, and a busy remote shell costs at most one capture
-per burst-then-idle.  Enable it if the occasional stale frame bothers you."
-  :type 'boolean
-  :group 'tmux-control
-  :set (lambda (sym val)
-         (set-default sym val)
-         (when val (tmux-control--ensure-heal-timer))))
-
-(defcustom tmux-control-auto-heal-interval 2.0
-  "Seconds of Emacs idle before `tmux-control-auto-heal-drift' checks a pane."
-  :type 'number
-  :group 'tmux-control)
-
-(defvar tmux-control--heal-timer nil
-  "The shared idle timer driving `tmux-control-auto-heal-drift'.")
+;; displayed, normal-screen pane.  The `tmux-control-auto-heal-drift' /
+;; `tmux-control-auto-heal-interval' options and the timer variable are defined
+;; up top with the other options; the heal machinery follows here.
 
 (defun tmux-control--ensure-heal-timer ()
   "Arm the shared drift-heal idle timer once (idempotent).
@@ -4493,10 +4507,12 @@ pane in-band and repaint only if the rendered screen no longer matches."
     (dolist (buf (tmux-control--displayed-render-buffers))
       (with-current-buffer buf
         (when (and tmux-control--render-dirty
-                   (let ((term tmux-control--terminal))
-                     (not (and term
-                               (fboundp 'eat-term-in-alternative-display-p)
-                               (eat-term-in-alternative-display-p term))))
+                   ;; Skip a pane truly on the alternate screen: a full-screen
+                   ;; app repaints itself and does not drift.  `--alt-screen-p'
+                   ;; honors tmux's alternate-screen option, so a phantom
+                   ;; alt-screen (Eat in alt-display while tmux is not) is NOT
+                   ;; skipped -- that one can drift and should heal.
+                   (not (tmux-control--alt-screen-p))
                    (let ((ctrl (tmux-control--wb-controller)))
                      (and (buffer-live-p ctrl)
                           (with-current-buffer ctrl
