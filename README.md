@@ -116,6 +116,13 @@ emulation that drops a display row when a full-screen TUI repaints, so the
 offset can accumulate over redraws; it's tracked upstream at
 [emacs-eat#263](https://codeberg.org/akib/emacs-eat/issues/263).
 
+To heal it **automatically** instead, set `tmux-control-auto-heal-drift` to
+non-nil: an idle check then compares the rendered screen to tmux's own and
+reseeds a drifted pane on its own.  It's off by default because the check costs
+one `capture-pane` round trip per burst of output (taken only when a pane is
+displayed, idle, and on the normal screen) — fine on a fast link, your call on
+a slow one; see the variable's docstring for the exact gating.
+
 ## Terminal agent frameworks
 
 Some CLI coding-agent tools run a session per agent in tmux — one **pane** per

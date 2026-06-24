@@ -3491,6 +3491,66 @@ output), :calls (side-effect invocations in order), :active-pane,
                        '(:cursor-pos :capture)))
         (should (equal verified (list (current-buffer))))))))
 
+(ert-deftest tmux-control-test-rtrim-screen-lines ()
+  ;; Trailing blank lines drop; LEADING blanks are kept, so a one-row
+  ;; downward scroll drift (an extra leading blank) is not normalized away.
+  (should (equal (tmux-control--rtrim-screen-lines '("a  " "b" "" "  "))
+                 '("a" "b")))
+  (should (equal (tmux-control--rtrim-screen-lines '("" "a" "b"))
+                 '("" "a" "b")))
+  (should (equal (tmux-control--rtrim-screen-lines '("" "")) '())))
+
+(ert-deftest tmux-control-test-heal-if-drifted ()
+  ;; The drift heal reseeds ONLY when the rendered screen no longer matches
+  ;; tmux's capture -- a match must not reseed (no needless flicker).
+  (let ((reseeded 0))
+    (cl-letf (((symbol-function 'tmux-control--query)
+               (lambda (_cmd cb) (funcall cb '("a" "b"))))
+              ((symbol-function 'tmux-control--seed-screen)
+               (lambda () (cl-incf reseeded)))
+              ((symbol-function 'tmux-control--wb-controller)
+               (lambda () (current-buffer))))
+      (with-temp-buffer
+        (setq-local tmux-control--active-pane "%0")
+        (cl-letf (((symbol-function 'tmux-control--visible-screen-lines)
+                   (lambda (_b) '("a" "b"))))      ; matches capture
+          (tmux-control--heal-if-drifted (current-buffer))
+          (should (= reseeded 0)))
+        (cl-letf (((symbol-function 'tmux-control--visible-screen-lines)
+                   (lambda (_b) '("a" "STALE"))))  ; drifted
+          (tmux-control--heal-if-drifted (current-buffer))
+          (should (= reseeded 1)))))))
+
+(ert-deftest tmux-control-test-maybe-heal-drift-gating ()
+  ;; The idle check no-ops when the feature is off, when nothing changed
+  ;; since the last check, and when the command queue is not drained; it
+  ;; clears the dirty flag when it does run.
+  (let ((healed 0))
+    (cl-letf (((symbol-function 'tmux-control--heal-if-drifted)
+               (lambda (_b) (cl-incf healed)))
+              ((symbol-function 'tmux-control--alt-screen-p) (lambda () nil))
+              ((symbol-function 'tmux-control--wb-controller)
+               (lambda () (current-buffer))))
+      (with-temp-buffer
+        (cl-letf (((symbol-function 'tmux-control--displayed-render-buffers)
+                   (let ((b (current-buffer))) (lambda () (list b)))))
+          (setq-local tmux-control--render-dirty t
+                      tmux-control--command-queue nil
+                      tmux-control--collecting-command nil)
+          (let ((tmux-control-auto-heal-drift nil)) ; off -> no heal
+            (tmux-control--maybe-heal-drift)
+            (should (= healed 0)))
+          (let ((tmux-control-auto-heal-drift t))   ; on, dirty, drained -> heal
+            (tmux-control--maybe-heal-drift)
+            (should (= healed 1))
+            (should-not tmux-control--render-dirty) ; cleared
+            (tmux-control--maybe-heal-drift)        ; not dirty -> no repeat
+            (should (= healed 1))
+            (setq-local tmux-control--render-dirty t ; dirty but queue busy
+                        tmux-control--command-queue '((:x . "cmd")))
+            (tmux-control--maybe-heal-drift)
+            (should (= healed 1))))))))
+
 (ert-deftest tmux-control-test-controller-window-close-goes-homeless ()
   ;; When the CONTROLLER's own window closes (an agent's task window it
   ;; was homed on), the buffer survives -- it owns the process -- but its
