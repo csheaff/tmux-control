@@ -195,6 +195,29 @@
     (should seeded)
     (should (member "refresh-client -A \"%0:continue\"" sent))))
 
+(ert-deftest tmux-control-test-handle-pause-tiled-discards-stale-batch ()
+  ;; In tiling mode a %pause reseeds the paused pane's own buffer
+  ;; synchronously; its pre-pause output batch must be discarded, or
+  ;; `tmux-control--flush-tiled-panes' (end of chunk) replays that stale
+  ;; backlog over the fresh seed -- the very thing %pause means to skip.
+  (let ((panebuf (generate-new-buffer " *tc-pane*"))
+        (seeded nil) (sent '()))
+    (unwind-protect
+        (cl-letf (((symbol-function 'tmux-control--seed-pane-buffer-sync)
+                   (lambda (b) (setq seeded b)))
+                  ((symbol-function 'tmux-control--send-command)
+                   (lambda (cmd &optional _kind) (push cmd sent))))
+          (with-current-buffer panebuf
+            (setq-local tmux-control--output-batch (list "stale" "output")))
+          (with-temp-buffer
+            (setq-local tmux-control--tiled t
+                        tmux-control--panes (list (cons "%4" panebuf)))
+            (tmux-control--handle-pause "%4"))
+          (should (eq seeded panebuf))
+          (should (null (buffer-local-value 'tmux-control--output-batch panebuf)))
+          (should (member "refresh-client -A \"%4:continue\"" sent)))
+      (kill-buffer panebuf))))
+
 ;;; UTF-8 stream reassembly (multibyte characters tmux split across messages).
 
 (ert-deftest tmux-control-test-utf8-complete-len ()

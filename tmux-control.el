@@ -4516,6 +4516,12 @@ tmux to continue so live output resumes from the present."
    (tmux-control--tiled
     (let ((buf (cdr (assoc pane tmux-control--panes))))
       (when (buffer-live-p buf)
+        ;; Drop output batched for this pane before the pause: the synchronous
+        ;; reseed below captures tmux's current screen, which already reflects
+        ;; it, so leaving the batch for `tmux-control--flush-tiled-panes' (end
+        ;; of chunk) would paint that stale backlog over the fresh seed --
+        ;; defeating the point of %pause, which is to skip the dropped backlog.
+        (with-current-buffer buf (setq tmux-control--output-batch nil))
         (tmux-control--seed-pane-buffer-sync buf))))
    ;; A pane mirrored by a sibling window render buffer resyncs there.
    ((when-let* ((entry (and tmux-control-window-buffers
