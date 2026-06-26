@@ -399,9 +399,12 @@ for a remote connection, just SESSION for the local server.  Set to nil to
 hide it."
   :type 'boolean)
 
-(defface tmux-control-session-label
+(defface tmux-control-tab-session
   '((t :inherit mode-line-emphasis))
-  "Face for the current-session HOST:SESSION label in the header line.")
+  "Face for the current-session HOST:SESSION label in the header line.
+Named in the `tmux-control-tab-*' family rather than after the
+`tmux-control-session-label' option, so the option and the face do not
+share a symbol.")
 
 (defface tmux-control-tab-active
   '((t :inherit highlight :weight bold))
@@ -2126,7 +2129,7 @@ A nil or empty host is the local server, shown as just the session name
          (session tmux-control--session)
          (text (if remote (format "%s:%s" host session) session)))
     (propertize (format " %s" text)
-                'face 'tmux-control-session-label
+                'face 'tmux-control-tab-session
                 'help-echo (format "tmux %s session %s"
                                    (if remote host "local") session))))
 
@@ -2152,10 +2155,11 @@ none has anything to show."
 
 (defun tmux-control--scrollback-header ()
   "Header line for the scrollback view.
-Keeps the session's window tabs visible (read from the live buffer, for
-orientation) and appends a scroll-mode hint, so entering scrollback does not
-look like the tabs vanished.  Falls back to a plain info line when the tab bar
-is disabled or no live buffer is available."
+Keeps the current-session label and the session's window tabs visible (the
+tabs read from the live buffer, for orientation) and appends a scroll-mode
+hint, so entering scrollback does not look like the header vanished.  Falls
+back to a plain info line only when neither the label nor the tabs are
+available."
   (let* ((live tmux-control--live-buffer)
          ;; Show the CURRENT mode, then what `c' switches to, so it never
          ;; reads as if verbatim were active while compaction is on.
