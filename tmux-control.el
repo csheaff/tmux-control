@@ -391,6 +391,21 @@ unseen output, so an idle setup shows no extra chrome; click a name to
 switch to it.  Set to nil to disable."
   :type 'boolean)
 
+(defcustom tmux-control-session-label t
+  "Non-nil shows the current host and session at the left of the header line.
+A persistent \"you are here\" label so a buffer always names which tmux
+server and session it is showing, beside the window tab bar: HOST:SESSION
+for a remote connection, just SESSION for the local server.  Set to nil to
+hide it."
+  :type 'boolean)
+
+(defface tmux-control-tab-session
+  '((t :inherit mode-line-emphasis))
+  "Face for the current-session HOST:SESSION label in the header line.
+Named in the `tmux-control-tab-*' family rather than after the
+`tmux-control-session-label' option, so the option and the face do not
+share a symbol.")
+
 (defface tmux-control-tab-active
   '((t :inherit highlight :weight bold))
   "Face for the current window's tab in the `tmux-control' tab bar.")
@@ -959,7 +974,8 @@ session (tmux attaches if it exists, otherwise creates it)."
       ;; Header line: the window tab bar and/or the cross-session activity
       ;; strip (independent features sharing one row).  Both must ignore the
       ;; connect seed's repaint burst, so quiet activity for either.
-      (when (or tmux-control-window-tab-bar tmux-control-session-activity)
+      (when (or tmux-control-window-tab-bar tmux-control-session-activity
+                tmux-control-session-label)
         (setq-local header-line-format '(:eval (tmux-control--header-line)))
         ;; The connect seed repaints every pane; don't let that flag everything.
         (tmux-control--quiet-activity 1.5))
@@ -2104,36 +2120,64 @@ window list and activity state live on the controller; render from there."
      tmux-control--windows
      ""))))
 
+(defun tmux-control--session-label ()
+  "Return the current connection's HOST:SESSION label for the header line.
+A nil or empty host is the local server, shown as just the session name
+\(matching the connect path and the activity strip)."
+  (let* ((host tmux-control--host)
+         (remote (and host (not (string-empty-p host))))
+         (session tmux-control--session)
+         (text (if remote (format "%s:%s" host session) session)))
+    (propertize (format " %s" text)
+                'face 'tmux-control-tab-session
+                'help-echo (format "tmux %s session %s"
+                                   (if remote host "local") session))))
+
 (defun tmux-control--header-line ()
   "Compose the live buffer's header line.
-The cross-session activity strip (other sessions wanting attention) sits to
-the left of the window tab bar, with a separator only between the two when
-both are non-empty; each self-gates on its option, so the row is empty when
-neither has anything to show."
-  (let ((strip (tmux-control--session-strip))
-        (tabs (if tmux-control-window-tab-bar (tmux-control--window-tab-bar) "")))
-    (if (and (> (length strip) 0) (> (length tabs) 0))
-        (concat strip (propertize " │" 'face 'tmux-control-tab-inactive) tabs)
-      (concat strip tabs))))
+A persistent HOST:SESSION label naming the current connection sits with the
+window tab bar (both describe the session you are looking at), and the
+cross-session activity strip (other sessions wanting attention) sits to
+their left, with a separator only between the two groups when both are
+non-empty.  Each segment self-gates on its option, so the row is empty when
+none has anything to show."
+  (let* ((label (if (and tmux-control-session-label
+                         (not tmux-control--tiled)
+                         tmux-control--session)
+                    (tmux-control--session-label)
+                  ""))
+         (strip (tmux-control--session-strip))
+         (tabs (if tmux-control-window-tab-bar (tmux-control--window-tab-bar) ""))
+         (this (concat label tabs)))
+    (if (and (> (length strip) 0) (> (length this) 0))
+        (concat strip (propertize " │" 'face 'tmux-control-tab-inactive) this)
+      (concat strip this))))
 
 (defun tmux-control--scrollback-header ()
   "Header line for the scrollback view.
-Keeps the session's window tabs visible (read from the live buffer, for
-orientation) and appends a scroll-mode hint, so entering scrollback does not
-look like the tabs vanished.  Falls back to a plain info line when the tab bar
-is disabled or no live buffer is available."
+Keeps the current-session label and the session's window tabs visible (the
+tabs read from the live buffer, for orientation) and appends a scroll-mode
+hint, so entering scrollback does not look like the header vanished.  Falls
+back to a plain info line only when neither the label nor the tabs are
+available."
   (let* ((live tmux-control--live-buffer)
          ;; Show the CURRENT mode, then what `c' switches to, so it never
          ;; reads as if verbatim were active while compaction is on.
          (cmode (if tmux-control-compact-scrollback
                     "compacted·c:verbatim"
                   "verbatim·c:compact"))
+         ;; The scrollback buffer carries its own host/session, so the label
+         ;; orients you the same way the live header does.
+         (label (if (and tmux-control-session-label tmux-control--session)
+                    (tmux-control--session-label)
+                  ""))
          (tabs (and tmux-control-window-tab-bar
                     (buffer-live-p live)
                     (with-current-buffer live
-                      (tmux-control--window-tab-bar t)))))
-    (if (and tabs (> (length tabs) 0))
-        (concat tabs (propertize (format "  ⇡ scrollback  g:refresh  %s  q/RET:live "
+                      (tmux-control--window-tab-bar t))))
+         (head (concat label (or tabs ""))))
+    (if (> (length head) 0)
+        (concat head (propertize (format "  ⇡ scrollback  g:refresh  %s  q/RET:live "
                                          cmode)
                                  'face 'tmux-control-tab-inactive))
       (format " %s socket:%s session:%s target:%s    g:refresh  %s  q/l/RET:live"
@@ -5746,7 +5790,8 @@ it asynchronously over the control connection."
         ;; "no process" -- alarming for a perfectly live view.  Keep the
         ;; rest (the [semi-char] mode indicator), drop the status.
         (setq mode-line-process (remove ":%s" mode-line-process))
-        (when (or tmux-control-window-tab-bar tmux-control-session-activity)
+        (when (or tmux-control-window-tab-bar tmux-control-session-activity
+                tmux-control-session-label)
           (setq-local header-line-format
                       '(:eval (tmux-control--header-line))))
         (add-hook 'kill-buffer-hook

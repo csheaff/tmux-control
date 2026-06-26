@@ -58,7 +58,9 @@ attaches, typing a new name creates it.
 - **Live view of a tmux window**, rendered through [Eat](https://codeberg.org/akib/emacs-eat)
   — a normal Emacs buffer you move, search, and copy in, with no nested
   terminal and no tmux chrome.
-- **Windows as tabs** in a header-line tab bar, with an activity **dot** on
+- **Windows as tabs** in a header-line tab bar, prefixed with a persistent
+  `host:session` label so you always know which server and session you are
+  looking at, with an activity **dot** on
   background windows; flip them like browser tabs (`C-c C-n` / `C-c C-p`).
   Each visited window keeps its own scrollback across flips and **keeps
   streaming in the background** — flip back and see everything it printed

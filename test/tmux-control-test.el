@@ -1729,6 +1729,40 @@ each wrapped in an evolving prompt line and a status bar.")
                 (should-not (string-match-p "●0 .*●0" strip))))))
       (kill-buffer a) (kill-buffer b) (kill-buffer loc) (kill-buffer empty))))
 
+(ert-deftest tmux-control-test-session-label-names-host-and-session ()
+  ;; The persistent header label names the current connection: HOST:SESSION
+  ;; for a remote, a bare session name for the local server (nil or empty
+  ;; host), and it appears in the composed header line.
+  (with-temp-buffer
+    (setq-local tmux-control--host "aurora")
+    (setq-local tmux-control--session "0")
+    (let ((tmux-control-session-label t)
+          (tmux-control-window-tab-bar nil)
+          (tmux-control-session-activity nil))
+      (should (string-match-p "aurora:0" (tmux-control--session-label)))
+      ;; ...and it actually makes it into the header line.
+      (should (string-match-p "aurora:0" (tmux-control--header-line)))))
+  ;; Empty-string host is local -> bare session, no colon prefix.
+  (with-temp-buffer
+    (setq-local tmux-control--host "")
+    (setq-local tmux-control--session "work")
+    (let ((lbl (tmux-control--session-label)))
+      (should (string-match-p "work" lbl))
+      (should-not (string-match-p ":" lbl))))
+  ;; nil host is local too.
+  (with-temp-buffer
+    (setq-local tmux-control--host nil)
+    (setq-local tmux-control--session "0")
+    (should-not (string-match-p ":" (tmux-control--session-label))))
+  ;; Disabled -> no label in the header line.
+  (with-temp-buffer
+    (setq-local tmux-control--host "aurora")
+    (setq-local tmux-control--session "0")
+    (let ((tmux-control-session-label nil)
+          (tmux-control-window-tab-bar nil)
+          (tmux-control-session-activity nil))
+      (should-not (string-match-p "aurora" (tmux-control--header-line))))))
+
 (ert-deftest tmux-control-test-flock-other-frame-ordering ()
   ;; flock-other-frame: with a prefix it connects all first, then focuses the
   ;; dedicated frame and flocks; without a prefix it skips connect-all.
