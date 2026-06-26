@@ -2010,24 +2010,33 @@ flagged one in its strip."
     (setq tmux-control--session-activity t)
     (force-mode-line-update t)))
 
+(defun tmux-control--connection-name (host session)
+  "Return SESSION qualified by its server, as HOST:SESSION.
+A nil or empty HOST is the local server and reads as \"local:SESSION\", so
+a local connection is named explicitly rather than shown bare -- tmux
+session names are per-server, so a bare \"0\" is ambiguous across hosts."
+  (format "%s:%s"
+          (if (and host (not (string-empty-p host))) host "local")
+          session))
+
+(defun tmux-control--tab-mouse-face ()
+  "Return a fresh `highlight'-equivalent face for a tab's `mouse-face'.
+Header-line mouse highlighting spans the maximal run of text sharing one
+`eq' `mouse-face' value, so reusing the symbol `highlight' across adjacent
+tabs lights them all up at once.  A fresh (non-`eq') value per tab bounds
+the highlight to the single tab under the mouse."
+  (list :inherit 'highlight))
+
 (defun tmux-control--session-strip-tab (buffer)
   "Return a clickable header-line tab for the flagged session in BUFFER."
   (let* ((name (buffer-local-value 'tmux-control--session buffer))
-         (raw-host (buffer-local-value 'tmux-control--host buffer))
-         ;; A nil or empty host is the local server (matches the connect
-         ;; path); only a real host gets a prefix.
-         (host (and raw-host (not (string-empty-p raw-host)) raw-host))
-         ;; tmux session names are per-server, so every host's default
-         ;; session is "0"; prefix the host so two hosts' "0"s (or a host
-         ;; and the local server) are distinguishable rather than two
-         ;; identical chips.
-         (label (if host (format "%s:%s" host name) name))
+         (host (buffer-local-value 'tmux-control--host buffer))
+         (label (tmux-control--connection-name host name))
          (tab (propertize (format " ●%s" label)
                           'face 'tmux-control-tab-activity
-                          'mouse-face 'highlight
-                          'help-echo (format "Switch to session %s%s (unseen output)"
-                                             name
-                                             (if host (format " on %s" host) ""))))
+                          'mouse-face (tmux-control--tab-mouse-face)
+                          'help-echo (format "Switch to session %s (unseen output)"
+                                             label)))
          (map (make-sparse-keymap)))
     (define-key map [header-line mouse-1]
       (lambda (_event)
@@ -2110,7 +2119,7 @@ window list and activity state live on the controller; render from there."
                           (t 'tmux-control-tab-inactive)))
               (tab (propertize (format " %s:%s%s " idx name mark)
                                'face face
-                               'mouse-face 'highlight
+                               'mouse-face (tmux-control--tab-mouse-face)
                                'help-echo (format "Switch to tmux window %s (%s)"
                                                   idx name))))
          (unless no-keymap
@@ -2122,16 +2131,13 @@ window list and activity state live on the controller; render from there."
 
 (defun tmux-control--session-label ()
   "Return the current connection's HOST:SESSION label for the header line.
-A nil or empty host is the local server, shown as just the session name
-\(matching the connect path and the activity strip)."
-  (let* ((host tmux-control--host)
-         (remote (and host (not (string-empty-p host))))
-         (session tmux-control--session)
-         (text (if remote (format "%s:%s" host session) session)))
+A nil or empty host is the local server, shown as \"local:SESSION\" so the
+label always names the server explicitly (see `tmux-control--connection-name')."
+  (let ((text (tmux-control--connection-name tmux-control--host
+                                             tmux-control--session)))
     (propertize (format " %s" text)
                 'face 'tmux-control-tab-session
-                'help-echo (format "tmux %s session %s"
-                                   (if remote host "local") session))))
+                'help-echo (format "tmux session %s" text))))
 
 (defun tmux-control--header-line ()
   "Compose the live buffer's header line.
