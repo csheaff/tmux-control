@@ -1719,20 +1719,20 @@ each wrapped in an evolving prompt line and a status bar.")
                 ;; Remotes use the exact "host:session" format.
                 (should (string-match-p "●hostA:0" strip))
                 (should (string-match-p "●hostB:0" strip))
-                ;; The local chip stays unprefixed (a bare session name).
-                (should (string-match-p "●0\\(?:\\'\\| \\)" strip))
-                ;; An empty-string host is local too -- no "●:le", no bare
-                ;; colon prefix.
-                (should (string-match-p "●le\\(?:\\'\\| \\)" strip))
+                ;; The local chip is named "local:session", not a bare "0".
+                (should (string-match-p "●local:0" strip))
+                ;; An empty-string host is local too -- "local:le", never
+                ;; "●:le".
+                (should (string-match-p "●local:le" strip))
                 (should-not (string-match-p "●:" strip))
-                ;; The two remote "0"s are distinguishable, not two bare "●0".
-                (should-not (string-match-p "●0 .*●0" strip))))))
+                ;; No bare "●0" anywhere -- every chip is server-qualified.
+                (should-not (string-match-p "●0\\(?:\\'\\| \\)" strip))))))
       (kill-buffer a) (kill-buffer b) (kill-buffer loc) (kill-buffer empty))))
 
 (ert-deftest tmux-control-test-session-label-names-host-and-session ()
   ;; The persistent header label names the current connection: HOST:SESSION
-  ;; for a remote, a bare session name for the local server (nil or empty
-  ;; host), and it appears in the composed header line.
+  ;; for a remote, local:SESSION for the local server (nil or empty host),
+  ;; and it appears in the composed header line.
   (with-temp-buffer
     (setq-local tmux-control--host "aurora")
     (setq-local tmux-control--session "0")
@@ -1742,18 +1742,16 @@ each wrapped in an evolving prompt line and a status bar.")
       (should (string-match-p "aurora:0" (tmux-control--session-label)))
       ;; ...and it actually makes it into the header line.
       (should (string-match-p "aurora:0" (tmux-control--header-line)))))
-  ;; Empty-string host is local -> bare session, no colon prefix.
+  ;; Empty-string host is local -> "local:SESSION".
   (with-temp-buffer
     (setq-local tmux-control--host "")
     (setq-local tmux-control--session "work")
-    (let ((lbl (tmux-control--session-label)))
-      (should (string-match-p "work" lbl))
-      (should-not (string-match-p ":" lbl))))
+    (should (string-match-p "local:work" (tmux-control--session-label))))
   ;; nil host is local too.
   (with-temp-buffer
     (setq-local tmux-control--host nil)
     (setq-local tmux-control--session "0")
-    (should-not (string-match-p ":" (tmux-control--session-label))))
+    (should (string-match-p "local:0" (tmux-control--session-label))))
   ;; Disabled -> no label in the header line.
   (with-temp-buffer
     (setq-local tmux-control--host "aurora")
@@ -1762,6 +1760,24 @@ each wrapped in an evolving prompt line and a status bar.")
           (tmux-control-window-tab-bar nil)
           (tmux-control-session-activity nil))
       (should-not (string-match-p "aurora" (tmux-control--header-line))))))
+
+(ert-deftest tmux-control-test-tab-bar-mouse-face-is-per-tab ()
+  ;; Header-line mouse highlighting spans the maximal contiguous run of text
+  ;; sharing one `eq' mouse-face value, so adjacent tabs must carry distinct
+  ;; values -- otherwise hovering one window lights up the whole bar.
+  (with-temp-buffer
+    (setq-local tmux-control--windows
+                '((:index "0" :name "bash" :active t)
+                  (:index "1" :name "vim"  :active nil)))
+    (let* ((bar (tmux-control--window-tab-bar))
+           (mf1 (get-text-property 1 'mouse-face bar))
+           (chg (next-single-property-change 1 'mouse-face bar))
+           (mf2 (and chg (get-text-property chg 'mouse-face bar))))
+      ;; Both tabs carry a mouse-face...
+      (should mf1)
+      (should mf2)
+      ;; ...but not the SAME object, so the highlight stops at the boundary.
+      (should-not (eq mf1 mf2)))))
 
 (ert-deftest tmux-control-test-flock-other-frame-ordering ()
   ;; flock-other-frame: with a prefix it connects all first, then focuses the
