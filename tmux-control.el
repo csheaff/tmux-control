@@ -1997,11 +1997,21 @@ flagged one in its strip."
 (defun tmux-control--session-strip-tab (buffer)
   "Return a clickable header-line tab for the flagged session in BUFFER."
   (let* ((name (buffer-local-value 'tmux-control--session buffer))
-         (tab (propertize (format " ●%s" name)
+         (raw-host (buffer-local-value 'tmux-control--host buffer))
+         ;; A nil or empty host is the local server (matches the connect
+         ;; path); only a real host gets a prefix.
+         (host (and raw-host (not (string-empty-p raw-host)) raw-host))
+         ;; tmux session names are per-server, so every host's default
+         ;; session is "0"; prefix the host so two hosts' "0"s (or a host
+         ;; and the local server) are distinguishable rather than two
+         ;; identical chips.
+         (label (if host (format "%s:%s" host name) name))
+         (tab (propertize (format " ●%s" label)
                           'face 'tmux-control-tab-activity
                           'mouse-face 'highlight
-                          'help-echo (format "Switch to session %s (unseen output)"
-                                             name)))
+                          'help-echo (format "Switch to session %s%s (unseen output)"
+                                             name
+                                             (if host (format " on %s" host) ""))))
          (map (make-sparse-keymap)))
     (define-key map [header-line mouse-1]
       (lambda (_event)

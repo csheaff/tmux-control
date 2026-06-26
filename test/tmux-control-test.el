@@ -1679,6 +1679,56 @@ each wrapped in an evolving prompt line and a status bar.")
                 (should-not tmux-control--session-activity)))))   ; self-cleared
       (kill-buffer self) (kill-buffer other) (kill-buffer quiet))))
 
+(ert-deftest tmux-control-test-session-strip-disambiguates-hosts ()
+  ;; Two different hosts whose tmux session names collide (the default "0")
+  ;; must produce distinguishable chips -- otherwise the strip shows two
+  ;; identical "0"s and you cannot tell which host wants attention.
+  (let ((a (generate-new-buffer "*tmux-control:hostA:0*"))
+        (b (generate-new-buffer "*tmux-control:hostB:0*"))
+        (loc (generate-new-buffer "*tmux-control:local:0*"))
+        (empty (generate-new-buffer "*tmux-control:emptyhost:0*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer a
+            (setq-local tmux-control--session "0")
+            (setq-local tmux-control--host "hostA")
+            (setq-local tmux-control--process 'live)
+            (setq-local tmux-control--session-activity t))
+          (with-current-buffer b
+            (setq-local tmux-control--session "0")
+            (setq-local tmux-control--host "hostB")
+            (setq-local tmux-control--process 'live)
+            (setq-local tmux-control--session-activity t))
+          (with-current-buffer loc
+            (setq-local tmux-control--session "0")
+            (setq-local tmux-control--host nil)   ; local connection
+            (setq-local tmux-control--process 'live)
+            (setq-local tmux-control--session-activity t))
+          (with-current-buffer empty
+            (setq-local tmux-control--session "le")
+            (setq-local tmux-control--host "")    ; empty host is also local
+            (setq-local tmux-control--process 'live)
+            (setq-local tmux-control--session-activity t))
+          (cl-letf (((symbol-function 'process-live-p) (lambda (p) (eq p 'live))))
+            ;; Render the strip from another (current) buffer so all flagged
+            ;; ones are "other".
+            (with-temp-buffer
+              (setq-local tmux-control--session "viewer")
+              (let* ((tmux-control-session-activity t)
+                     (strip (tmux-control--session-strip)))
+                ;; Remotes use the exact "host:session" format.
+                (should (string-match-p "●hostA:0" strip))
+                (should (string-match-p "●hostB:0" strip))
+                ;; The local chip stays unprefixed (a bare session name).
+                (should (string-match-p "●0\\(?:\\'\\| \\)" strip))
+                ;; An empty-string host is local too -- no "●:le", no bare
+                ;; colon prefix.
+                (should (string-match-p "●le\\(?:\\'\\| \\)" strip))
+                (should-not (string-match-p "●:" strip))
+                ;; The two remote "0"s are distinguishable, not two bare "●0".
+                (should-not (string-match-p "●0 .*●0" strip))))))
+      (kill-buffer a) (kill-buffer b) (kill-buffer loc) (kill-buffer empty))))
+
 (ert-deftest tmux-control-test-flock-other-frame-ordering ()
   ;; flock-other-frame: with a prefix it connects all first, then focuses the
   ;; dedicated frame and flocks; without a prefix it skips connect-all.
