@@ -427,6 +427,13 @@ option, so the option and the face do not share a symbol.")
 (defvar-local tmux-control--process nil)
 (defvar-local tmux-control--terminal nil)
 (defvar-local tmux-control--accumulator "")
+
+(defconst tmux-control--max-pending-line (* 16 1024 1024)
+  "Cap (bytes) on the unparsed tail of the control-mode stream.
+Control-mode replies are newline-terminated; a remote that streams without a
+newline would otherwise grow `tmux-control--accumulator' without bound and
+exhaust Emacs memory.  A single legitimate line never approaches this, so on
+overflow the malformed pending data is dropped.")
 (defvar-local tmux-control--display-dirty nil
   "Non-nil when Eat output has been fed but not yet redisplayed.
 Set by `tmux-control--feed-terminal' and cleared by
@@ -4274,6 +4281,12 @@ Lines are compared by their width-insensitive match keys."
           (setq start (1+ line-end)))
         (setq tmux-control--accumulator
               (substring tmux-control--accumulator start))
+        ;; Bound the unparsed tail: a remote that never sends a newline would
+        ;; otherwise grow it without limit (memory DoS).  A real control-mode
+        ;; line is tiny, so an over-cap pending fragment is malformed -- drop it.
+        (when (> (length tmux-control--accumulator)
+                 tmux-control--max-pending-line)
+          (setq tmux-control--accumulator ""))
         ;; Feed any output still batched at the end of the chunk, then do a
         ;; single redisplay -- not one per %output message.  In tiling mode
         ;; the controller renders nothing itself; it flushes each pane's
@@ -6293,7 +6306,12 @@ Pure, so the reply shape is unit-testable without a live tmux."
   (let ((layout nil) (panes nil))
     (dolist (line lines)
       (let ((f (split-string line "\t")))
-        (when (>= (length f) 12)
+        ;; The pane id (field 1) comes straight from the untrusted reply stream
+        ;; and is later used as a command TARGET (send-input, select-pane,
+        ;; capture); accept only a canonical "%N" so a hostile/buggy server
+        ;; cannot smuggle a crafted target.  A real tmux pane id is always %N.
+        (when (and (>= (length f) 12)
+                   (string-match-p "\\`%[0-9]+\\'" (nth 1 f)))
           (unless layout (setq layout (nth 0 f)))
           (push (cons (nth 1 f)
                       (list :left (string-to-number (nth 2 f))
