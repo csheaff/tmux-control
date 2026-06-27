@@ -2012,6 +2012,39 @@ each wrapped in an evolving prompt line and a status bar.")
       (should (string-match-p "x%%n" raw))
       (should (string-match-p "%%999m" raw)))))
 
+(ert-deftest tmux-control-test-any-frame-flocked-p ()
+  (let ((f (selected-frame)))
+    (unwind-protect
+        (progn
+          (set-frame-parameter f 'tmux-control--flock nil)
+          (should-not (tmux-control--any-frame-flocked-p))
+          (set-frame-parameter f 'tmux-control--flock t)
+          (should (tmux-control--any-frame-flocked-p)))
+      (set-frame-parameter f 'tmux-control--flock nil))))
+
+(ert-deftest tmux-control-test-schedule-reflock-gated-and-debounced ()
+  ;; Re-grid is scheduled only when a frame is flocked, and only once per burst.
+  (let ((real (run-with-idle-timer 999 nil #'ignore)))
+    (unwind-protect
+        (progn
+          ;; flocked: schedules once, then debounces while a timer is pending
+          (let ((tmux-control--reflock-timer nil) (calls 0))
+            (cl-letf (((symbol-function 'tmux-control--any-frame-flocked-p) (lambda () t))
+                      ((symbol-function 'run-with-idle-timer)
+                       (lambda (&rest _) (cl-incf calls) real)))
+              (tmux-control--schedule-reflock)
+              (should (= calls 1))
+              (tmux-control--schedule-reflock)   ; timer pending -> no second schedule
+              (should (= calls 1))))
+          ;; not flocked: never schedules (the common, zero-cost path)
+          (let ((tmux-control--reflock-timer nil) (calls 0))
+            (cl-letf (((symbol-function 'tmux-control--any-frame-flocked-p) (lambda () nil))
+                      ((symbol-function 'run-with-idle-timer)
+                       (lambda (&rest _) (cl-incf calls) real)))
+              (tmux-control--schedule-reflock)
+              (should (= calls 0)))))
+      (cancel-timer real))))
+
 (ert-deftest tmux-control-test-flock-other-frame-ordering ()
   ;; flock-other-frame: with a prefix it connects all first, then focuses the
   ;; dedicated frame and flocks; without a prefix it skips connect-all.
