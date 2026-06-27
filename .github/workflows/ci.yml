@@ -17,7 +17,7 @@ jobs:
         emacs-version: ['29.1', '30.1']
         tmux: ['distro', '3.6a']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       # Pinned to a commit SHA: the action only publishes a moving master.
       - uses: purcell/setup-emacs@509bfe03ba1ffddb67b3c6d9eaaeb96b45182cc7
