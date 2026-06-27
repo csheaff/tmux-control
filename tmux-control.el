@@ -401,11 +401,12 @@ hide it."
   :type 'boolean)
 
 (defface tmux-control-tab-session
-  '((t :inherit default))
+  '((t))
   "Face for the current session NAME in the header line.
 Plain by default: the session name is a neutral fact, not an alert, so it
-carries no color of its own (the host prefix is dimmed and the active
-window is highlighted -- those carry the meaning).  Named in the
+carries no attributes of its own (it inherits the header line's own face;
+the host prefix is dimmed and the active window is highlighted -- those
+carry the meaning).  Named in the
 `tmux-control-tab-*' family rather than after the `tmux-control-session-label'
 option, so the option and the face do not share a symbol.")
 
@@ -2064,7 +2065,8 @@ only when it is not the default, so the common single-server case stays
 clean but two local servers (or two sockets on one host) stay distinct --
 otherwise both would collapse to \"local\"."
   (let ((h (if (and host (not (string-empty-p host))) host "local")))
-    (if (and socket (not (equal socket tmux-control-default-socket-name)))
+    (if (and socket (not (string-empty-p socket))
+             (not (equal socket tmux-control-default-socket-name)))
         (format "%s/%s" h socket)
       h)))
 
@@ -2094,25 +2096,26 @@ Grouped by SERVER so a host is named once, and only when it differs from
 the server you are currently viewing -- so a sibling session on your own
 server shows just its name (no redundant host), while a session on another
 host/server is prefixed with that server, dimmed, once."
-  (let* ((cur (cons (tmux-control--server-label tmux-control--host
-                                                tmux-control--socket-name)
-                    t))
+  (let* ((cur (tmux-control--server-label tmux-control--host
+                                          tmux-control--socket-name))
          (order '())
          (groups (make-hash-table :test 'equal)))
     (dolist (b buffers)
       (let ((key (tmux-control--server-label
                   (buffer-local-value 'tmux-control--host b)
                   (buffer-local-value 'tmux-control--socket-name b))))
-        (unless (member key order) (setq order (append order (list key))))
+        ;; First sighting of a server seeds its (non-empty) group, so a plain
+        ;; `gethash' presence check de-dups `order' without an O(n^2) `member'.
+        (unless (gethash key groups) (push key order))
         (puthash key (cons b (gethash key groups)) groups)))
     (mapconcat
      (lambda (key)
        (concat
-        (unless (equal key (car cur))
+        (unless (equal key cur)
           (propertize (format "  %s" key) 'face 'tmux-control-tab-inactive))
         (mapconcat #'tmux-control--corner-session
                    (reverse (gethash key groups)) "")))
-     order "")))
+     (nreverse order) "")))
 
 (defun tmux-control-switch-to-flagged ()
   "Switch to one of the other sessions that has unseen output.

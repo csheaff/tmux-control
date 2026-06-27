@@ -1741,6 +1741,8 @@ each wrapped in an evolving prompt line and a status bar.")
   (should (equal (tmux-control--server-label "" tmux-control-default-socket-name)
                  "local"))
   (should (equal (tmux-control--server-label nil "scratch") "local/scratch"))
+  ;; An empty socket is absent, not a non-default server (no "local/").
+  (should (equal (tmux-control--server-label nil "") "local"))
   (should (equal (tmux-control--server-label "aurora" tmux-control-default-socket-name)
                  "aurora"))
   (should (equal (tmux-control--server-label "aurora" "work") "aurora/work")))
