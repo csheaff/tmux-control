@@ -891,7 +891,7 @@ text (creating a new session) when they do not."
         (let ((text (if (and host (not (string-empty-p host)))
                         (tmux-control--call
                          "ssh"
-                         (list host
+                         (list (tmux-control--check-host host)
                                (concat tmux-control-remote-tmux-socket-setup
                                        " && "
                                        (tmux-control--tmux-command-string args))))
@@ -1661,8 +1661,19 @@ prompt."
   index)
 
 (defun tmux-control--quote-tmux-arg (string)
-  "Return STRING quoted for the tmux command parser."
-  (concat "\"" (replace-regexp-in-string "[\"\\]" "\\\\\\&" string) "\""))
+  "Return STRING quoted for the tmux command parser.
+Control characters are stripped first.  Control mode is line-based, and a
+double-quoted argument does not neutralize a newline, so a newline (or
+other C0/DEL) in a name would break out of the quoted argument and let an
+attacker- or agent-supplied name inject a SECOND control-mode command
+\(e.g. `run-shell', i.e. code execution on the tmux host).  tmux does not
+permit control characters in these names, so removing them only defuses
+hostile input and never alters a legitimate name."
+  (concat "\""
+          (replace-regexp-in-string
+           "[\"\\]" "\\\\\\&"
+           (replace-regexp-in-string "[\0-\37\177]" "" string))
+          "\""))
 
 (defun tmux-control--quote-tmux-name (name)
   "Quote NAME for a tmux command that FORMAT-EXPANDS its argument.
@@ -3440,13 +3451,29 @@ so the tmux-control keys get out of the way; the mode line shows
             #'ignore))
     (tmux-control--disable-line-numbers)))
 
+(defun tmux-control--check-host (host)
+  "Signal a `user-error' if HOST could be misread by ssh as an option.
+An ssh destination beginning with `-' (e.g. \"-oProxyCommand=...\",
+\"-F<file>\", \"-i<file>\") is taken as an OPTION, not a hostname, and
+OpenSSH runs a ProxyCommand locally via /bin/sh before connecting -- so a
+crafted host string would be local code execution in the user's context.
+A real host or ssh alias never starts with `-'.  Returns HOST when safe;
+nil (a local connection) passes through, and any non-nil, non-string value
+is rejected rather than silently reaching the process layer."
+  (when host
+    (unless (stringp host)
+      (user-error "Invalid ssh host (not a string): %S" host))
+    (when (string-prefix-p "-" host)
+      (user-error "Refusing ssh host that looks like an option: %S" host)))
+  host)
+
 (defun tmux-control--command (host socket-name session)
   "Return process command for HOST, SOCKET-NAME, and SESSION."
   (let ((tmux-args `("tmux" "-L" ,socket-name "-C"
                      "new-session" "-A" "-s" ,session)))
     (if (or (null host) (string-empty-p host))
         tmux-args
-      (list "ssh" host
+      (list "ssh" (tmux-control--check-host host)
             (concat tmux-control-remote-tmux-socket-setup
                     "; exec "
                     (mapconcat #'shell-quote-argument tmux-args " "))))))
