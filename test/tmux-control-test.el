@@ -2012,6 +2012,11 @@ each wrapped in an evolving prompt line and a status bar.")
       (should (string-match-p "x%%n" raw))
       (should (string-match-p "%%999m" raw)))))
 
+(ert-deftest tmux-control-test-tiled-hide-mode-line-default ()
+  ;; Default keeps the per-pane labels (the gapless grid is opt-in); guard
+  ;; against an accidental default flip.
+  (should (eq (default-value 'tmux-control-tiled-hide-mode-line) nil)))
+
 (ert-deftest tmux-control-test-any-frame-flocked-p ()
   ;; Observe only our own frame, so an unrelated flocked frame (e.g. running
   ;; ERT interactively) cannot skew the result.

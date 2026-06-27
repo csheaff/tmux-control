@@ -237,7 +237,9 @@ In the tiled view:
   window makes it tmux's active pane too (other clients follow).
 - Splitting (`C-c |` / `C-c -`, or from tmux), resizing, or closing a pane
   re-tiles automatically, and the mode line labels each pane by its id,
-  command, and title.
+  command, and title.  Set `tmux-control-tiled-hide-mode-line` non-nil to
+  drop those per-pane mode lines so the cells sit flush (a gapless,
+  iTerm-style grid) at the cost of the labels.
 - Resizing the Emacs frame re-divides the tmux window to match, so the
   panes re-fit instead of clipping.
 - Each pane is a normal `tmux-control` buffer, so `C-c C-e` scrollback and
