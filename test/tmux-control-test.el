@@ -833,6 +833,39 @@ each wrapped in an evolving prompt line and a status bar.")
   (should (equal (tmux-control--interpret-alt-screen-reply '("") t)
                  '(:honored . t))))
 
+(ert-deftest tmux-control-test-alt-screen-warning-throttled ()
+  ;; Issue #102: one warning per connection when alternate-screen is off,
+  ;; never when honored, never when suppressed.
+  (let (warnings)
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (&rest _) (push t warnings))))
+      ;; honored -> no warning
+      (with-temp-buffer
+        (setq-local tmux-control--alt-screen-honored t)
+        (setq-local tmux-control--alt-screen-warned nil)
+        (let ((tmux-control-warn-on-alternate-screen-off t))
+          (tmux-control--maybe-warn-alternate-screen-off))
+        (should (null warnings)))
+      ;; off + enabled -> exactly one warning across repeated refreshes
+      (with-temp-buffer
+        (setq-local tmux-control--alt-screen-honored nil)
+        (setq-local tmux-control--alt-screen-warned nil)
+        (setq-local tmux-control--host nil)
+        (setq-local tmux-control--session "s")
+        (let ((tmux-control-warn-on-alternate-screen-off t))
+          (tmux-control--maybe-warn-alternate-screen-off)
+          (tmux-control--maybe-warn-alternate-screen-off))
+        (should (= (length warnings) 1))
+        (should tmux-control--alt-screen-warned))
+      ;; suppressed -> never
+      (setq warnings nil)
+      (with-temp-buffer
+        (setq-local tmux-control--alt-screen-honored nil)
+        (setq-local tmux-control--alt-screen-warned nil)
+        (let ((tmux-control-warn-on-alternate-screen-off nil))
+          (tmux-control--maybe-warn-alternate-screen-off))
+        (should (null warnings))))))
+
 (ert-deftest tmux-control-test-alt-screen-effective-p ()
   ;; Truly on the alternate screen only when tmux honors it AND Eat reports
   ;; it.  The phantom case (Eat says alt, tmux says not honored) is nil.
