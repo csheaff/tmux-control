@@ -392,7 +392,10 @@ overwrite what you next paste (clipboard poisoning) -- or read your kill-ring
 back out.  Off by default: pane-driven clipboard manipulation is ignored.
 Set non-nil to allow it (the underlying Eat behavior), e.g. for a trusted
 local session where copying pane output to the system clipboard is wanted."
-  :type 'boolean)
+  :type 'boolean
+  ;; Risky: a file-/dir-local variable in an untrusted repo must not be able
+  ;; to silently re-enable pane-driven clipboard access.
+  :risky t)
 
 (defcustom tmux-control-session-activity t
   "Non-nil flags other connected sessions that have unseen output.
