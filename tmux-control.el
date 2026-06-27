@@ -664,6 +664,13 @@ kills, which are deliberate.")
     (define-key map (kbd "C-c C-r") #'tmux-control-reconnect)
     (define-key map (kbd "C-c C-s") #'tmux-control-select-session)
     (define-key map (kbd "C-c C-f") #'tmux-control-toggle-flock)
+    ;; Window jumps: a chooser, "last window" (alt-tab), and direct C-c N.
+    (define-key map (kbd "C-c C-w") #'tmux-control-select-window)
+    (define-key map (kbd "C-c TAB") #'tmux-control-last-window)
+    (define-key map (kbd "C-c x") #'tmux-control-kill-pane)
+    (dotimes (i 10)
+      (define-key map (kbd (format "C-c %d" i))
+        #'tmux-control-select-window-by-key))
     ;; Split the active pane: `|' is the side-by-side divider, `-' the stacked
     ;; one (the popular tmux `.conf' rebinding).
     (define-key map (kbd "C-c |") #'tmux-control-split-pane-right)
@@ -756,6 +763,13 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     (define-key map (kbd "C-c C-r") #'tmux-control-reconnect)
     (define-key map (kbd "C-c C-s") #'tmux-control-select-session)
     (define-key map (kbd "C-c C-f") #'tmux-control-toggle-flock)
+    ;; Window jumps: a chooser, "last window" (alt-tab), and direct C-c N.
+    (define-key map (kbd "C-c C-w") #'tmux-control-select-window)
+    (define-key map (kbd "C-c TAB") #'tmux-control-last-window)
+    (define-key map (kbd "C-c x") #'tmux-control-kill-pane)
+    (dotimes (i 10)
+      (define-key map (kbd (format "C-c %d" i))
+        #'tmux-control-select-window-by-key))
     (define-key map (kbd "C-c |") #'tmux-control-split-pane-right)
     (define-key map (kbd "C-c -") #'tmux-control-split-pane-below)
     ;; A bare ESC press should reach the pane immediately; see
@@ -817,6 +831,9 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     (define-key map (kbd "C-c C-e") #'tmux-control-live)
     (define-key map (kbd "RET") #'tmux-control-live)
     (define-key map (kbd "q") #'tmux-control-live)
+    ;; The scrollback header advertises `l' as a return-to-live exit; bind it
+    ;; so it is real, not an accident of self-insert fall-through.
+    (define-key map (kbd "l") #'tmux-control-live)
     (define-key map [escape] #'tmux-control-live)
     (define-key map [wheel-down] #'tmux-control-scrollback-wheel-down)
     (define-key map [double-wheel-down] #'tmux-control-scrollback-wheel-down)
@@ -1725,6 +1742,17 @@ When INDEX is given non-interactively, switch to it directly."
     (tmux-control--do-select-window
      (tmux-control--normalize-window-index
       (tmux-control--read-window-index "Window: "))))))
+
+(defun tmux-control-select-window-by-key ()
+  "Switch to the tmux window whose index is the digit key that invoked this.
+Bound to \\`C-c 0' .. \\`C-c 9' for direct, iTerm/browser-style window jumps;
+falls back to the interactive chooser when not invoked by a digit (e.g. via
+\\[execute-extended-command])."
+  (interactive)
+  (if (and (integerp last-command-event) (<= ?0 last-command-event ?9))
+      (tmux-control-select-window
+       (number-to-string (- last-command-event ?0)))
+    (call-interactively #'tmux-control-select-window)))
 
 (defun tmux-control--do-select-window (index)
   "Select tmux window INDEX in the current buffer's session.
