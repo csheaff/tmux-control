@@ -3618,6 +3618,77 @@ output), :calls (side-effect invocations in order), :active-pane,
     (fundamental-mode)
     (should-error (tmux-control-reconnect) :type 'user-error)))
 
+(ert-deftest tmux-control-test-auto-reconnect-backoff-capped ()
+  ;; The reconnect delay grows exponentially with attempts and caps at 30s.
+  (with-temp-buffer
+    (setq-local tmux-control--auto-reconnect-timer nil)
+    (let (delays)
+      (cl-letf (((symbol-function 'run-with-timer)
+                 (lambda (delay &rest _) (push delay delays) 'a-timer))
+                ((symbol-function 'tmux-control--message) #'ignore)
+                ((symbol-function 'force-mode-line-update) #'ignore))
+        (dolist (n '(0 1 3 10))
+          (setq tmux-control--auto-reconnect-attempts n)
+          (tmux-control--schedule-auto-reconnect (current-buffer)))
+        (should (equal (nreverse delays) '(2 4 16 30)))))))
+
+(ert-deftest tmux-control-test-auto-reconnect-now-readvances-count ()
+  ;; The connect resets the buffer's locals (kill-all-local-variables); the
+  ;; attempt count must be re-applied afterwards so a still-failing link
+  ;; advances toward the cap instead of looping at zero.
+  (with-temp-buffer
+    (setq-local tmux-control--host nil tmux-control--socket-name "s"
+                tmux-control--session "x" tmux-control--process nil
+                tmux-control--auto-reconnect-attempts 2
+                tmux-control--auto-reconnect-timer nil)
+    (let ((buf (current-buffer)))
+      (cl-letf (((symbol-function 'tmux-control-connect)
+                 (lambda (&rest _)
+                   (with-current-buffer buf
+                     (setq tmux-control--auto-reconnect-attempts 0))))) ; connect "resets"
+        (tmux-control--auto-reconnect-now buf)
+        (should (= tmux-control--auto-reconnect-attempts 3))))))
+
+(ert-deftest tmux-control-test-note-link-alive-only-on-control-line ()
+  ;; A real control-mode line (starts with %) resets the auto-reconnect budget;
+  ;; raw ssh/tmux STDERR merged into the same pipe must NOT -- otherwise a
+  ;; persistently-failing reconnect would loop forever instead of giving up.
+  (with-temp-buffer
+    (setq-local tmux-control--auto-reconnect-timer nil)
+    ;; stderr-looking line: budget untouched
+    (setq-local tmux-control--auto-reconnect-attempts 3)
+    (tmux-control--note-link-alive "ssh: connect to host h port 22: Connection refused")
+    (should (= tmux-control--auto-reconnect-attempts 3))
+    (tmux-control--note-link-alive "no server running on /tmp/x")
+    (should (= tmux-control--auto-reconnect-attempts 3))
+    ;; `%exit' is a control line but announces the connection CLOSING, so it
+    ;; must NOT count as recovery (else a session that keeps exiting loops).
+    (tmux-control--note-link-alive "%exit server exited")
+    (should (= tmux-control--auto-reconnect-attempts 3))
+    ;; a genuine, ongoing control reply: budget cleared
+    (tmux-control--note-link-alive "%begin 1700000000 1 1")
+    (should (= tmux-control--auto-reconnect-attempts 0))))
+
+(ert-deftest tmux-control-test-disconnect-cancels-pending-reconnect ()
+  ;; A deliberate disconnect must cancel a pending auto-reconnect even when the
+  ;; process is already dead (mid-backoff), or the connection revives itself.
+  (with-temp-buffer
+    (setq-local tmux-control--process nil)   ; already dead
+    (setq-local tmux-control--auto-reconnect-attempts 2)
+    (setq-local tmux-control--auto-reconnect-timer
+                (run-with-timer 999 nil #'ignore))
+    (tmux-control-disconnect)
+    (should (= tmux-control--auto-reconnect-attempts 0))
+    (should (null tmux-control--auto-reconnect-timer))))
+
+(ert-deftest tmux-control-test-cancel-auto-reconnect-resets ()
+  (with-temp-buffer
+    (setq-local tmux-control--auto-reconnect-attempts 4
+                tmux-control--auto-reconnect-timer nil)
+    (tmux-control--cancel-auto-reconnect)
+    (should (= tmux-control--auto-reconnect-attempts 0))
+    (should (null tmux-control--auto-reconnect-timer))))
+
 (ert-deftest tmux-control-test-sentinel-announces-only-unexpected-death ()
   ;; An SSH drop (or killed server) must say what happened and name the
   ;; recovery key; a deliberate disconnect must stay quiet.  Before this,
