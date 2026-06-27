@@ -1888,7 +1888,7 @@ is left untouched."
              (process-live-p tmux-control--process))
     (tmux-control--send-command
      (format "list-windows -t %s -F '#{window_index}\t#{window_name}\t#{window_active}\t#{window_bell_flag}\t#{window_id}'"
-             tmux-control--session)
+             (tmux-control--window-target tmux-control--session))
      :windows)))
 
 (defun tmux-control--refresh-pane-window-map ()
@@ -1897,7 +1897,7 @@ is left untouched."
              (process-live-p tmux-control--process))
     (tmux-control--send-command
      (format "list-panes -s -t %s -F '#{pane_id}\t#{window_index}\t#{window_id}'"
-             tmux-control--session)
+             (tmux-control--window-target tmux-control--session))
      :pane-window)))
 
 (defun tmux-control--update-windows (lines)

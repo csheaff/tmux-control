@@ -92,6 +92,27 @@
     (should (string-prefix-p "list-panes -t \"my proj\": -F \""
                              (tmux-control--window-state-command)))))
 
+(ert-deftest tmux-control-test-refresh-window-targets-quote-session ()
+  ;; The in-band list-windows / list-panes refreshers (which feed the tab bar
+  ;; and the pane->window output routing map) must quote the session, like every
+  ;; other control-mode target.  A spaced session name otherwise makes tmux's
+  ;; parser split the argument ("too many arguments") so the window list never
+  ;; populates and routing breaks.
+  (let (cmds)
+    (cl-letf (((symbol-function 'tmux-control--send-command)
+               (lambda (cmd &rest _) (push cmd cmds)))
+              ((symbol-function 'process-live-p) (lambda (_) t)))
+      (with-temp-buffer
+        (setq-local tmux-control--session "my proj")
+        (setq-local tmux-control--process 'live)
+        (let ((tmux-control-window-tab-bar t))
+          (tmux-control--refresh-windows)
+          (tmux-control--refresh-pane-window-map))
+        (should (= (length cmds) 2))
+        (dolist (c cmds)
+          (should (string-match-p "-t \"my proj\":" c))
+          (should-not (string-match-p "-t my proj" c)))))))
+
 (ert-deftest tmux-control-test-fallback-control-target-quotes-session ()
   ;; The connect-window fallback target (send-keys/paste before the pane id
   ;; is known) must quote the session for the control-mode parser, while the
