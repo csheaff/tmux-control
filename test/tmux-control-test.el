@@ -73,7 +73,9 @@
   (should (equal (tmux-control--check-host nil) nil))
   (should-error (tmux-control--check-host "-oProxyCommand=touch /tmp/pwned")
                 :type 'user-error)
-  (should-error (tmux-control--check-host "-Fevil") :type 'user-error))
+  (should-error (tmux-control--check-host "-Fevil") :type 'user-error)
+  ;; A non-nil, non-string host is rejected rather than reaching the process layer.
+  (should-error (tmux-control--check-host 42) :type 'user-error))
 
 (ert-deftest tmux-control-test-window-target-quotes-session ()
   ;; A session name with a space must be quoted so tmux's control-mode parser

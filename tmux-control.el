@@ -3457,9 +3457,14 @@ An ssh destination beginning with `-' (e.g. \"-oProxyCommand=...\",
 \"-F<file>\", \"-i<file>\") is taken as an OPTION, not a hostname, and
 OpenSSH runs a ProxyCommand locally via /bin/sh before connecting -- so a
 crafted host string would be local code execution in the user's context.
-A real host or ssh alias never starts with `-'.  Returns HOST when safe."
-  (when (and host (stringp host) (string-prefix-p "-" host))
-    (user-error "Refusing ssh host that looks like an option: %S" host))
+A real host or ssh alias never starts with `-'.  Returns HOST when safe;
+nil (a local connection) passes through, and any non-nil, non-string value
+is rejected rather than silently reaching the process layer."
+  (when host
+    (unless (stringp host)
+      (user-error "Invalid ssh host (not a string): %S" host))
+    (when (string-prefix-p "-" host)
+      (user-error "Refusing ssh host that looks like an option: %S" host)))
   host)
 
 (defun tmux-control--command (host socket-name session)
