@@ -438,6 +438,15 @@ local session where copying pane output to the system clipboard is wanted."
   ;; to silently re-enable pane-driven clipboard access.
   :risky t)
 
+(defcustom tmux-control-tiled-hide-mode-line nil
+  "Non-nil hides the per-pane mode line in the tiled view.
+Each tiled pane is an ordinary buffer, so by default it shows its mode line
+\(\"[%id] cmd -- title\"), which labels the pane but also leaves a one-row gap
+between stacked panes.  Set this non-nil to drop that mode line so tiled
+panes sit flush -- a cleaner, iTerm-style cell-for-cell grid -- at the cost
+of the per-pane label.  Off by default (labels kept)."
+  :type 'boolean)
+
 (defcustom tmux-control-session-activity t
   "Non-nil flags other connected sessions that have unseen output.
 When you are looking at one session and another connected session produces
@@ -6709,7 +6718,9 @@ its own and routes commands through CONTROLLER."
       (setf (eat-term-parameter tmux-control--terminal 'eat--process) process)
       (setf (eat-term-parameter tmux-control--terminal 'eat--input-process) process)
       (setf (eat-term-parameter tmux-control--terminal 'eat--output-process) process)
-      (setq-local mode-line-format '(:eval (tmux-control--pane-mode-line)))
+      (setq-local mode-line-format
+                  (unless tmux-control-tiled-hide-mode-line
+                    '(:eval (tmux-control--pane-mode-line))))
       ;; Fringes and a scroll bar would steal columns from the body, so the
       ;; Eat grid (sized to the tmux pane) would not fit and full-width TUI
       ;; borders (e.g. a Claude Code panel) would clip.  Drop them so the
