@@ -2013,13 +2013,14 @@ each wrapped in an evolving prompt line and a status bar.")
       (should (string-match-p "%%999m" raw)))))
 
 (ert-deftest tmux-control-test-any-frame-flocked-p ()
+  ;; Observe only our own frame, so an unrelated flocked frame (e.g. running
+  ;; ERT interactively) cannot skew the result.
   (let ((f (selected-frame)))
-    (unwind-protect
-        (progn
-          (set-frame-parameter f 'tmux-control--flock nil)
-          (should-not (tmux-control--any-frame-flocked-p))
-          (set-frame-parameter f 'tmux-control--flock t)
-          (should (tmux-control--any-frame-flocked-p)))
+    (cl-letf (((symbol-function 'frame-list) (lambda () (list f))))
+      (set-frame-parameter f 'tmux-control--flock nil)
+      (should-not (tmux-control--any-frame-flocked-p))
+      (set-frame-parameter f 'tmux-control--flock t)
+      (should (tmux-control--any-frame-flocked-p))
       (set-frame-parameter f 'tmux-control--flock nil))))
 
 (ert-deftest tmux-control-test-schedule-reflock-gated-and-debounced ()

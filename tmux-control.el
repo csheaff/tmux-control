@@ -1285,7 +1285,6 @@ their screens seed asynchronously, like any connect."
         (unless (tmux-control--session-live-buffer host session)
           (tmux-control-connect host socket session))))))
 
-;;;###autoload
 (defvar tmux-control--reflock-timer nil
   "Idle timer that re-grids flocked frames after a connect/disconnect.")
 
@@ -1326,6 +1325,7 @@ deaths) into one idle re-grid."
     (setq tmux-control--reflock-timer
           (run-with-idle-timer 0.1 nil #'tmux-control--reflock))))
 
+;;;###autoload
 (defun tmux-control-flock (&optional connect-all)
   "Show every connected tmux session at once, one per cell, all live.
 Each cell is an ordinary session buffer (its mode line and window tab bar
