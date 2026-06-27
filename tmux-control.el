@@ -1104,6 +1104,8 @@ session (tmux attaches if it exists, otherwise creates it)."
       ;; it live via the option's `:set'.
       (when tmux-control-auto-heal-drift
         (tmux-control--ensure-heal-timer)))
+    ;; If a frame is showing the flock, let a newly-connected session join it.
+    (tmux-control--schedule-reflock)
     buffer))
 
 (defun tmux-control--session-live-buffer (host session)
@@ -1282,6 +1284,46 @@ their screens seed asynchronously, like any connect."
       (dolist (session (tmux-control--list-sessions host socket))
         (unless (tmux-control--session-live-buffer host session)
           (tmux-control-connect host socket session))))))
+
+(defvar tmux-control--reflock-timer nil
+  "Idle timer that re-grids flocked frames after a connect/disconnect.")
+
+(defun tmux-control--any-frame-flocked-p ()
+  "Return non-nil when some live frame is showing the flock view."
+  (cl-some (lambda (f)
+             (and (frame-live-p f) (frame-parameter f 'tmux-control--flock)))
+           (frame-list)))
+
+(defun tmux-control--reflock ()
+  "Re-grid every flocked frame to the current set of live sessions.
+Keeps the dashboard from going stale when a session joins (a connect) or
+leaves (a death): a new session gains a cell, a dead one's frozen cell is
+dropped.  Preserves which cell you were in, and runs only from the idle
+timer so it never rearranges windows mid-keystroke."
+  (setq tmux-control--reflock-timer nil)
+  (let ((buffers (tmux-control--live-session-buffers)))
+    (when buffers
+      (dolist (frame (frame-list))
+        (when (and (frame-live-p frame)
+                   (frame-parameter frame 'tmux-control--flock))
+          (with-selected-frame frame
+            (let ((focus (window-buffer (frame-selected-window frame))))
+              (tmux-control--flock-grid buffers)
+              (tmux-control--flock-resize-all)
+              ;; Restore focus to the cell you were in, if it is still shown.
+              (let ((w (get-buffer-window focus frame)))
+                (when (window-live-p w)
+                  (set-frame-selected-window frame w))))))))))
+
+(defun tmux-control--schedule-reflock ()
+  "Debounced re-grid of flocked frames.
+A no-op when no frame is flocked, so the common (un-flocked) connect and
+disconnect paths cost nothing; coalesces a burst (connect-all, several
+deaths) into one idle re-grid."
+  (when (and (tmux-control--any-frame-flocked-p)
+             (not (timerp tmux-control--reflock-timer)))
+    (setq tmux-control--reflock-timer
+          (run-with-idle-timer 0.1 nil #'tmux-control--reflock))))
 
 ;;;###autoload
 (defun tmux-control-flock (&optional connect-all)
@@ -5994,19 +6036,27 @@ never steals the window the user is looking at."
           ;; tmux session survived cannot be known from here -- a dropped
           ;; link leaves it running, a killed server does not -- so the
           ;; message is conditional.)
-          (unless deliberate
-            (if (and tmux-control-auto-reconnect
-                     (< tmux-control--auto-reconnect-attempts
-                        tmux-control--auto-reconnect-max))
-                (tmux-control--schedule-auto-reconnect (current-buffer))
-              ;; No auto-reconnect (off, or the budget is spent): announce and
-              ;; leave the one-key recovery.  Reset a spent budget so a later
-              ;; manual reconnect starts fresh.
+          (cond
+           ((and (not deliberate)
+                 tmux-control-auto-reconnect
+                 (< tmux-control--auto-reconnect-attempts
+                    tmux-control--auto-reconnect-max))
+            ;; Coming back: keep the cell (it shows its last frame and the
+            ;; "reconnecting" notice), so a flock view does not churn.
+            (tmux-control--schedule-auto-reconnect (current-buffer)))
+           (t
+            ;; No auto-reconnect (off, or the budget is spent): announce and
+            ;; leave the one-key recovery.  Reset a spent budget so a later
+            ;; manual reconnect starts fresh.
+            (unless deliberate
               (setq tmux-control--auto-reconnect-attempts 0)
               (tmux-control--message
                (format "connection lost (%s) -- if the tmux session is still running, C-c C-r reconnects"
                        (string-trim-right message)))
-              (force-mode-line-update t))))))))
+              (force-mode-line-update t))
+            ;; The session is gone for now -- drop its frozen cell from any
+            ;; flock so the dashboard reflects what is actually live.
+            (tmux-control--schedule-reflock))))))))
 
 (defun tmux-control--kill-process ()
   "Delete the tmux control process and any dependent render buffers."
