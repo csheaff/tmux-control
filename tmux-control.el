@@ -1965,8 +1965,16 @@ Called around client-driven full repaints -- connect, window switch, resize --
 so the resulting prompt/redraw burst in every pane does not flag every window
 as if its agent had done something.  The burst can trail the triggering event
 by a few hundred ms (the refresh-client round-trip plus a prompt redraw), so
-the window is deliberately generous."
-  (setq tmux-control--activity-quiet-until (+ (float-time) (or secs 0.8))))
+the window is deliberately generous.
+
+The deadline is stored on the CONTROLLER, because that is where the %output
+path reads it (`tmux-control--note-pane-activity' /
+`tmux-control--note-session-activity' run in the controller's process filter).
+A command may call this from a per-window render buffer, so writing it on the
+current buffer would land it where the gate is never read -- and the burst it
+was meant to suppress would flag windows anyway."
+  (with-current-buffer (tmux-control--wb-controller)
+    (setq tmux-control--activity-quiet-until (+ (float-time) (or secs 0.8)))))
 
 (defun tmux-control--note-pane-activity (pane)
   "Flag PANE's window as having unseen output when it is not the current one.

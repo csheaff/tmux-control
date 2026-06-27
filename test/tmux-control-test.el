@@ -1839,6 +1839,25 @@ each wrapped in an evolving prompt line and a status bar.")
       (tmux-control--switch-to-flagged-buffer dead)
       (should (string-match-p "gone" msg)))))
 
+(ert-deftest tmux-control-test-quiet-activity-targets-controller ()
+  ;; The quiet-window deadline is read on the controller (the %output path runs
+  ;; there), so it must be WRITTEN on the controller even when a command calls
+  ;; --quiet-activity from a per-window render buffer -- otherwise the burst it
+  ;; suppresses would spuriously flag windows.
+  (let ((ctrl (generate-new-buffer "*tmux-control:local:ctrl*"))
+        (render (generate-new-buffer "*tmux-control:local:render*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer ctrl (setq-local tmux-control--activity-quiet-until 0))
+          (with-current-buffer render
+            (setq-local tmux-control--controller ctrl)
+            (setq-local tmux-control--activity-quiet-until 0)
+            (tmux-control--quiet-activity 5))
+          ;; Deadline landed on the controller, not the render buffer.
+          (should (> (buffer-local-value 'tmux-control--activity-quiet-until ctrl) 0))
+          (should (= (buffer-local-value 'tmux-control--activity-quiet-until render) 0)))
+      (kill-buffer ctrl) (kill-buffer render))))
+
 (ert-deftest tmux-control-test-flock-other-frame-ordering ()
   ;; flock-other-frame: with a prefix it connects all first, then focuses the
   ;; dedicated frame and flocks; without a prefix it skips connect-all.
