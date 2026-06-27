@@ -233,7 +233,7 @@ frame boundary and drop volatile per-frame lines with
   :type 'integer)
 
 (defcustom tmux-control-warn-on-alternate-screen-off t
-  "Non-nil warns once when the controlled tmux has `alternate-screen off'.
+  "Non-nil means warn once when the controlled tmux has `alternate-screen off'.
 With that option off, full-screen TUIs (Copilot CLI, vim, less, htop...)
 repaint onto the normal screen, so their frames pile up in pane history and
 the live view / scrollback fills with overlapping copies -- a confusing,
