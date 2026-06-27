@@ -56,7 +56,24 @@
   ;; A double quote is backslash-escaped.
   (should (equal (tmux-control--quote-tmux-arg "has\"quote") "\"has\\\"quote\""))
   ;; A backslash is doubled.
-  (should (equal (tmux-control--quote-tmux-arg "back\\slash") "\"back\\\\slash\"")))
+  (should (equal (tmux-control--quote-tmux-arg "back\\slash") "\"back\\\\slash\""))
+  ;; SECURITY: control characters are stripped. Control mode is line-based, so
+  ;; a newline in a name would otherwise break out of the quoted argument and
+  ;; inject a second control-mode command (e.g. run-shell = RCE on the host).
+  (should (equal (tmux-control--quote-tmux-arg "a\nrun-shell foo") "\"arun-shell foo\""))
+  (should (equal (tmux-control--quote-tmux-arg "a\r\tb\0c") "\"abc\""))
+  ;; ...and a normal name is untouched.
+  (should (equal (tmux-control--quote-tmux-arg "my proj") "\"my proj\"")))
+
+(ert-deftest tmux-control-test-check-host-rejects-option-like ()
+  ;; SECURITY: an ssh destination starting with `-' is read by ssh as an option
+  ;; (e.g. -oProxyCommand=...), which runs a local command -> local RCE. Reject.
+  (should (equal (tmux-control--check-host "dev") "dev"))
+  (should (equal (tmux-control--check-host "user@host.example") "user@host.example"))
+  (should (equal (tmux-control--check-host nil) nil))
+  (should-error (tmux-control--check-host "-oProxyCommand=touch /tmp/pwned")
+                :type 'user-error)
+  (should-error (tmux-control--check-host "-Fevil") :type 'user-error))
 
 (ert-deftest tmux-control-test-window-target-quotes-session ()
   ;; A session name with a space must be quoted so tmux's control-mode parser
