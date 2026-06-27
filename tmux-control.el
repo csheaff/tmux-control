@@ -1973,8 +1973,10 @@ path reads it (`tmux-control--note-pane-activity' /
 A command may call this from a per-window render buffer, so writing it on the
 current buffer would land it where the gate is never read -- and the burst it
 was meant to suppress would flag windows anyway."
-  (with-current-buffer (tmux-control--wb-controller)
-    (setq tmux-control--activity-quiet-until (+ (float-time) (or secs 0.8)))))
+  (let ((ctrl (tmux-control--wb-controller)))
+    (when (buffer-live-p ctrl)
+      (with-current-buffer ctrl
+        (setq tmux-control--activity-quiet-until (+ (float-time) (or secs 0.8)))))))
 
 (defun tmux-control--note-pane-activity (pane)
   "Flag PANE's window as having unseen output when it is not the current one.

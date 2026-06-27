@@ -1855,7 +1855,14 @@ each wrapped in an evolving prompt line and a status bar.")
             (tmux-control--quiet-activity 5))
           ;; Deadline landed on the controller, not the render buffer.
           (should (> (buffer-local-value 'tmux-control--activity-quiet-until ctrl) 0))
-          (should (= (buffer-local-value 'tmux-control--activity-quiet-until render) 0)))
+          (should (= (buffer-local-value 'tmux-control--activity-quiet-until render) 0))
+          ;; A stale (killed) controller must not signal "Selecting deleted
+          ;; buffer" -- guard liveness and no-op.
+          (with-current-buffer render
+            (let ((dead (generate-new-buffer "*tmux-control:local:dead*")))
+              (kill-buffer dead)
+              (setq-local tmux-control--controller dead)
+              (tmux-control--quiet-activity 5))))   ; must not error
       (kill-buffer ctrl) (kill-buffer render))))
 
 (ert-deftest tmux-control-test-flock-other-frame-ordering ()
