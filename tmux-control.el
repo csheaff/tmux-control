@@ -2074,6 +2074,15 @@ session names are per-server, so a bare \"0\" is ambiguous across hosts."
           (if (and host (not (string-empty-p host))) host "local")
           session))
 
+(defun tmux-control--mode-line-safe (string)
+  "Return STRING safe to place in a mode-line/header-line `:eval' result.
+Doubles `%' so an attacker- or program-supplied tmux name, title, or command
+\(any of which may contain `%') is shown literally instead of being taken as a
+mode-line %-construct.  Without this, pane/window content could spoof the
+displayed session/window identity, leak buffer or file state via constructs
+like %b/%f, or hang Emacs with a huge field width such as %999999999m."
+  (and string (replace-regexp-in-string "%" "%%" string)))
+
 (defun tmux-control--tab-mouse-face ()
   "Return a fresh `highlight'-equivalent face for a tab's `mouse-face'.
 Header-line mouse highlighting spans the maximal run of text sharing one
@@ -2138,7 +2147,8 @@ The session NAME is plain and a bright `●' marks that it wants attention;
 clicking switches to it."
   (let* ((sid (buffer-local-value 'tmux-control--session buffer))
          (host (buffer-local-value 'tmux-control--host buffer))
-         (tok (concat " " (propertize sid 'face 'tmux-control-tab-session)
+         (tok (concat " " (propertize (tmux-control--mode-line-safe sid)
+                                      'face 'tmux-control-tab-session)
                       (propertize " ●" 'face 'tmux-control-tab-activity)))
          (map (make-sparse-keymap)))
     (define-key map [header-line mouse-1]
@@ -2173,7 +2183,8 @@ host/server is prefixed with that server, dimmed, once."
      (lambda (key)
        (concat
         (unless (equal key cur)
-          (propertize (format "  %s" key) 'face 'tmux-control-tab-inactive))
+          (propertize (format "  %s" (tmux-control--mode-line-safe key))
+                      'face 'tmux-control-tab-inactive))
         (mapconcat #'tmux-control--corner-session
                    (reverse (gethash key groups)) "")))
      (nreverse order) "")))
@@ -2251,7 +2262,8 @@ window list and activity state live on the controller; render from there."
               (face (cond (active 'tmux-control-tab-active)
                           (busy 'tmux-control-tab-activity)
                           (t 'tmux-control-tab-inactive)))
-              (tab (propertize (format " %s:%s%s " idx name mark)
+              (tab (propertize (format " %s:%s%s " idx
+                                       (tmux-control--mode-line-safe name) mark)
                                'face face
                                'mouse-face (tmux-control--tab-mouse-face)
                                'help-echo (format "Switch to tmux window %s (%s)"
@@ -2270,8 +2282,10 @@ is plain; a nil or empty host is the local server, shown as \"local:\" so the
 server is always named (see `tmux-control--connection-name')."
   (let* ((host tmux-control--host)
          (hl (if (and host (not (string-empty-p host))) host "local"))
-         (s (concat (propertize (format " %s:" hl) 'face 'tmux-control-tab-inactive)
-                    (propertize tmux-control--session 'face 'tmux-control-tab-session))))
+         (s (concat (propertize (format " %s:" (tmux-control--mode-line-safe hl))
+                                'face 'tmux-control-tab-inactive)
+                    (propertize (tmux-control--mode-line-safe tmux-control--session)
+                                'face 'tmux-control-tab-session))))
     (propertize s 'help-echo
                 (format "tmux session %s"
                         (tmux-control--connection-name host tmux-control--session)))))
@@ -6339,12 +6353,13 @@ where Eat's own reflow could have drifted from tmux's grid.")
 Leads with the pane id (so teammates in a split window are easy to tell
 apart), then the running command and, when distinct, the pane title."
   (let* ((info tmux-control--pane-info)
-         ;; Pane ids contain "%", which is a mode-line format construct, so
-         ;; double it to display literally.
-         (pane (replace-regexp-in-string
-                "%" "%%" (or tmux-control--active-pane "?")))
-         (cmd (plist-get info :cmd))
-         (title (plist-get info :title)))
+         ;; The pane id (always contains "%"), the running command, and the
+         ;; pane title (an app sets it freely via OSC 2) all reach the mode
+         ;; line, so each must have its "%" doubled or it is taken as a
+         ;; %-construct (see `tmux-control--mode-line-safe').
+         (pane (tmux-control--mode-line-safe (or tmux-control--active-pane "?")))
+         (cmd (tmux-control--mode-line-safe (plist-get info :cmd)))
+         (title (tmux-control--mode-line-safe (plist-get info :title))))
     (concat " "
             (propertize (format "[%s]" pane) 'face 'mode-line-emphasis)
             (when (and cmd (not (string-empty-p cmd))) (concat " " cmd))

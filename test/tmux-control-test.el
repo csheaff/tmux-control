@@ -1906,6 +1906,37 @@ each wrapped in an evolving prompt line and a status bar.")
       (let ((last-command-event ?0)) (tmux-control-select-window-by-key))
       (should (equal got "0")))))
 
+(ert-deftest tmux-control-test-mode-line-safe-doubles-percent ()
+  (should (equal (tmux-control--mode-line-safe "a%b") "a%%b"))
+  (should (equal (tmux-control--mode-line-safe "%999m") "%%999m"))
+  (should (null (tmux-control--mode-line-safe nil))))
+
+(ert-deftest tmux-control-test-window-tab-bar-escapes-percent ()
+  ;; SECURITY: a window name (attacker-influenced) reaches the header line, an
+  ;; :eval result whose %-constructs the mode-line engine expands. A name like
+  ;; "%b%f" must be doubled to "%%b%%f" so the engine shows it literally rather
+  ;; than leaking the buffer name / visited file.
+  ;; (format-mode-line returns "" in batch, so assert on the produced string.)
+  (with-temp-buffer
+    (setq-local tmux-control--windows '((:index "0" :name "%b%f" :active t)))
+    (let* ((tmux-control--tiled nil)
+           (raw (substring-no-properties (tmux-control--window-tab-bar))))
+      (should (string-match-p "%%b%%f" raw))
+      ;; no lone "%b" / "%f" that the engine would expand
+      (should-not (string-match-p "[^%]%[bf]" raw)))))
+
+(ert-deftest tmux-control-test-pane-mode-line-escapes-percent ()
+  ;; SECURITY: the pane id, command, and (app-settable, via OSC 2) title all
+  ;; reach the mode line; each "%" must be doubled -- a field width like %999m
+  ;; would otherwise pad to a huge string (a DoS at %999999999m).
+  (with-temp-buffer
+    (setq-local tmux-control--active-pane "%3")
+    (setq-local tmux-control--pane-info '(:cmd "x%n" :title "%999m"))
+    (let ((raw (substring-no-properties (tmux-control--pane-mode-line))))
+      (should (string-match-p "%%3" raw))
+      (should (string-match-p "x%%n" raw))
+      (should (string-match-p "%%999m" raw)))))
+
 (ert-deftest tmux-control-test-flock-other-frame-ordering ()
   ;; flock-other-frame: with a prefix it connects all first, then focuses the
   ;; dedicated frame and flocks; without a prefix it skips connect-all.
