@@ -19,6 +19,8 @@ jobs:
     name: Scorecard analysis
     runs-on: ubuntu-latest
     permissions:
+      contents: read           # checkout (job-level permissions replace the
+                               # workflow default, so name it explicitly)
       security-events: write   # upload the SARIF result
       id-token: write          # publish results to the OpenSSF API
     steps:
