@@ -441,7 +441,7 @@ local session where copying pane output to the system clipboard is wanted."
 (defcustom tmux-control-tiled-hide-mode-line nil
   "Non-nil hides the per-pane mode line in the tiled view.
 Each tiled pane is an ordinary buffer, so by default it shows its mode line
-\(\"[%id] cmd -- title\"), which labels the pane but also leaves a one-row gap
+\(\"[%id] cmd — title\"), which labels the pane but also leaves a one-row gap
 between stacked panes.  Set this non-nil to drop that mode line so tiled
 panes sit flush -- a cleaner, iTerm-style cell-for-cell grid -- at the cost
 of the per-pane label.  Off by default (labels kept)."
