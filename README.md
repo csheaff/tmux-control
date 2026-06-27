@@ -6,12 +6,13 @@
 the [iTerm2 tmux-integration](https://iterm2.com/documentation-tmux-integration.html)
 idea, but in Emacs.
 
-![A live tmux session in Emacs via tmux-control: the session's windows as a header-line tab bar, switched with one key, with a dot flagging a background window that produced output](docs/images/demo.gif)
+![A live tmux session in Emacs via tmux-control: the session's windows as a header-line tab bar, switched with one key, with a dot flagging a background window that produced output and other sessions named in the right corner](docs/images/demo.gif)
 
 *A live tmux session in Emacs. Each window is a **tab** in the header line,
-flipped with one key (`C-c C-n`); a **dot** marks a background window that
-produced output — the "which window wants me?" signal — and clears when you
-visit it. Every pane is just an Emacs buffer you can search and copy from.*
+flipped with one key (`C-c C-n`); a **dot** marks a background window with new
+output. Other connected sessions that want you are **named in the right corner**
+— click one to jump there. Every pane is just an Emacs buffer you can search and
+copy from.*
 
 Other ways to pair Emacs with tmux either **send it commands**
 ([`emamux`](https://github.com/emacsorphanage/emamux)), **navigate** between
@@ -94,9 +95,9 @@ search and copy in, labelled by its pane id in the mode line. Split the active
 pane from Emacs with `C-c |` (side by side) or `C-c -` (stacked); both show at
 once in the tiled view (experimental).*
 
-![Working in one session while dots flag the others, then C-c C-f tiles every session into a live grid](docs/images/flock-demo.gif)
+![Working in one session while the others are named in the header corner, then C-c C-f tiles every session into a live grid](docs/images/flock-demo.gif)
 
-*Each connected tmux session is its own buffer; a header-line dot flags the ones
+*Each connected tmux session is its own buffer; the header corner names the ones
 with new output, and `C-c C-f` tiles them all into one live grid (experimental).*
 
 → Full command and key reference, the tiled view, and tuning live in

@@ -100,12 +100,18 @@ session commands are the tmux-aware shortcut.
 ### Which session wants you
 
 When you are looking at one session and **another connected session produces
-output**, its name appears with a dot at the left of the header line — e.g.
-`●worker` — the session-level "which one wants me?" signal, and the companion to
-the window tab bar's per-window dot.  Click the name to switch to it; visiting a
-session clears its dot.  The strip lists only sessions with *unseen* output, so
-an idle setup shows no extra chrome, and (like the window dot) the repaint burst
-from a connect, switch, or resize is not counted.  Turn it off with:
+output**, it is **named in the right corner** of the header line, with a bright
+dot — e.g. `worker ●` — the session-level "which one wants me?" signal, and the
+companion to the window tab bar's per-window dot.  Names are grouped by server,
+so a host is shown once and only when it differs from the one you are viewing: a
+sibling session on your own server shows just its name, while a session on
+another host is prefixed with that server (and two local servers are kept
+distinct by socket).  Click a name to switch to it — or `M-x
+tmux-control-switch-to-flagged` — and visiting a session clears it.  The corner
+lists only sessions with *unseen* output, so an idle setup shows no extra chrome,
+and (like the window dot) the repaint burst from a connect, switch, or resize is
+not counted.  When the corner would not fit the window it collapses to a bright
+count.  Turn it off with:
 
 ```elisp
 (setq tmux-control-session-activity nil)
@@ -117,10 +123,10 @@ from a connect, switch, or resize is not counted.  Turn it off with:
 grid — one live cell each — for a dashboard of all your projects (or agents) at
 a glance.
 
-![Working in one session with dots flagging the others, then C-c C-f tiles every session live](images/flock-demo.gif)
+![Working in one session with the others named in the header corner, then C-c C-f tiles every session live](images/flock-demo.gif)
 
-*A header-line dot flags each other session with unseen output; `C-c C-f` then
-tiles all of them into one live grid — here four services streaming at once.*
+*The header corner names each other session with unseen output; `C-c C-f` then
+tiles all of them into one live grid — here four sessions streaming at once.*
 
 This is cheap precisely because of the design above: each session is
 already its own buffer with its own always-live connection (it streams whether
