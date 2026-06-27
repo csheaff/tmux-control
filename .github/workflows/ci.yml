@@ -27,8 +27,9 @@ jobs:
       # ignores access-tokens from untrusted env config; an in-job retry would
       # not help either, as it reuses the same throttled IP.)  Install Nix
       # ourselves first with the workflow token written into the *trusted*
-      # system config, so the fetch is authenticated -- limited per token
-      # (1000/hour) instead of per IP.  setup-emacs then finds Nix already on
+      # system config, so the fetch is authenticated -- the GITHUB_TOKEN limit
+      # is per repository (1000/hour) rather than the unauthenticated per-IP 60.
+      # setup-emacs then finds Nix already on
       # PATH, skips its own install, and runs `nix profile install`
       # authenticated.  contents:read suffices for the API read.
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
