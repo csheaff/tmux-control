@@ -384,11 +384,12 @@ friends.  Set to nil to hide it."
 (defcustom tmux-control-session-activity t
   "Non-nil flags other connected sessions that have unseen output.
 When you are looking at one session and another connected session produces
-output, its name appears with a dot at the left of the header line -- the
-session-level \"which one wants me?\" signal, the companion to the window
-tab bar's per-window dot.  The strip is empty when no other session has
-unseen output, so an idle setup shows no extra chrome; click a name to
-switch to it.  Set to nil to disable."
+output, its NAME appears with a bright dot in the right corner of the header
+line -- the session-level \"which one wants me?\" signal, grouped by server
+so a host is named once and only when it differs from the one you are
+viewing.  The corner is empty when no other session has unseen output, so an
+idle setup shows no extra chrome; click a name (or use
+`tmux-control-switch-to-flagged') to switch to it.  Set to nil to disable."
   :type 'boolean)
 
 (defcustom tmux-control-session-label t
@@ -400,11 +401,14 @@ hide it."
   :type 'boolean)
 
 (defface tmux-control-tab-session
-  '((t :inherit mode-line-emphasis))
-  "Face for the current-session HOST:SESSION label in the header line.
-Named in the `tmux-control-tab-*' family rather than after the
-`tmux-control-session-label' option, so the option and the face do not
-share a symbol.")
+  '((t))
+  "Face for the current session NAME in the header line.
+Plain by default: the session name is a neutral fact, not an alert, so it
+carries no attributes of its own (it inherits the header line's own face;
+the host prefix is dimmed and the active window is highlighted -- those
+carry the meaning).  Named in the
+`tmux-control-tab-*' family rather than after the `tmux-control-session-label'
+option, so the option and the face do not share a symbol.")
 
 (defface tmux-control-tab-active
   '((t :inherit highlight :weight bold))
@@ -2027,25 +2031,6 @@ tabs lights them all up at once.  A fresh (non-`eq') value per tab bounds
 the highlight to the single tab under the mouse."
   (list :inherit 'highlight))
 
-(defun tmux-control--session-strip-tab (buffer)
-  "Return a clickable header-line tab for the flagged session in BUFFER."
-  (let* ((name (buffer-local-value 'tmux-control--session buffer))
-         (host (buffer-local-value 'tmux-control--host buffer))
-         (label (tmux-control--connection-name host name))
-         (tab (propertize (format " ●%s" label)
-                          'face 'tmux-control-tab-activity
-                          'mouse-face (tmux-control--tab-mouse-face)
-                          'help-echo (format "Switch to session %s (unseen output)"
-                                             label)))
-         (map (make-sparse-keymap)))
-    (define-key map [header-line mouse-1]
-      (lambda (_event)
-        (interactive "e")
-        (let ((display-buffer-overriding-action '((display-buffer-same-window))))
-          (pop-to-buffer (tmux-control--session-display-buffer buffer)))))
-    (put-text-property 0 (length tab) 'keymap map tab)
-    tab))
-
 (defun tmux-control--flagged-other-session-buffers ()
   "Live session buffers other than the current one that have unseen output.
 Tests the activity flag first so most buffers are rejected by one cheap
@@ -2064,21 +2049,109 @@ redisplay."
         (push b flagged)))
     (sort flagged (lambda (a b) (string< (buffer-name a) (buffer-name b))))))
 
-(defun tmux-control--session-strip ()
-  "Header-line segment naming other connected sessions with unseen output.
-Empty when none (so an idle setup shows no extra chrome) and in the tiled
-view.  Rendered in the visible session's header line; clears this session's
-own flag (held on its controller) as a side effect, since you are looking
-at it."
-  (if (or (not tmux-control-session-activity) tmux-control--tiled)
-      ""
-    (let ((ctrl (tmux-control--wb-controller)))
-      (when (and (buffer-live-p ctrl)
-                 (buffer-local-value 'tmux-control--session-activity ctrl))
-        (with-current-buffer ctrl
-          (setq tmux-control--session-activity nil))))
-    (mapconcat #'tmux-control--session-strip-tab
-               (tmux-control--flagged-other-session-buffers) "")))
+(defun tmux-control--clear-self-activity ()
+  "Clear this session's own unseen-output flag (held on its controller).
+You are looking at it, so it does not belong in the corner of its own header."
+  (let ((ctrl (tmux-control--wb-controller)))
+    (when (and (buffer-live-p ctrl)
+               (buffer-local-value 'tmux-control--session-activity ctrl))
+      (with-current-buffer ctrl
+        (setq tmux-control--session-activity nil)))))
+
+(defun tmux-control--server-label (host socket)
+  "Return the display label for the tmux server on HOST via SOCKET.
+A nil or empty HOST is the local server (\"local\").  The socket is appended
+only when it is not the default, so the common single-server case stays
+clean but two local servers (or two sockets on one host) stay distinct --
+otherwise both would collapse to \"local\"."
+  (let ((h (if (and host (not (string-empty-p host))) host "local")))
+    (if (and socket (not (string-empty-p socket))
+             (not (equal socket tmux-control-default-socket-name)))
+        (format "%s/%s" h socket)
+      h)))
+
+(defun tmux-control--corner-session (buffer)
+  "Return a clickable corner token for the flagged session in BUFFER.
+The session NAME is plain and a bright `●' marks that it wants attention;
+clicking switches to it."
+  (let* ((sid (buffer-local-value 'tmux-control--session buffer))
+         (host (buffer-local-value 'tmux-control--host buffer))
+         (tok (concat " " (propertize sid 'face 'tmux-control-tab-session)
+                      (propertize " ●" 'face 'tmux-control-tab-activity)))
+         (map (make-sparse-keymap)))
+    (define-key map [header-line mouse-1]
+      (lambda (_event)
+        (interactive "e")
+        (let ((display-buffer-overriding-action '((display-buffer-same-window))))
+          (pop-to-buffer (tmux-control--session-display-buffer buffer)))))
+    (propertize tok
+                'mouse-face (tmux-control--tab-mouse-face)
+                'help-echo (format "Switch to session %s (unseen output)"
+                                   (tmux-control--connection-name host sid))
+                'keymap map)))
+
+(defun tmux-control--corner-render (buffers)
+  "Render the corner: other sessions in BUFFERS that want attention.
+Grouped by SERVER so a host is named once, and only when it differs from
+the server you are currently viewing -- so a sibling session on your own
+server shows just its name (no redundant host), while a session on another
+host/server is prefixed with that server, dimmed, once."
+  (let* ((cur (tmux-control--server-label tmux-control--host
+                                          tmux-control--socket-name))
+         (order '())
+         (groups (make-hash-table :test 'equal)))
+    (dolist (b buffers)
+      (let ((key (tmux-control--server-label
+                  (buffer-local-value 'tmux-control--host b)
+                  (buffer-local-value 'tmux-control--socket-name b))))
+        ;; First sighting of a server seeds its (non-empty) group, so a plain
+        ;; `gethash' presence check de-dups `order' without an O(n^2) `member'.
+        (unless (gethash key groups) (push key order))
+        (puthash key (cons b (gethash key groups)) groups)))
+    (mapconcat
+     (lambda (key)
+       (concat
+        (unless (equal key cur)
+          (propertize (format "  %s" key) 'face 'tmux-control-tab-inactive))
+        (mapconcat #'tmux-control--corner-session
+                   (reverse (gethash key groups)) "")))
+     (nreverse order) "")))
+
+(defun tmux-control-switch-to-flagged ()
+  "Switch to one of the other sessions that has unseen output.
+With one such session, go straight there; with several, pick by name."
+  (interactive)
+  (let ((bufs (tmux-control--flagged-other-session-buffers)))
+    (cond
+     ((null bufs) (message "tmux-control: no other session has unseen output"))
+     ((null (cdr bufs))
+      (pop-to-buffer (tmux-control--session-display-buffer (car bufs))))
+     (t (let* ((choices (mapcar
+                         (lambda (b)
+                           (cons (tmux-control--connection-name
+                                  (buffer-local-value 'tmux-control--host b)
+                                  (buffer-local-value 'tmux-control--session b))
+                                 b))
+                         bufs))
+               (pick (completing-read "Switch to session: "
+                                      (mapcar #'car choices) nil t)))
+          (when (assoc pick choices)
+            (pop-to-buffer (tmux-control--session-display-buffer
+                            (cdr (assoc pick choices))))))))))
+
+(defun tmux-control--corner-collapsed (n)
+  "Return a collapsed corner: a bright count of N sessions wanting attention.
+Used when the named corner would not fit the window; clicking opens the
+switcher."
+  (let ((dot (propertize (format " ●%d" n)
+                         'face 'tmux-control-tab-activity
+                         'mouse-face (tmux-control--tab-mouse-face)
+                         'help-echo (format "%d other session%s with unseen output -- click to switch"
+                                            n (if (= n 1) "" "s"))))
+        (map (make-sparse-keymap)))
+    (define-key map [header-line mouse-1]
+      (lambda (_event) (interactive "e") (tmux-control-switch-to-flagged)))
+    (propertize dot 'keymap map)))
 
 (defun tmux-control--tab-keymap (index)
   "Return a header-line keymap that switches to window INDEX on a click."
@@ -2131,33 +2204,52 @@ window list and activity state live on the controller; render from there."
 
 (defun tmux-control--session-label ()
   "Return the current connection's HOST:SESSION label for the header line.
-A nil or empty host is the local server, shown as \"local:SESSION\" so the
-label always names the server explicitly (see `tmux-control--connection-name')."
-  (let ((text (tmux-control--connection-name tmux-control--host
-                                             tmux-control--session)))
-    (propertize (format " %s" text)
-                'face 'tmux-control-tab-session
-                'help-echo (format "tmux session %s" text))))
+The host is DIMMED (context you orient by, not act on) and the session NAME
+is plain; a nil or empty host is the local server, shown as \"local:\" so the
+server is always named (see `tmux-control--connection-name')."
+  (let* ((host tmux-control--host)
+         (hl (if (and host (not (string-empty-p host))) host "local"))
+         (s (concat (propertize (format " %s:" hl) 'face 'tmux-control-tab-inactive)
+                    (propertize tmux-control--session 'face 'tmux-control-tab-session))))
+    (propertize s 'help-echo
+                (format "tmux session %s"
+                        (tmux-control--connection-name host tmux-control--session)))))
 
 (defun tmux-control--header-line ()
-  "Compose the live buffer's header line.
-A persistent HOST:SESSION label naming the current connection sits with the
-window tab bar (both describe the session you are looking at), and the
-cross-session activity strip (other sessions wanting attention) sits to
-their left, with a separator only between the two groups when both are
-non-empty.  Each segment self-gates on its option, so the row is empty when
-none has anything to show."
+  "Compose the live buffer's header line as \"here\" on the left, \"elsewhere\"
+in the right corner.
+LEFT: the current connection (host:session) and its window tabs, bound by a
+dim connector -- everything about the session you are looking at.  RIGHT
+CORNER (right-aligned): other connected sessions that have unseen output,
+named and grouped by server, so you can see WHICH one wants you, not merely
+that something does.  The corner is empty when nothing elsewhere needs you,
+and collapses to a bright count when it would not fit the window.  Each part
+self-gates on its option."
+  (when (and tmux-control-session-activity (not tmux-control--tiled))
+    (tmux-control--clear-self-activity))
   (let* ((label (if (and tmux-control-session-label
                          (not tmux-control--tiled)
                          tmux-control--session)
                     (tmux-control--session-label)
                   ""))
-         (strip (tmux-control--session-strip))
          (tabs (if tmux-control-window-tab-bar (tmux-control--window-tab-bar) ""))
-         (this (concat label tabs)))
-    (if (and (> (length strip) 0) (> (length this) 0))
-        (concat strip (propertize " │" 'face 'tmux-control-tab-inactive) this)
-      (concat strip this))))
+         (connector (if (and (> (length label) 0) (> (length tabs) 0))
+                        (propertize " ›" 'face 'tmux-control-tab-inactive)
+                      ""))
+         (left (concat label connector tabs))
+         (others (if (and tmux-control-session-activity (not tmux-control--tiled))
+                     (tmux-control--flagged-other-session-buffers)
+                   nil)))
+    (if (null others)
+        left
+      (let* ((full (tmux-control--corner-render others))
+             (fits (<= (+ (string-width left) (string-width full) 2)
+                       (window-width)))
+             (corner (if fits full (tmux-control--corner-collapsed (length others)))))
+        (concat left
+                (propertize " " 'display
+                            `(space :align-to (- right ,(+ 1 (string-width corner)))))
+                corner " ")))))
 
 (defun tmux-control--scrollback-header ()
   "Header line for the scrollback view.
@@ -2181,7 +2273,10 @@ available."
                     (buffer-live-p live)
                     (with-current-buffer live
                       (tmux-control--window-tab-bar t))))
-         (head (concat label (or tabs ""))))
+         (connector (if (and (> (length label) 0) tabs (> (length tabs) 0))
+                        (propertize " ›" 'face 'tmux-control-tab-inactive)
+                      ""))
+         (head (concat label connector (or tabs ""))))
     (if (> (length head) 0)
         (concat head (propertize (format "  ⇡ scrollback  g:refresh  %s  q/RET:live "
                                          cmode)

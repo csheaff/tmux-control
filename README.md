@@ -66,9 +66,13 @@ attaches, typing a new name creates it.
   streaming in the background** — flip back and see everything it printed
   while you were away.
 - **Switch between sessions** on the host in place (`C-c C-s`) — each tmux
-  session is its own buffer with its own scrollback and tabs — with a dot
-  flagging another session that wants you, or tile **every session at once**
-  in a live grid (`C-c C-f`, experimental).
+  session is its own buffer with its own scrollback and tabs. Other connected
+  sessions with unseen output are **named in the right corner** of the header
+  (grouped by server, so a host is shown once and only when it differs from
+  the one you're viewing) — you see *which* session wants you, not just that
+  one does; click a name (or `M-x tmux-control-switch-to-flagged`) to jump
+  there. Or tile **every session at once** in a live grid (`C-c C-f`,
+  experimental).
 - **Scrollback** as ordinary Emacs text (`C-c C-e`) — opens instantly however
   deep the history (loaded lazily, extended as you scroll), faithful by
   default, with opt-in compaction of repeated full-screen redraws (toggle with

@@ -1647,9 +1647,9 @@ each wrapped in an evolving prompt line and a status bar.")
         (tmux-control--note-session-activity)
         (should-not tmux-control--session-activity)))))    ; quiet → no flag
 
-(ert-deftest tmux-control-test-session-strip-lists-others-and-clears-self ()
-  ;; The strip names other flagged sessions (not unflagged ones, not self) and
-  ;; clears the current session's own flag (you are looking at it).
+(ert-deftest tmux-control-test-session-corner-lists-others-and-clears-self ()
+  ;; The corner names other flagged sessions (not unflagged ones, not self),
+  ;; and composing the header clears the current session's own flag.
   (let ((self (generate-new-buffer "*tmux-control:local:self*"))
         (other (generate-new-buffer "*tmux-control:local:other*"))
         (quiet (generate-new-buffer "*tmux-control:local:quiet*")))
@@ -1672,21 +1672,25 @@ each wrapped in an evolving prompt line and a status bar.")
           (cl-letf (((symbol-function 'process-live-p) (lambda (p) (eq p 'live))))
             (with-current-buffer self
               (let* ((tmux-control-session-activity t)
-                     (strip (tmux-control--session-strip)))
-                (should (string-match-p "other" strip))   ; flagged other listed
-                (should-not (string-match-p "quiet" strip)) ; unflagged omitted
-                (should-not (string-match-p "self" strip))  ; self omitted
-                (should-not tmux-control--session-activity)))))   ; self-cleared
+                     (tmux-control-window-tab-bar nil)
+                     (corner (tmux-control--corner-render
+                              (tmux-control--flagged-other-session-buffers))))
+                (should (string-match-p "other" corner))    ; flagged other listed
+                (should-not (string-match-p "quiet" corner)) ; unflagged omitted
+                (should-not (string-match-p "self" corner))  ; self omitted
+                ;; Composing the header clears self's own flag (you see it).
+                (tmux-control--header-line)
+                (should-not tmux-control--session-activity)))))
       (kill-buffer self) (kill-buffer other) (kill-buffer quiet))))
 
-(ert-deftest tmux-control-test-session-strip-disambiguates-hosts ()
-  ;; Two different hosts whose tmux session names collide (the default "0")
-  ;; must produce distinguishable chips -- otherwise the strip shows two
-  ;; identical "0"s and you cannot tell which host wants attention.
+(ert-deftest tmux-control-test-session-corner-groups-by-server ()
+  ;; The corner groups flagged sessions by SERVER: a host is named once and
+  ;; only when it differs from the one you are viewing, so sessions on your
+  ;; own (current) server show bare names while other hosts are prefixed.
   (let ((a (generate-new-buffer "*tmux-control:hostA:0*"))
         (b (generate-new-buffer "*tmux-control:hostB:0*"))
         (loc (generate-new-buffer "*tmux-control:local:0*"))
-        (empty (generate-new-buffer "*tmux-control:emptyhost:0*")))
+        (empty (generate-new-buffer "*tmux-control:emptyhost:le*")))
     (unwind-protect
         (progn
           (with-current-buffer a
@@ -1701,7 +1705,7 @@ each wrapped in an evolving prompt line and a status bar.")
             (setq-local tmux-control--session-activity t))
           (with-current-buffer loc
             (setq-local tmux-control--session "0")
-            (setq-local tmux-control--host nil)   ; local connection
+            (setq-local tmux-control--host nil)   ; local, same server as viewer
             (setq-local tmux-control--process 'live)
             (setq-local tmux-control--session-activity t))
           (with-current-buffer empty
@@ -1710,24 +1714,44 @@ each wrapped in an evolving prompt line and a status bar.")
             (setq-local tmux-control--process 'live)
             (setq-local tmux-control--session-activity t))
           (cl-letf (((symbol-function 'process-live-p) (lambda (p) (eq p 'live))))
-            ;; Render the strip from another (current) buffer so all flagged
-            ;; ones are "other".
+            ;; Viewer is a local session, so "local" is the CURRENT server.
             (with-temp-buffer
               (setq-local tmux-control--session "viewer")
-              (let* ((tmux-control-session-activity t)
-                     (strip (tmux-control--session-strip)))
-                ;; Remotes use the exact "host:session" format.
-                (should (string-match-p "●hostA:0" strip))
-                (should (string-match-p "●hostB:0" strip))
-                ;; The local chip is named "local:session", not a bare "0".
-                (should (string-match-p "●local:0" strip))
-                ;; An empty-string host is local too -- "local:le", never
-                ;; "●:le".
-                (should (string-match-p "●local:le" strip))
-                (should-not (string-match-p "●:" strip))
-                ;; No bare "●0" anywhere -- every chip is server-qualified.
-                (should-not (string-match-p "●0\\(?:\\'\\| \\)" strip))))))
+              (setq-local tmux-control--host nil)
+              (let ((corner (tmux-control--corner-render
+                             (tmux-control--flagged-other-session-buffers))))
+                ;; Remote servers are named (once), local server is NOT (it's
+                ;; the current server -- no redundant prefix).
+                (should (string-match-p "hostA" corner))
+                (should (string-match-p "hostB" corner))
+                (should-not (string-match-p "local" corner))
+                ;; Each remote "0" sits under its host label; the local
+                ;; siblings ("0" and "le") show bare.
+                (should (string-match-p "hostA[^●]*0" corner))
+                (should (string-match-p "hostB[^●]*0" corner))
+                (should (string-match-p "le" corner))
+                (should-not (string-match-p "●:" corner))))))
       (kill-buffer a) (kill-buffer b) (kill-buffer loc) (kill-buffer empty))))
+
+(ert-deftest tmux-control-test-server-label-disambiguates-socket ()
+  ;; The default socket reads as just "local"; a non-default socket is
+  ;; appended so two local servers don't both collapse to "local".
+  (should (equal (tmux-control--server-label nil tmux-control-default-socket-name)
+                 "local"))
+  (should (equal (tmux-control--server-label "" tmux-control-default-socket-name)
+                 "local"))
+  (should (equal (tmux-control--server-label nil "scratch") "local/scratch"))
+  ;; An empty socket is absent, not a non-default server (no "local/").
+  (should (equal (tmux-control--server-label nil "") "local"))
+  (should (equal (tmux-control--server-label "aurora" tmux-control-default-socket-name)
+                 "aurora"))
+  (should (equal (tmux-control--server-label "aurora" "work") "aurora/work")))
+
+(ert-deftest tmux-control-test-corner-collapses-to-count ()
+  ;; When the named corner won't fit, it collapses to a bright count.
+  (let ((c (tmux-control--corner-collapsed 3)))
+    (should (string-match-p "●3" (substring-no-properties c)))
+    (should (get-text-property (1- (length c)) 'keymap c))))
 
 (ert-deftest tmux-control-test-session-label-names-host-and-session ()
   ;; The persistent header label names the current connection: HOST:SESSION
