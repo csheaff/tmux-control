@@ -11,6 +11,13 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # purcell/setup-emacs fetches Emacs through nix, which resolves
+      # github.com/purcell/nix-emacs-ci via the GitHub API.  Unauthenticated
+      # that API allows only 60 requests/hour, so the matrix jobs intermittently
+      # 429 during setup.  Authenticate nix's fetches with the workflow token
+      # (5000/hour) so setup is reliable.  contents:read is enough for API reads.
+      NIX_CONFIG: "access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}"
     strategy:
       fail-fast: false
       matrix:
