@@ -4517,13 +4517,16 @@ the matching pane's render buffer instead, so every pane updates at once."
 
 (defun tmux-control--note-link-alive (line)
   "Clear a spent auto-reconnect budget when LINE proves the link is back.
-LINE counts as proof only if it is a real control-mode line (which always
-begins with `%').  This deliberately keys off a PARSED protocol line, not raw
-filter bytes: a failed reconnect's ssh/tmux stderr is merged into the same
-pipe, and treating that as recovery would pin the attempt count at zero and
-loop forever instead of backing off to the cap."
+LINE counts as proof only if it is a real, ONGOING control-mode line (which
+always begins with `%') -- excluding `%exit', which announces the control
+connection CLOSING and so is the opposite of recovery.  This deliberately
+keys off a PARSED protocol line, not raw filter bytes: a failed reconnect's
+ssh/tmux stderr is merged into the same pipe, and treating that (or `%exit')
+as recovery would pin the attempt count at zero and loop forever instead of
+backing off to the cap."
   (when (and (> tmux-control--auto-reconnect-attempts 0)
-             (string-prefix-p "%" line))
+             (string-prefix-p "%" line)
+             (not (string-prefix-p "%exit" line)))
     (tmux-control--cancel-auto-reconnect)))
 
 (defun tmux-control--handle-line (line)

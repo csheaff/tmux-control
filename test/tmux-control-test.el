@@ -3661,7 +3661,11 @@ output), :calls (side-effect invocations in order), :active-pane,
     (should (= tmux-control--auto-reconnect-attempts 3))
     (tmux-control--note-link-alive "no server running on /tmp/x")
     (should (= tmux-control--auto-reconnect-attempts 3))
-    ;; a genuine control reply: budget cleared
+    ;; `%exit' is a control line but announces the connection CLOSING, so it
+    ;; must NOT count as recovery (else a session that keeps exiting loops).
+    (tmux-control--note-link-alive "%exit server exited")
+    (should (= tmux-control--auto-reconnect-attempts 3))
+    ;; a genuine, ongoing control reply: budget cleared
     (tmux-control--note-link-alive "%begin 1700000000 1 1")
     (should (= tmux-control--auto-reconnect-attempts 0))))
 
