@@ -383,6 +383,17 @@ a tmux session, and the natural companion to `tmux-control-next-window' and
 friends.  Set to nil to hide it."
   :type 'boolean)
 
+(defcustom tmux-control-allow-clipboard-write nil
+  "Non-nil lets a tmux pane drive the Emacs kill-ring / clipboard (OSC 52).
+A program running in any pane can emit an OSC 52 escape to set (or read) the
+selection.  With tmux-control pointed at remote, possibly shared or
+agent-driven servers, that means untrusted pane output could silently
+overwrite what you next paste (clipboard poisoning) -- or read your kill-ring
+back out.  Off by default: pane-driven clipboard manipulation is ignored.
+Set non-nil to allow it (the underlying Eat behavior), e.g. for a trusted
+local session where copying pane output to the system clipboard is wanted."
+  :type 'boolean)
+
 (defcustom tmux-control-session-activity t
   "Non-nil flags other connected sessions that have unseen output.
 When you are looking at one session and another connected session produces
@@ -3471,10 +3482,18 @@ so the tmux-control keys get out of the way; the mode line shows
     (setf (eat-term-parameter tmux-control--terminal 'ring-bell-function)
           (if (fboundp 'eat--bell) #'eat--bell #'ignore))
     (setf (eat-term-parameter tmux-control--terminal 'manipulate-selection-function)
-          (if (fboundp 'eat--manipulate-kill-ring)
-              #'eat--manipulate-kill-ring
-            #'ignore))
+          (tmux-control--selection-function))
     (tmux-control--disable-line-numbers)))
+
+(defun tmux-control--selection-function ()
+  "Return the Eat `manipulate-selection-function' for a pane terminal.
+Ignores pane-driven OSC 52 clipboard manipulation unless the user opts in
+via `tmux-control-allow-clipboard-write' -- so untrusted pane output cannot
+silently poison or read the Emacs kill-ring by default."
+  (if (and tmux-control-allow-clipboard-write
+           (fboundp 'eat--manipulate-kill-ring))
+      #'eat--manipulate-kill-ring
+    #'ignore))
 
 (defun tmux-control--check-host (host)
   "Signal a `user-error' if HOST could be misread by ssh as an option.
@@ -5990,8 +6009,7 @@ it asynchronously over the control connection."
               (if (fboundp 'eat--bell) #'eat--bell #'ignore))
         (setf (eat-term-parameter tmux-control--terminal
                                   'manipulate-selection-function)
-              (if (fboundp 'eat--manipulate-kill-ring)
-                  #'eat--manipulate-kill-ring #'ignore))
+              (tmux-control--selection-function))
         (setf (eat-term-parameter tmux-control--terminal 'eat--process) process)
         (setf (eat-term-parameter tmux-control--terminal 'eat--input-process)
               process)
@@ -6445,8 +6463,7 @@ its own and routes commands through CONTROLLER."
       (setf (eat-term-parameter tmux-control--terminal 'ring-bell-function)
             (if (fboundp 'eat--bell) #'eat--bell #'ignore))
       (setf (eat-term-parameter tmux-control--terminal 'manipulate-selection-function)
-            (if (fboundp 'eat--manipulate-kill-ring)
-                #'eat--manipulate-kill-ring #'ignore))
+            (tmux-control--selection-function))
       (setf (eat-term-parameter tmux-control--terminal 'eat--process) process)
       (setf (eat-term-parameter tmux-control--terminal 'eat--input-process) process)
       (setf (eat-term-parameter tmux-control--terminal 'eat--output-process) process)
