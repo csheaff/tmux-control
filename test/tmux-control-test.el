@@ -1865,6 +1865,28 @@ each wrapped in an evolving prompt line and a status bar.")
               (tmux-control--quiet-activity 5))))   ; must not error
       (kill-buffer ctrl) (kill-buffer render))))
 
+(ert-deftest tmux-control-test-window-jump-keys-bound ()
+  ;; The window-jump keys are bound in BOTH the override map (high precedence,
+  ;; over Eat) and the major-mode map, and `l' really exits scrollback.
+  (dolist (map (list tmux-control--override-map tmux-control-mode-map))
+    (should (eq (lookup-key map (kbd "C-c C-w")) 'tmux-control-select-window))
+    (should (eq (lookup-key map (kbd "C-c TAB")) 'tmux-control-last-window))
+    (should (eq (lookup-key map (kbd "C-c x")) 'tmux-control-kill-pane))
+    (should (eq (lookup-key map (kbd "C-c 0")) 'tmux-control-select-window-by-key))
+    (should (eq (lookup-key map (kbd "C-c 7")) 'tmux-control-select-window-by-key)))
+  (should (eq (lookup-key tmux-control-scrollback-mode-map (kbd "l"))
+              'tmux-control-live)))
+
+(ert-deftest tmux-control-test-select-window-by-key-uses-digit ()
+  ;; The digit that invoked the command is the window index it switches to.
+  (let (got)
+    (cl-letf (((symbol-function 'tmux-control-select-window)
+               (lambda (idx) (setq got idx))))
+      (let ((last-command-event ?5)) (tmux-control-select-window-by-key))
+      (should (equal got "5"))
+      (let ((last-command-event ?0)) (tmux-control-select-window-by-key))
+      (should (equal got "0")))))
+
 (ert-deftest tmux-control-test-flock-other-frame-ordering ()
   ;; flock-other-frame: with a prefix it connects all first, then focuses the
   ;; dedicated frame and flocks; without a prefix it skips connect-all.

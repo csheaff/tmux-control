@@ -37,10 +37,12 @@ bound in the live buffer; the rest are `M-x`, bind them to taste):
   (`tmux-control-previous-window`) flip to the next or previous window in the
   session, wrapping around — like a terminal's next/previous-tab keys, with no
   menu and without rearranging your Emacs windows (a code buffer beside the
-  live view stays put).  `M-x tmux-control-last-window` toggles back to the
-  window you came from.  These delegate to tmux's own
-  `next-window`/`previous-window`/`last-window`, so they follow the session's
-  window order and any other attached client stays in sync.
+  live view stays put).  `C-c TAB` (`tmux-control-last-window`) toggles back to
+  the window you came from — the alt-tab of windows.  Jump straight to a window
+  by number with `C-c 0` … `C-c 9`, or pick from the visual chooser with
+  `C-c C-w` (`tmux-control-select-window`).  These delegate to tmux's own
+  `next-window`/`previous-window`/`last-window`/`select-window`, so they follow
+  the session's window order and any other attached client stays in sync.
 
   **Each visited window keeps its own buffer** (`tmux-control-window-buffers`,
   default on): a switch swaps buffers instead of repainting one in place, so
@@ -205,7 +207,7 @@ along and the live view repaints on the chosen pane.
 - `C-c |` (`tmux-control-split-pane-right`) — split side by side, the new pane
   on the right.
 - `C-c -` (`tmux-control-split-pane-below`) — split stacked, the new pane below.
-- `M-x tmux-control-kill-pane` — close the active pane (with confirmation).
+- `C-c x` (`tmux-control-kill-pane`) — close the active pane (with confirmation).
 
 A split runs tmux's own `split-window` over the control connection and, by
 default, enters the tiled view (below) so both panes show at once — otherwise
