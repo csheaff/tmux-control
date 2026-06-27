@@ -304,24 +304,26 @@ or when the application requests mouse events itself, the wheel event
 is forwarded to the terminal unchanged."
   :type 'boolean)
 
-(defcustom tmux-control-wheel-scrolls-live-history nil
+(defcustom tmux-control-wheel-scrolls-live-history t
   "Non-nil means wheel-up first scrolls the live view's own retained history.
 
-iTerm-style continuous scrollback.  Eat keeps the output that has streamed
-since you connected as ordinary buffer text above the live screen, already
-rendered with its colors.  With this enabled, scrolling up over a
-normal-screen pane scrolls *that* -- instantly, in the same buffer, with no
-mode switch and no capture round trip -- and incoming output no longer yanks
-the view back to the bottom while you read (it resumes following when you
-scroll back down or type).  Only once you reach the top of that retained
-history does wheel-up open the full `tmux-control-scrollback' pager for the
-deeper, pre-session history that lives in tmux rather than Eat.
+iTerm-style continuous scrollback, and the default: looking back is one
+gesture, not a mode switch.  Eat keeps the output that has streamed since you
+connected as ordinary buffer text above the live screen, already rendered
+with its colors.  Scrolling up over a normal-screen pane scrolls *that* --
+instantly, in the same buffer, with no mode switch and no capture round trip
+-- and incoming output no longer yanks the view back to the bottom while you
+read (it resumes following when you scroll back down or type).  Only once you
+reach the top of that retained history does wheel-up open the full
+`tmux-control-scrollback' pager for the deeper, pre-session history that lives
+in tmux rather than Eat.
 
-When nil (the default), wheel-up opens the pager immediately, as before --
-the behavior is byte-identical, including the scroll-follow logic.  This is
-opt-in because it changes how the live view itself responds to the wheel.
+When nil, wheel-up opens the pager immediately instead -- the older behavior,
+byte-identical including the scroll-follow logic.
 
-Has no effect unless `tmux-control-wheel-enters-scrollback' is also non-nil."
+Has no effect unless `tmux-control-wheel-enters-scrollback' is also non-nil
+\(which it is by default); set that to nil to forward the wheel to the pane
+untouched."
   :type 'boolean)
 
 (defcustom tmux-control-pane-aware-find-file t
