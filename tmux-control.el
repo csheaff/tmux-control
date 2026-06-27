@@ -429,11 +429,15 @@ option, so the option and the face do not share a symbol.")
 (defvar-local tmux-control--accumulator "")
 
 (defconst tmux-control--max-pending-line (* 16 1024 1024)
-  "Cap (bytes) on the unparsed tail of the control-mode stream.
-Control-mode replies are newline-terminated; a remote that streams without a
-newline would otherwise grow `tmux-control--accumulator' without bound and
-exhaust Emacs memory.  A single legitimate line never approaches this, so on
-overflow the malformed pending data is dropped.")
+  "Cap (characters) on the buffered control-mode stream.
+Control-mode replies are short and newline-terminated; a remote that streams
+without a newline -- or one absurdly long line -- would otherwise grow
+`tmux-control--accumulator' without bound and exhaust Emacs memory.  The cap
+is enforced as soon as a chunk is appended, so neither the missing-newline
+case nor a single giant line can balloon it; legitimate buffered data never
+approaches this, so on overflow the malformed data is dropped.  Characters,
+not bytes, because the accumulator is a string (`length' is O(1) on the hot
+filter path); for the mostly-ASCII control stream the two are close.")
 (defvar-local tmux-control--display-dirty nil
   "Non-nil when Eat output has been fed but not yet redisplayed.
 Set by `tmux-control--feed-terminal' and cleared by
@@ -4267,6 +4271,15 @@ Lines are compared by their width-insensitive match keys."
     (with-current-buffer (process-buffer process)
       (setq tmux-control--accumulator
             (concat tmux-control--accumulator chunk))
+      ;; Bound the buffered stream up front: a remote that never sends a
+      ;; newline -- or one absurdly long line -- would otherwise exhaust
+      ;; memory.  Enforcing the cap here (before extracting lines) covers both
+      ;; the missing-newline tail and a single giant newline-terminated line;
+      ;; a real control-mode line never approaches it, so drop the malformed
+      ;; buffer rather than process or keep it.
+      (when (> (length tmux-control--accumulator)
+               tmux-control--max-pending-line)
+        (setq tmux-control--accumulator ""))
       (let ((start 0)
             line-end
             ;; Capture follow-windows before any output is fed this pass, so
@@ -4281,12 +4294,6 @@ Lines are compared by their width-insensitive match keys."
           (setq start (1+ line-end)))
         (setq tmux-control--accumulator
               (substring tmux-control--accumulator start))
-        ;; Bound the unparsed tail: a remote that never sends a newline would
-        ;; otherwise grow it without limit (memory DoS).  A real control-mode
-        ;; line is tiny, so an over-cap pending fragment is malformed -- drop it.
-        (when (> (length tmux-control--accumulator)
-                 tmux-control--max-pending-line)
-          (setq tmux-control--accumulator ""))
         ;; Feed any output still batched at the end of the chunk, then do a
         ;; single redisplay -- not one per %output message.  In tiling mode
         ;; the controller renders nothing itself; it flushes each pane's
