@@ -11,13 +11,6 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      # purcell/setup-emacs fetches Emacs through nix, which resolves
-      # github.com/purcell/nix-emacs-ci via the GitHub API.  Unauthenticated
-      # that API allows only 60 requests/hour, so the matrix jobs intermittently
-      # 429 during setup.  Authenticate nix's fetches with the workflow token
-      # (5000/hour) so setup is reliable.  contents:read is enough for API reads.
-      NIX_CONFIG: "access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}"
     strategy:
       fail-fast: false
       matrix:
@@ -26,20 +19,73 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      # purcell/setup-emacs installs Emacs with `nix profile install
+      # github:purcell/nix-emacs-ci#...`, which resolves the repo's HEAD via
+      # api.github.com.  Unauthenticated that API is rate-limited per
+      # *shared-runner-IP* at 60 req/hour, so the matrix jobs intermittently
+      # 429 during setup.  (Setting NIX_CONFIG access-tokens did not help: nix
+      # ignores access-tokens from untrusted env config; an in-job retry would
+      # not help either, as it reuses the same throttled IP.)  Install Nix
+      # ourselves first with the workflow token written into the *trusted*
+      # system config, so the fetch is authenticated -- the GITHUB_TOKEN limit
+      # is per repository (1000/hour) rather than the unauthenticated per-IP 60.
+      # setup-emacs then finds Nix already on
+      # PATH, skips its own install, and runs `nix profile install`
+      # authenticated.  contents:read suffices for the API read.
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          extra-conf: |
+            access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
+
       # Pinned to a commit SHA: the action only publishes a moving master.
       - uses: purcell/setup-emacs@3b5fcf1267a1ff285600064525deceaf6d322d1c
         with:
           version: ${{ matrix.emacs-version }}
 
+      # Cache the fully-prepared eat tree (sources + copied-in compat + built
+      # terminfo) so most builds skip cloning and building it entirely.  Keyed on
+      # the pinned eat/compat versions and a manual revision suffix (bump -rN when
+      # the build recipe below changes).  eat is independent of the emacs/tmux
+      # matrix, so all four jobs share one cache: the first to finish populates
+      # it, the rest restore.
+      - name: Cache eat (sources + compat + terminfo)
+        id: cache-eat
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/eat
+          key: eat-v0.9.4-compat-31.0.0.1-${{ runner.os }}-r1
+
       - name: Install eat (pinned) and its compat dependency
+        if: steps.cache-eat.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch v0.9.4 https://codeberg.org/akib/emacs-eat.git "$HOME/eat"
+          set -euo pipefail
+          # eat's canonical home is Codeberg.  A Codeberg outage would otherwise
+          # break every build, so fall back to a GitHub mirror pinned to the SAME
+          # commit as the v0.9.4 tag, then assert the checked-out commit matches
+          # that trusted SHA -- whichever remote served it, the content is
+          # verified identical (a git commit SHA is a hash of its content+history).
+          EAT_SHA=c91451f2d17453c19d3fa76faa4945cbe54e14ce
+          # `timeout' so a Codeberg *hang* (a TCP stall, not a clean refusal --
+          # we have seen ~133s connect timeouts) fails fast into the fallback
+          # instead of stalling the job; the `|| {...}' only fires on a non-zero
+          # exit, which `timeout' guarantees.
+          timeout 120 git clone --depth 1 --branch v0.9.4 https://codeberg.org/akib/emacs-eat.git "$HOME/eat" || {
+            echo "Codeberg unreachable; falling back to SHA-verified GitHub mirror"
+            rm -rf "$HOME/eat"
+            git clone --depth 1 --branch v0.9.4 https://github.com/blahgeek/emacs-eat.git "$HOME/eat"
+          }
+          got=$(git -C "$HOME/eat" rev-parse 'HEAD^{commit}')
+          if [ "$got" != "$EAT_SHA" ]; then
+            echo "eat integrity check failed: got $got, expected $EAT_SHA" >&2
+            exit 1
+          fi
           # eat's Package-Requires includes compat, which package managers
           # install automatically but a raw clone does not; drop its files
           # next to eat.el so the one -L covers both.
           git clone --depth 1 --branch 31.0.0.1 https://github.com/emacs-compat/compat.git "$HOME/compat"
           cp "$HOME/compat"/compat*.el "$HOME/eat/"
-          # Compile eat's terminfo so a real terminal can run in integration tests.
+          # Compile eat's terminfo so a real terminal can run in integration
+          # tests.  Built into ~/eat so the cache captures it too.
           sudo apt-get update -q && sudo apt-get install -y -q ncurses-bin
           make -C "$HOME/eat" terminfo
 
