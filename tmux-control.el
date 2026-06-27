@@ -85,6 +85,21 @@ When nil or empty, connect to local tmux."
   "Shell snippet used before running tmux on a remote host."
   :type 'string)
 
+(defcustom tmux-control-ssh-options
+  '("-o" "ServerAliveInterval=5" "-o" "ServerAliveCountMax=3"
+    "-o" "ConnectTimeout=10")
+  "Extra `ssh' options prepended to every remote connection and query.
+The defaults keep a half-dead link from hanging Emacs.  ServerAlive* make a
+dropped connection -- a closed laptop lid, a network change, a NAT timeout --
+surface as a process exit within ~15s, instead of waiting out the kernel's
+multi-minute TCP timeout while the pane is frozen and the sentinel never
+fires.  ConnectTimeout bounds the initial connect, which matters most for the
+synchronous session-list probe that would otherwise freeze Emacs on an
+unreachable host.  They do not change authentication, so key- or
+password-based logins keep working.  Set to nil for plain ssh, or customize
+\(e.g. add \"-o\" \"BatchMode=yes\" if all your hosts use non-interactive auth)."
+  :type '(repeat string))
+
 (defcustom tmux-control-scrollback-lines 10000
   "Maximum number of pane-history lines the scrollback view will load.
 
@@ -916,10 +931,11 @@ text (creating a new session) when they do not."
         (let ((text (if (and host (not (string-empty-p host)))
                         (tmux-control--call
                          "ssh"
-                         (list (tmux-control--check-host host)
-                               (concat tmux-control-remote-tmux-socket-setup
-                                       " && "
-                                       (tmux-control--tmux-command-string args))))
+                         (tmux-control--ssh-args
+                          host
+                          (concat tmux-control-remote-tmux-socket-setup
+                                  " && "
+                                  (tmux-control--tmux-command-string args))))
                       (tmux-control--call "tmux" args))))
           (split-string (string-trim text) "\n" t))
       (error
@@ -1496,10 +1512,11 @@ Queries tmux on HOST using SOCKET-NAME."
          (text (if (and host (not (string-empty-p host)))
                    (tmux-control--call
                     "ssh"
-                    (list host
-                          (concat tmux-control-remote-tmux-socket-setup
-                                  " && "
-                                  (tmux-control--tmux-command-string args))))
+                    (tmux-control--ssh-args
+                     host
+                     (concat tmux-control-remote-tmux-socket-setup
+                             " && "
+                             (tmux-control--tmux-command-string args))))
                  (tmux-control--call "tmux" args))))
     (delq nil
           (mapcar
@@ -1528,10 +1545,11 @@ title when that differs, and whether it is the session's active pane."
          (text (if (and host (not (string-empty-p host)))
                    (tmux-control--call
                     "ssh"
-                    (list host
-                          (concat tmux-control-remote-tmux-socket-setup
-                                  " && "
-                                  (tmux-control--tmux-command-string args))))
+                    (tmux-control--ssh-args
+                     host
+                     (concat tmux-control-remote-tmux-socket-setup
+                             " && "
+                             (tmux-control--tmux-command-string args))))
                  (tmux-control--call "tmux" args))))
     (delq nil
           (mapcar
@@ -3520,14 +3538,24 @@ is rejected rather than silently reaching the process layer."
                      "new-session" "-A" "-s" ,session)))
     (if (or (null host) (string-empty-p host))
         tmux-args
-      (list "ssh" (tmux-control--check-host host)
-            (concat tmux-control-remote-tmux-socket-setup
-                    "; exec "
-                    (mapconcat #'shell-quote-argument tmux-args " "))))))
+      (cons "ssh"
+            (tmux-control--ssh-args
+             host
+             (concat tmux-control-remote-tmux-socket-setup
+                     "; exec "
+                     (mapconcat #'shell-quote-argument tmux-args " ")))))))
 
 (defun tmux-control--tmux-command-string (args)
   "Return a shell command string for tmux ARGS."
   (mapconcat #'shell-quote-argument (cons "tmux" args) " "))
+
+(defun tmux-control--ssh-args (host remote-command)
+  "Return the argv (after \"ssh\") to run REMOTE-COMMAND on HOST.
+Prepends `tmux-control-ssh-options' (keepalives + connect timeout) so a dead
+link surfaces as a process exit instead of hanging, and validates HOST via
+`tmux-control--check-host' so it cannot be read by ssh as an option."
+  (append tmux-control-ssh-options
+          (list (tmux-control--check-host host) remote-command)))
 
 (defun tmux-control--capture-pane (host socket-name target lines
                                         &optional preserve-trailing)
@@ -3548,10 +3576,11 @@ the caller must only set it when the server supports -N (tmux 3.1+)."
     (if (and host (not (string-empty-p host)))
         (tmux-control--call
          "ssh"
-         (list host
-               (concat tmux-control-remote-tmux-socket-setup
-                       " && "
-                       (tmux-control--tmux-command-string args))))
+         (tmux-control--ssh-args
+          host
+          (concat tmux-control-remote-tmux-socket-setup
+                  " && "
+                  (tmux-control--tmux-command-string args))))
       (tmux-control--call "tmux" args))))
 
 (defun tmux-control--call (program args)
@@ -3774,10 +3803,11 @@ background fills survive in the preview."
     (if (and host (not (string-empty-p host)))
         (tmux-control--call
          "ssh"
-         (list host
-               (concat tmux-control-remote-tmux-socket-setup
-                       " && "
-                       (tmux-control--tmux-command-string args))))
+         (tmux-control--ssh-args
+          host
+          (concat tmux-control-remote-tmux-socket-setup
+                  " && "
+                  (tmux-control--tmux-command-string args))))
       (tmux-control--call "tmux" args))))
 
 (defun tmux-control--render-window-preview (host socket-name session index
@@ -6299,9 +6329,10 @@ controller or pane render buffer where those locals are bound."
     (if (and tmux-control--host (not (string-empty-p tmux-control--host)))
         (tmux-control--call
          "ssh"
-         (list tmux-control--host
-               (concat tmux-control-remote-tmux-socket-setup " && "
-                       (tmux-control--tmux-command-string full))))
+         (tmux-control--ssh-args
+          tmux-control--host
+          (concat tmux-control-remote-tmux-socket-setup " && "
+                  (tmux-control--tmux-command-string full))))
       (tmux-control--call "tmux" full))))
 
 (defconst tmux-control--window-state-format

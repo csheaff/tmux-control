@@ -65,6 +65,19 @@
   ;; ...and a normal name is untouched.
   (should (equal (tmux-control--quote-tmux-arg "my proj") "\"my proj\"")))
 
+(ert-deftest tmux-control-test-ssh-args-prepends-options-and-checks-host ()
+  ;; Every ssh invocation goes through --ssh-args: the configured options come
+  ;; first (so a dead link is detected / the connect is bounded), then the
+  ;; validated host, then the remote command.
+  (let ((tmux-control-ssh-options '("-o" "ConnectTimeout=10")))
+    (should (equal (tmux-control--ssh-args "dev" "echo hi")
+                   '("-o" "ConnectTimeout=10" "dev" "echo hi"))))
+  (let ((tmux-control-ssh-options nil))
+    (should (equal (tmux-control--ssh-args "dev" "x") '("dev" "x"))))
+  ;; The host is still validated (option-like host rejected).
+  (should-error (tmux-control--ssh-args "-oProxyCommand=pwned" "x")
+                :type 'user-error))
+
 (ert-deftest tmux-control-test-check-host-rejects-option-like ()
   ;; SECURITY: an ssh destination starting with `-' is read by ssh as an option
   ;; (e.g. -oProxyCommand=...), which runs a local command -> local RCE. Reject.
