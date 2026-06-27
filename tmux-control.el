@@ -427,6 +427,17 @@ option, so the option and the face do not share a symbol.")
 (defvar-local tmux-control--process nil)
 (defvar-local tmux-control--terminal nil)
 (defvar-local tmux-control--accumulator "")
+
+(defconst tmux-control--max-pending-line (* 16 1024 1024)
+  "Cap (characters) on the buffered control-mode stream.
+Control-mode replies are short and newline-terminated; a remote that streams
+without a newline -- or one absurdly long line -- would otherwise grow
+`tmux-control--accumulator' without bound and exhaust Emacs memory.  The cap
+is enforced as soon as a chunk is appended, so neither the missing-newline
+case nor a single giant line can balloon it; legitimate buffered data never
+approaches this, so on overflow the malformed data is dropped.  Characters,
+not bytes, because the accumulator is a string (`length' is O(1) on the hot
+filter path); for the mostly-ASCII control stream the two are close.")
 (defvar-local tmux-control--display-dirty nil
   "Non-nil when Eat output has been fed but not yet redisplayed.
 Set by `tmux-control--feed-terminal' and cleared by
@@ -4260,6 +4271,15 @@ Lines are compared by their width-insensitive match keys."
     (with-current-buffer (process-buffer process)
       (setq tmux-control--accumulator
             (concat tmux-control--accumulator chunk))
+      ;; Bound the buffered stream up front: a remote that never sends a
+      ;; newline -- or one absurdly long line -- would otherwise exhaust
+      ;; memory.  Enforcing the cap here (before extracting lines) covers both
+      ;; the missing-newline tail and a single giant newline-terminated line;
+      ;; a real control-mode line never approaches it, so drop the malformed
+      ;; buffer rather than process or keep it.
+      (when (> (length tmux-control--accumulator)
+               tmux-control--max-pending-line)
+        (setq tmux-control--accumulator ""))
       (let ((start 0)
             line-end
             ;; Capture follow-windows before any output is fed this pass, so
@@ -6293,7 +6313,12 @@ Pure, so the reply shape is unit-testable without a live tmux."
   (let ((layout nil) (panes nil))
     (dolist (line lines)
       (let ((f (split-string line "\t")))
-        (when (>= (length f) 12)
+        ;; The pane id (field 1) comes straight from the untrusted reply stream
+        ;; and is later used as a command TARGET (send-input, select-pane,
+        ;; capture); accept only a canonical "%N" so a hostile/buggy server
+        ;; cannot smuggle a crafted target.  A real tmux pane id is always %N.
+        (when (and (>= (length f) 12)
+                   (string-match-p "\\`%[0-9]+\\'" (nth 1 f)))
           (unless layout (setq layout (nth 0 f)))
           (push (cons (nth 1 f)
                       (list :left (string-to-number (nth 2 f))

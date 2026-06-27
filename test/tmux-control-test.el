@@ -1296,6 +1296,26 @@ each wrapped in an evolving prompt line and a status bar.")
     (should (equal (plist-get p :cmd) ""))
     (should (equal (plist-get p :title) ""))))
 
+(ert-deftest tmux-control-test-parse-window-state-validates-pane-id ()
+  ;; SECURITY: the pane id comes from the untrusted reply stream and is later
+  ;; used as a command TARGET; only a canonical "%N" is accepted, so a crafted
+  ;; id is dropped rather than smuggled into a command.
+  (let* ((fields (lambda (id)
+                   (mapconcat #'identity
+                              (list "LAY" id "0" "0" "80" "24" "1" "0" "0" "1"
+                                    "bash" "title")
+                              "\t")))
+         (panes (cdr (tmux-control--parse-window-state
+                      (list (funcall fields "%2")
+                            (funcall fields "%3; kill-server")
+                            (funcall fields "%4 -t evil")
+                            (funcall fields "@5")))))) ; window id, not a pane id
+    (should (assoc "%2" panes))
+    (should-not (assoc "%3; kill-server" panes))
+    (should-not (assoc "%4 -t evil" panes))
+    (should-not (assoc "@5" panes))
+    (should (= (length panes) 1))))
+
 (ert-deftest tmux-control-test-parse-window-state-tab-in-title ()
   ;; `pane_title' is the last field, but an app can set a title containing a
   ;; literal TAB (OSC 2).  It must be preserved whole, not truncated to its
