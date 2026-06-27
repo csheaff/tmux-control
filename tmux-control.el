@@ -176,6 +176,21 @@ per burst-then-idle.  Enable it if the occasional stale frame bothers you."
          (set-default sym val)
          (when val (tmux-control--ensure-heal-timer))))
 
+(defcustom tmux-control-auto-reconnect nil
+  "Non-nil reconnects in place after an UNEXPECTED disconnect.
+When the control connection drops unexpectedly -- a closed laptop lid, a
+network change, a dropped SSH link -- and not via a deliberate
+\\[tmux-control-disconnect], tmux-control retries the connection in place
+with exponential backoff for a few attempts, then gives up and leaves the
+usual \\[tmux-control-reconnect] recovery.  A successful reconnect (any data
+from the server) resets the budget; a deliberate disconnect never retries.
+
+Off by default: silent reconnection can surprise, and a host that is down
+for good should not be retried forever.  The tmux session itself keeps
+running server-side throughout, so a reconnect re-attaches without losing
+it (see `tmux-control-reconnect')."
+  :type 'boolean)
+
 (defcustom tmux-control-auto-heal-interval 2.0
   "Seconds of Emacs idle before `tmux-control-auto-heal-drift' checks a pane."
   :type 'number
@@ -596,6 +611,16 @@ unexpected death -- a dropped SSH connection, a killed tmux server --
 announces itself and points at `tmux-control-reconnect'.  The other
 deliberate shutdown paths (buffer teardown, a reconnect's reset) detach
 the sentinel entirely instead of setting this flag.")
+
+(defconst tmux-control--auto-reconnect-max 6
+  "Maximum consecutive `tmux-control-auto-reconnect' attempts before giving up.")
+(defvar-local tmux-control--auto-reconnect-attempts 0
+  "Consecutive auto-reconnect attempts since the last successful connection.
+Reset to 0 when the server next sends data (the link is back).  Held on the
+controller.")
+(defvar-local tmux-control--auto-reconnect-timer nil
+  "Pending `tmux-control-auto-reconnect' timer, or nil.")
+
 (defvar-local tmux-control--seed-cursor nil
   "Most recent (X . Y) cursor position queried for a screen seed.
 X and Y are tmux's 0-indexed cursor column and row on the visible
@@ -3517,6 +3542,13 @@ so the tmux-control keys get out of the way; the mode line shows
     (when tmux-control--command-watchdog-timer
       (cancel-timer tmux-control--command-watchdog-timer))
     (setq tmux-control--command-watchdog-timer nil)
+    ;; Cancel a pending auto-reconnect: its timer holds this buffer and would
+    ;; fire after the reset (e.g. a manual C-c C-r superseding the auto retry).
+    ;; `kill-all-local-variables' (via `tmux-control-mode' below) drops the
+    ;; variable but not the scheduled timer, so cancel the object first.
+    (when (timerp tmux-control--auto-reconnect-timer)
+      (cancel-timer tmux-control--auto-reconnect-timer))
+    (setq tmux-control--auto-reconnect-timer nil)
     (setq tmux-control--command-watchdog-warned nil)
     ;; A (re)connect starts the per-window buffer registry fresh; stale
     ;; sibling render buffers from the previous connection must go.
@@ -4357,6 +4389,10 @@ Lines are compared by their width-insensitive match keys."
   "Handle tmux control mode output CHUNK from PROCESS."
   (when (buffer-live-p (process-buffer process))
     (with-current-buffer (process-buffer process)
+      ;; Any data means the link is back: clear a spent auto-reconnect budget
+      ;; (and any pending retry) so the next drop starts its backoff fresh.
+      (when (> tmux-control--auto-reconnect-attempts 0)
+        (tmux-control--cancel-auto-reconnect))
       (setq tmux-control--accumulator
             (concat tmux-control--accumulator chunk))
       ;; Bound the buffered stream up front: a remote that never sends a
@@ -5860,6 +5896,52 @@ client (e.g. iTerm2) for the trade-offs."
     (tmux-control--resize-to-window)
     (message "tmux-control: window now follows this Emacs window")))
 
+(defun tmux-control--cancel-auto-reconnect ()
+  "Cancel any pending auto-reconnect timer and reset the attempt budget.
+Run on a successful reconnect (data arrived) and on a deliberate teardown."
+  (when (timerp tmux-control--auto-reconnect-timer)
+    (cancel-timer tmux-control--auto-reconnect-timer))
+  (setq tmux-control--auto-reconnect-timer nil
+        tmux-control--auto-reconnect-attempts 0))
+
+(defun tmux-control--auto-reconnect-now (buffer)
+  "Attempt the scheduled in-place reconnect of BUFFER.
+Re-applies the attempt count after the connect (which resets the buffer's
+locals) so a still-failing link advances toward the cap instead of looping
+at zero; a successful reconnect resets the count when data reaches the
+filter.  Runs inside `save-window-excursion' so a timer-driven reconnect
+never steals the window the user is looking at."
+  (when (and (buffer-live-p buffer)
+             (not (process-live-p (buffer-local-value 'tmux-control--process buffer))))
+    (with-current-buffer buffer
+      (let ((n (1+ tmux-control--auto-reconnect-attempts))
+            (host tmux-control--host)
+            (socket tmux-control--socket-name)
+            (session tmux-control--session))
+        (setq tmux-control--auto-reconnect-timer nil)
+        (save-window-excursion
+          (let ((display-buffer-overriding-action '((display-buffer-same-window))))
+            (ignore-errors (tmux-control-connect host socket session))))
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (setq tmux-control--auto-reconnect-attempts n)))))))
+
+(defun tmux-control--schedule-auto-reconnect (buffer)
+  "Schedule an in-place reconnect of BUFFER after exponential backoff."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let ((delay (min 30 (ash 1 (1+ tmux-control--auto-reconnect-attempts)))))
+        (when (timerp tmux-control--auto-reconnect-timer)
+          (cancel-timer tmux-control--auto-reconnect-timer))
+        (tmux-control--message
+         (format "connection lost -- reconnecting in %ds (attempt %d/%d; %s to retry now)"
+                 delay (1+ tmux-control--auto-reconnect-attempts)
+                 tmux-control--auto-reconnect-max
+                 (substitute-command-keys "\\[tmux-control-reconnect]")))
+        (force-mode-line-update t)
+        (setq tmux-control--auto-reconnect-timer
+              (run-with-timer delay nil #'tmux-control--auto-reconnect-now buffer))))))
+
 (defun tmux-control--sentinel (process message)
   "Handle PROCESS exit with MESSAGE."
   (when (buffer-live-p (process-buffer process))
@@ -5888,10 +5970,18 @@ client (e.g. iTerm2) for the trade-offs."
           ;; link leaves it running, a killed server does not -- so the
           ;; message is conditional.)
           (unless deliberate
-            (tmux-control--message
-             (format "connection lost (%s) -- if the tmux session is still running, C-c C-r reconnects"
-                     (string-trim-right message)))
-            (force-mode-line-update t)))))))
+            (if (and tmux-control-auto-reconnect
+                     (< tmux-control--auto-reconnect-attempts
+                        tmux-control--auto-reconnect-max))
+                (tmux-control--schedule-auto-reconnect (current-buffer))
+              ;; No auto-reconnect (off, or the budget is spent): announce and
+              ;; leave the one-key recovery.  Reset a spent budget so a later
+              ;; manual reconnect starts fresh.
+              (setq tmux-control--auto-reconnect-attempts 0)
+              (tmux-control--message
+               (format "connection lost (%s) -- if the tmux session is still running, C-c C-r reconnects"
+                       (string-trim-right message)))
+              (force-mode-line-update t))))))))
 
 (defun tmux-control--kill-process ()
   "Delete the tmux control process and any dependent render buffers."
@@ -5910,6 +6000,11 @@ client (e.g. iTerm2) for the trade-offs."
   (when tmux-control--retile-timer
     (cancel-timer tmux-control--retile-timer)
     (setq tmux-control--retile-timer nil))
+  ;; And a pending auto-reconnect: a deliberate teardown must not resurrect the
+  ;; connection (its timer holds this buffer on the global `timer-list').
+  (when (timerp tmux-control--auto-reconnect-timer)
+    (cancel-timer tmux-control--auto-reconnect-timer)
+    (setq tmux-control--auto-reconnect-timer nil))
   ;; Suppress those per-pane re-tile schedules while killing the pane buffers.
   (let ((tmux-control--killing-pane t))
     (when tmux-control--panes
