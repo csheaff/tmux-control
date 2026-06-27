@@ -1926,6 +1926,15 @@ each wrapped in an evolving prompt line and a status bar.")
       (let ((last-command-event ?0)) (tmux-control-select-window-by-key))
       (should (equal got "0")))))
 
+(ert-deftest tmux-control-test-selection-function-gated ()
+  ;; SECURITY: pane-driven OSC 52 clipboard manipulation is ignored unless the
+  ;; user opts in, so untrusted pane output cannot poison/read the kill-ring.
+  (let ((tmux-control-allow-clipboard-write nil))
+    (should (eq (tmux-control--selection-function) #'ignore)))
+  (when (fboundp 'eat--manipulate-kill-ring)
+    (let ((tmux-control-allow-clipboard-write t))
+      (should (eq (tmux-control--selection-function) #'eat--manipulate-kill-ring)))))
+
 (ert-deftest tmux-control-test-mode-line-safe-doubles-percent ()
   (should (equal (tmux-control--mode-line-safe "a%b") "a%%b"))
   (should (equal (tmux-control--mode-line-safe "%999m") "%%999m"))
