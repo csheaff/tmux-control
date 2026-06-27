@@ -1824,6 +1824,21 @@ each wrapped in an evolving prompt line and a status bar.")
       ;; ...but not the SAME object, so the highlight stops at the boundary.
       (should-not (eq mf1 mf2)))))
 
+(ert-deftest tmux-control-test-switch-to-flagged-buffer-handles-killed ()
+  ;; A corner entry / switcher captures a controller buffer that may be killed
+  ;; before the user clicks (server died, manual kill). Switching to it must
+  ;; report it, not signal "Selecting deleted buffer".
+  (let ((dead (generate-new-buffer "*tmux-control:local:gone*"))
+        (msg nil))
+    (kill-buffer dead)                     ; now a dead buffer object
+    (cl-letf (((symbol-function 'message) (lambda (fmt &rest args)
+                                            (setq msg (apply #'format fmt args))))
+              ((symbol-function 'pop-to-buffer)
+               (lambda (&rest _) (error "should not be reached for a dead buffer"))))
+      ;; Must not error, and should tell the user it's gone.
+      (tmux-control--switch-to-flagged-buffer dead)
+      (should (string-match-p "gone" msg)))))
+
 (ert-deftest tmux-control-test-flock-other-frame-ordering ()
   ;; flock-other-frame: with a prefix it connects all first, then focuses the
   ;; dedicated frame and flocks; without a prefix it skips connect-all.

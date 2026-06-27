@@ -2070,6 +2070,17 @@ otherwise both would collapse to \"local\"."
         (format "%s/%s" h socket)
       h)))
 
+(defun tmux-control--switch-to-flagged-buffer (buffer)
+  "Switch to the session shown in BUFFER, or report it if it is gone.
+The corner and the switcher capture a controller buffer that the user may
+act on moments later; the session can be killed in between (server died,
+manual kill), so guard liveness rather than signalling \"Selecting deleted
+buffer\"."
+  (if (buffer-live-p buffer)
+      (let ((display-buffer-overriding-action '((display-buffer-same-window))))
+        (pop-to-buffer (tmux-control--session-display-buffer buffer)))
+    (message "tmux-control: that session is gone")))
+
 (defun tmux-control--corner-session (buffer)
   "Return a clickable corner token for the flagged session in BUFFER.
 The session NAME is plain and a bright `●' marks that it wants attention;
@@ -2082,8 +2093,7 @@ clicking switches to it."
     (define-key map [header-line mouse-1]
       (lambda (_event)
         (interactive "e")
-        (let ((display-buffer-overriding-action '((display-buffer-same-window))))
-          (pop-to-buffer (tmux-control--session-display-buffer buffer)))))
+        (tmux-control--switch-to-flagged-buffer buffer)))
     (propertize tok
                 'mouse-face (tmux-control--tab-mouse-face)
                 'help-echo (format "Switch to session %s (unseen output)"
@@ -2125,7 +2135,7 @@ With one such session, go straight there; with several, pick by name."
     (cond
      ((null bufs) (message "tmux-control: no other session has unseen output"))
      ((null (cdr bufs))
-      (pop-to-buffer (tmux-control--session-display-buffer (car bufs))))
+      (tmux-control--switch-to-flagged-buffer (car bufs)))
      (t (let* ((choices (mapcar
                          (lambda (b)
                            (cons (tmux-control--connection-name
@@ -2136,8 +2146,8 @@ With one such session, go straight there; with several, pick by name."
                (pick (completing-read "Switch to session: "
                                       (mapcar #'car choices) nil t)))
           (when (assoc pick choices)
-            (pop-to-buffer (tmux-control--session-display-buffer
-                            (cdr (assoc pick choices))))))))))
+            ;; The buffer can be killed while the minibuffer is open.
+            (tmux-control--switch-to-flagged-buffer (cdr (assoc pick choices)))))))))
 
 (defun tmux-control--corner-collapsed (n)
   "Return a collapsed corner: a bright count of N sessions wanting attention.
