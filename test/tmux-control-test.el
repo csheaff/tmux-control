@@ -835,33 +835,53 @@ each wrapped in an evolving prompt line and a status bar.")
 
 (ert-deftest tmux-control-test-alt-screen-warning-throttled ()
   ;; Issue #102: one warning per connection when alternate-screen is off,
-  ;; never when honored, never when suppressed.
-  (let (warnings)
+  ;; never when honored, never when suppressed.  The throttle is keyed by
+  ;; connection name (not a buffer-local flag) so it survives a reconnect,
+  ;; which rebuilds the controller buffer and would otherwise re-warn.
+  (let ((warnings nil)
+        (tmux-control--alt-screen-warned-connections
+         (make-hash-table :test 'equal)))
     (cl-letf (((symbol-function 'display-warning)
                (lambda (&rest _) (push t warnings))))
       ;; honored -> no warning
       (with-temp-buffer
         (setq-local tmux-control--alt-screen-honored t)
-        (setq-local tmux-control--alt-screen-warned nil)
+        (setq-local tmux-control--host nil)
+        (setq-local tmux-control--session "honored")
         (let ((tmux-control-warn-on-alternate-screen-off t))
           (tmux-control--maybe-warn-alternate-screen-off))
         (should (null warnings)))
       ;; off + enabled -> exactly one warning across repeated refreshes
       (with-temp-buffer
         (setq-local tmux-control--alt-screen-honored nil)
-        (setq-local tmux-control--alt-screen-warned nil)
         (setq-local tmux-control--host nil)
         (setq-local tmux-control--session "s")
         (let ((tmux-control-warn-on-alternate-screen-off t))
           (tmux-control--maybe-warn-alternate-screen-off)
           (tmux-control--maybe-warn-alternate-screen-off))
-        (should (= (length warnings) 1))
-        (should tmux-control--alt-screen-warned))
+        (should (= (length warnings) 1)))
+      ;; reconnect: a FRESH buffer for the same connection must not re-warn
+      (with-temp-buffer
+        (setq-local tmux-control--alt-screen-honored nil)
+        (setq-local tmux-control--host nil)
+        (setq-local tmux-control--session "s")
+        (let ((tmux-control-warn-on-alternate-screen-off t))
+          (tmux-control--maybe-warn-alternate-screen-off))
+        (should (= (length warnings) 1)))
+      ;; a DIFFERENT connection still warns once
+      (with-temp-buffer
+        (setq-local tmux-control--alt-screen-honored nil)
+        (setq-local tmux-control--host nil)
+        (setq-local tmux-control--session "other")
+        (let ((tmux-control-warn-on-alternate-screen-off t))
+          (tmux-control--maybe-warn-alternate-screen-off))
+        (should (= (length warnings) 2)))
       ;; suppressed -> never
       (setq warnings nil)
       (with-temp-buffer
         (setq-local tmux-control--alt-screen-honored nil)
-        (setq-local tmux-control--alt-screen-warned nil)
+        (setq-local tmux-control--host nil)
+        (setq-local tmux-control--session "suppressed")
         (let ((tmux-control-warn-on-alternate-screen-off nil))
           (tmux-control--maybe-warn-alternate-screen-off))
         (should (null warnings))))))
