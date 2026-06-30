@@ -656,10 +656,16 @@ requests the alternate screen, so Eat's alternate-display state is a
 phantom and must be ignored.  Refreshed over the control connection
 whenever the active pane changes.")
 
-(defvar-local tmux-control--alt-screen-warned nil
-  "Non-nil once this connection warned about `alternate-screen off'.
+(defvar tmux-control--alt-screen-warned-connections
+  (make-hash-table :test 'equal)
+  "Connection names already warned about `alternate-screen off'.
 Throttles `tmux-control-warn-on-alternate-screen-off' to one warning per
-connection (held on the controller).")
+connection.  Keyed by `tmux-control--connection-name' rather than held in a
+buffer-local flag so the guarantee survives a reconnect: an in-place
+reconnect rebuilds the controller buffer (via `tmux-control--reset-buffer',
+whose `tmux-control-mode' call runs `kill-all-local-variables'), which would
+otherwise clear a buffer-local flag and re-warn on every reconnect of a
+flapping link.")
 
 ;; Per-window render buffers (`tmux-control-window-buffers').  The connect
 ;; buffer keeps the process and session state and renders its own tmux
@@ -1728,23 +1734,26 @@ tmux runs with `alternate-screen off'."
 
 (defun tmux-control--maybe-warn-alternate-screen-off ()
   "Warn once if the active window does not honor `alternate-screen'.
-Throttled per connection via `tmux-control--alt-screen-warned'; gated on
+Throttled per connection via `tmux-control--alt-screen-warned-connections'
+(keyed by connection name, so it survives a reconnect); gated on
 `tmux-control-warn-on-alternate-screen-off'.  Call after
 `tmux-control--alt-screen-honored' is refreshed."
-  (when (and tmux-control-warn-on-alternate-screen-off
-             (not tmux-control--alt-screen-honored)
-             (not tmux-control--alt-screen-warned))
-    (setq tmux-control--alt-screen-warned t)
-    (display-warning
-     'tmux-control
-     (format
-      "The controlled tmux (%s) has `alternate-screen off'.  Full-screen TUIs \
+  (let ((key (tmux-control--connection-name
+              tmux-control--host tmux-control--session)))
+    (when (and tmux-control-warn-on-alternate-screen-off
+               (not tmux-control--alt-screen-honored)
+               (not (gethash key tmux-control--alt-screen-warned-connections)))
+      (puthash key t tmux-control--alt-screen-warned-connections)
+      (display-warning
+       'tmux-control
+       (format
+        "The controlled tmux (%s) has `alternate-screen off'.  Full-screen TUIs \
 (Copilot CLI, vim, less...) will repaint into pane history and produce \
 repeated/garbled scrollback.  Consider `setw -g alternate-screen on' on the \
 host; if the setting is intentional, enable `tmux-control-compact-scrollback'.  \
 Set `tmux-control-warn-on-alternate-screen-off' to nil to silence this."
-      (tmux-control--connection-name tmux-control--host tmux-control--session))
-     :warning)))
+        key)
+       :warning))))
 
 (defun tmux-control--window-choices ()
   "Return an alist of (DISPLAY . INDEX) for the current session's windows."
