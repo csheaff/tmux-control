@@ -5938,9 +5938,11 @@ testing the seed mode query."
                  (split-string val ",")))))
 
 (defun tmux-control--mode-seed-sequence (modes)
-  "Return terminal escapes replaying pane MODES into Eat, or nil.
-MODES is a `tmux-control--parse-pane-modes' plist; nil (modes unknown)
-returns nil and the seed paints contents only, as before.  A screen seed
+  "Return terminal escapes replaying pane MODES into Eat.
+MODES is a `tmux-control--parse-pane-modes' plist; nil (the query failed)
+returns nil, and a plist whose flags are all unknown returns the empty
+string -- either way nothing is emitted and the seed paints contents
+only, as before.  A screen seed
 repaints contents but Eat's MODE state otherwise survives from before the
 seed -- wrong whenever the pane's application enabled or dropped a mode
 while Eat was not watching (it was running before connect, or the seed
