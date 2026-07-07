@@ -641,6 +641,29 @@ The value is `:visible' when tmux reports a visible cursor, `:hidden'
 when hidden, and `:unknown' when the state has not been queried.  Used by
 the `:capture' reply handler to keep Eat's cursor visibility in sync with
 tmux.")
+(defvar-local tmux-control--seed-modes nil
+  "Most recent pane terminal modes queried for a screen seed.
+A plist as returned by `tmux-control--parse-pane-modes', or nil when the
+modes have not been queried (or the reply was malformed).  Used by the
+`:capture' reply handler to replay the pane's mode state -- alternate
+screen, mouse tracking, cursor-key mode, autowrap -- into Eat before
+painting.  `capture-pane' replays screen CONTENTS only, so without this a
+seed of a pane whose application enabled those modes before the seed (a
+connect, reconnect, or window visit landing on a running full-screen TUI)
+leaves Eat believing it is a plain normal-screen pane: wheel events are
+then swallowed by the Emacs-side scrollback routing instead of reaching
+the application (see `tmux-control-wheel-scroll').")
+(defconst tmux-control--pane-modes-format
+  (concat "#{alternate_on},#{mouse_standard_flag},#{mouse_button_flag},"
+          "#{mouse_all_flag},#{mouse_sgr_flag},#{keypad_cursor_flag},"
+          "#{wrap_flag}")
+  "Format string folding a pane's terminal-mode flags into one reply field.
+Comma-separated so the whole state rides a single field of a
+`display-message'/`list-panes' reply; parse it with
+`tmux-control--parse-pane-modes'.  These are the DECSET modes tmux tracks
+per pane that Eat both understands and acts on: the alternate screen
+\(1049), the three mouse-tracking protocols (1000/1002/1003) with the SGR
+encoding (1006), application cursor keys (DECCKM), and autowrap (DECAWM).")
 (defvar-local tmux-control--capture-trailing-p nil
   "Non-nil when the connected tmux supports `capture-pane -N' (3.1+).
 With it, the screen seed preserves trailing background cells so full-width
@@ -4914,12 +4937,19 @@ swallowed as content and the reply queue would desynchronize."
              (tmux-control--parse-cursor-pos output))
        (setq tmux-control--seed-cursor-visible
              (tmux-control--parse-cursor-visible output)))
+      (:pane-modes
+       (setq tmux-control--seed-modes
+             (tmux-control--parse-pane-modes output)))
       (:capture
        (tmux-control--write-terminal
-        (tmux-control--screen-seed-sequence
-         (mapconcat #'identity (nreverse output) "\n")
-         tmux-control--seed-cursor
-         tmux-control--seed-cursor-visible))))))
+        (concat
+         ;; Mode replay first: entering the alternate display clears it,
+         ;; and the screen paint that follows fills it in.
+         (tmux-control--mode-seed-sequence tmux-control--seed-modes)
+         (tmux-control--screen-seed-sequence
+          (mapconcat #'identity (nreverse output) "\n")
+          tmux-control--seed-cursor
+          tmux-control--seed-cursor-visible)))))))
 
 ;;;; Optional auto-heal of render drift
 ;;
@@ -5030,20 +5060,30 @@ wide character does not read as spurious trailing space, matching tmux's
 
 (defun tmux-control--seed-screen ()
   "Seed the Eat buffer with the current tmux pane contents.
-Query the pane's real cursor position first, so the seeded screen places
-the cursor exactly where tmux has it instead of guessing from the prompt.
-tmux replies in command order, so the `:cursor-pos' reply lands before
-the `:capture' reply that paints the screen and consumes it."
+Query the pane's real cursor position and terminal modes first, so the
+seeded screen places the cursor exactly where tmux has it (instead of
+guessing from the prompt) and replays the pane's mode state -- alternate
+screen, mouse tracking -- that `capture-pane' contents alone cannot carry.
+tmux replies in command order, so the `:cursor-pos' and `:pane-modes'
+replies land before the `:capture' reply that paints the screen and
+consumes them."
   (when tmux-control--active-pane
-    ;; Start each seed without a cursor: the :cursor-pos reply fills it in
-    ;; before :capture, and if that query fails the seed falls back to the
-    ;; bottom-left rather than reusing a stale position from an old seed.
+    ;; Start each seed without a cursor or modes: the :cursor-pos and
+    ;; :pane-modes replies fill them in before :capture, and if a query
+    ;; fails the seed falls back (bottom-left cursor, no mode replay)
+    ;; rather than reusing stale values from an old seed.
     (setq tmux-control--seed-cursor nil)
     (setq tmux-control--seed-cursor-visible :unknown)
+    (setq tmux-control--seed-modes nil)
     (tmux-control--send-command
      (format "display-message -p -t %s \"#{cursor_x},#{cursor_y},#{cursor_flag}\""
              tmux-control--active-pane)
      :cursor-pos)
+    (tmux-control--send-command
+     (format "display-message -p -t %s \"%s\""
+             tmux-control--active-pane
+             tmux-control--pane-modes-format)
+     :pane-modes)
     (tmux-control--send-command
      (format "capture-pane -p -e%s -t %s"
              ;; -N keeps trailing background cells so full-width fills survive.
@@ -5879,6 +5919,65 @@ no side effects, for unit testing the seed cursor query."
         (tmux-control--cursor-visible-from-flag (match-string 1 val))
       :unknown)))
 
+(defun tmux-control--parse-pane-modes (output)
+  "Parse a `tmux-control--pane-modes-format' field from reply OUTPUT lines.
+Return a plist mapping :alt-screen :mouse-standard :mouse-button
+:mouse-all :mouse-sgr :cursor-keys :wrap each to `:on', `:off', or nil
+when that flag is missing from the reply (an older tmux renders an
+unknown format variable as empty; nil makes the replay leave that mode
+alone rather than reset a state it does not actually know).  Return nil
+when no well-formed field is found.  Pure: no side effects, for unit
+testing the seed mode query."
+  (let ((val (car (cl-remove-if #'string-empty-p
+                                (mapcar #'string-trim output)))))
+    (when (and val (string-match-p "\\`[01]?\\(?:,[01]?\\)\\{6\\}\\'" val))
+      (cl-mapcan (lambda (key flag)
+                   (list key (pcase flag ("1" :on) ("0" :off) (_ nil))))
+                 '(:alt-screen :mouse-standard :mouse-button :mouse-all
+                   :mouse-sgr :cursor-keys :wrap)
+                 (split-string val ",")))))
+
+(defun tmux-control--mode-seed-sequence (modes)
+  "Return terminal escapes replaying pane MODES into Eat.
+MODES is a `tmux-control--parse-pane-modes' plist; nil (the query failed)
+returns nil, and a plist whose flags are all unknown returns the empty
+string -- either way nothing is emitted and the seed paints contents
+only, as before.  A screen seed
+repaints contents but Eat's MODE state otherwise survives from before the
+seed -- wrong whenever the pane's application enabled or dropped a mode
+while Eat was not watching (it was running before connect, or the seed
+follows a reconnect or window switch).  Replaying the modes tmux reports
+keeps Eat's routing decisions (`tmux-control--alt-screen-p',
+`tmux-control--pane-grabs-mouse-p') and input encoding faithful to the
+pane.  Emitted before the screen paint: entering the alternate display
+clears it, and the paint that follows fills it in.  Each escape is
+idempotent in Eat, so replaying an already-correct state is a no-op.
+Pure, for unit testing."
+  (when modes
+    (concat
+     (pcase (plist-get modes :alt-screen)
+       (:on "\e[?1049h")
+       (:off "\e[?1049l"))
+     ;; tmux keeps at most one mouse protocol in effect; replay the one it
+     ;; reports, or reset when it reports none (one reset disables every
+     ;; protocol in Eat).  Any flag unknown leaves mouse state alone.
+     (cond ((eq (plist-get modes :mouse-all) :on) "\e[?1003h")
+           ((eq (plist-get modes :mouse-button) :on) "\e[?1002h")
+           ((eq (plist-get modes :mouse-standard) :on) "\e[?1000h")
+           ((and (eq (plist-get modes :mouse-all) :off)
+                 (eq (plist-get modes :mouse-button) :off)
+                 (eq (plist-get modes :mouse-standard) :off))
+            "\e[?1000l"))
+     (pcase (plist-get modes :mouse-sgr)
+       (:on "\e[?1006h")
+       (:off "\e[?1006l"))
+     (pcase (plist-get modes :cursor-keys)
+       (:on "\e[?1h")
+       (:off "\e[?1l"))
+     (pcase (plist-get modes :wrap)
+       (:on "\e[?7h")
+       (:off "\e[?7l")))))
+
 (defun tmux-control--capture-n-supported-p (version)
   "Return non-nil when tmux VERSION supports `capture-pane -N' (3.1 or later).
 VERSION is a `#{version}' string such as \"3.6a\" or \"next-3.5\"; the first
@@ -6304,23 +6403,31 @@ it asynchronously over the control connection."
   "Resolve WINDOW-ID's active pane and seed BUFFER from it, asynchronously.
 A closure-query chain over the control connection -- never blocking
 Emacs, and ordered by tmux itself.  Two round trips, not three: the
-active pane and its cursor come back in one list-panes reply (this is
-the first-visit latency a remote user sees as a blank window, so every
-round trip counts), then the capture paints the screen."
+active pane, its cursor, and its terminal modes come back in one
+list-panes reply (this is the first-visit latency a remote user sees as
+a blank window, so every round trip counts), then the capture paints the
+screen, prefixed by the mode replay (see
+`tmux-control--mode-seed-sequence')."
   (let ((ctrl (tmux-control--wb-controller)))
     (with-current-buffer ctrl
       (tmux-control--query
-       (format "list-panes -t %s -F \"#{pane_active}\t#{pane_id}\t#{cursor_x},#{cursor_y},#{cursor_flag}\""
-               window-id)
+       (format "list-panes -t %s -F \"#{pane_active}\t#{pane_id}\t#{cursor_x},#{cursor_y},#{cursor_flag}\t%s\""
+               window-id
+               tmux-control--pane-modes-format)
        (lambda (lines)
-         (let (pane cur vis)
+         (let (pane cur vis modes)
            (cl-loop for l in (or lines '())
                     when (string-match
-                          "\\`1\t\\(%[0-9]+\\)\t\\(.*\\)\\'" l)
+                          "\\`1\t\\(%[0-9]+\\)\t\\([^\t]*\\)\t\\([^\t]*\\)\\'" l)
+                    ;; Extract every group before the parsers run: they do
+                    ;; their own `string-match', which clobbers this match
+                    ;; data.
                     do (setq pane (match-string 1 l))
-                       (let ((cline (list (match-string 2 l))))
+                       (let ((cline (list (match-string 2 l)))
+                             (mline (list (match-string 3 l))))
                          (setq cur (tmux-control--parse-cursor-pos cline)
-                               vis (tmux-control--parse-cursor-visible cline)))
+                               vis (tmux-control--parse-cursor-visible cline)
+                               modes (tmux-control--parse-pane-modes mline)))
                     and return nil)
            (when (and pane (buffer-live-p buffer))
              (with-current-buffer buffer
@@ -6336,9 +6443,11 @@ round trip counts), then the capture paints the screen."
                   (when (and cap-lines (buffer-live-p buffer))
                     (with-current-buffer buffer
                       (tmux-control--write-terminal
-                       (tmux-control--screen-seed-sequence
-                        (string-join cap-lines "\n")
-                        cur (or vis :unknown)))
+                       (concat
+                        (tmux-control--mode-seed-sequence modes)
+                        (tmux-control--screen-seed-sequence
+                         (string-join cap-lines "\n")
+                         cur (or vis :unknown))))
                       (tmux-control--flush-display
                        (tmux-control--current-sync-windows)))
                     ;; Same drift detection as the controller seed: output
@@ -6565,11 +6674,14 @@ controller or pane render buffer where those locals are bound."
   (concat "#{window_layout}\t#{pane_id}\t#{pane_left}\t#{pane_top}\t"
           "#{pane_width}\t#{pane_height}\t#{pane_active}\t"
           "#{cursor_x}\t#{cursor_y}\t#{cursor_flag}\t#{pane_current_command}\t"
+          tmux-control--pane-modes-format "\t"
           "#{pane_title}")
   "`list-panes -F' format folding the layout and every pane's geometry,
-cursor, command, and title into one query, so a (re)tile costs a single
-round trip rather than a `display-message' for the layout plus one per pane
-for the cursor.")
+cursor, command, terminal modes, and title into one query, so a (re)tile
+costs a single round trip rather than a `display-message' for the layout
+plus one per pane for the cursor.  `pane_title' stays LAST: an app-set
+title can contain a literal TAB, and the parser rejoins trailing
+fragments (see `tmux-control--parse-window-state').")
 
 (defun tmux-control--window-state-command ()
   "Return the in-band `list-panes' command for the active window's state.
@@ -6586,8 +6698,9 @@ identically for a local or remote session.  Parse the reply with
   "Parse `list-panes' reply LINES into (LAYOUT . PANES).
 LAYOUT is the `window_layout' string; PANES is an alist (PANE-ID . INFO)
 with INFO a plist of :left :top :width :height :active :cursor
-:cursor-visible :cmd and :title.  See `tmux-control--window-state-format'.
-Pure, so the reply shape is unit-testable without a live tmux."
+:cursor-visible :cmd :modes and :title.  See
+`tmux-control--window-state-format'.  Pure, so the reply shape is
+unit-testable without a live tmux."
   (let ((layout nil) (panes nil))
     (dolist (line lines)
       (let ((f (split-string line "\t")))
@@ -6595,7 +6708,7 @@ Pure, so the reply shape is unit-testable without a live tmux."
         ;; and is later used as a command TARGET (send-input, select-pane,
         ;; capture); accept only a canonical "%N" so a hostile/buggy server
         ;; cannot smuggle a crafted target.  A real tmux pane id is always %N.
-        (when (and (>= (length f) 12)
+        (when (and (>= (length f) 13)
                    (string-match-p "\\`%[0-9]+\\'" (nth 1 f)))
           (unless layout (setq layout (nth 0 f)))
           (push (cons (nth 1 f)
@@ -6609,12 +6722,14 @@ Pure, so the reply shape is unit-testable without a live tmux."
                             :cursor-visible
                             (tmux-control--cursor-visible-from-flag (nth 9 f))
                             :cmd (nth 10 f)
+                            :modes (tmux-control--parse-pane-modes
+                                    (list (nth 11 f)))
                             ;; `pane_title' is the last field, but an app can set
                             ;; an arbitrary title (OSC 2) including a literal TAB;
                             ;; rejoin any TAB-split fragments so the title is not
                             ;; truncated to its pre-TAB piece (and the pane is not
                             ;; mis-counted).
-                            :title (string-join (nthcdr 11 f) "\t")))
+                            :title (string-join (nthcdr 12 f) "\t")))
                 panes))))
     (cons layout (nreverse panes))))
 
@@ -6828,8 +6943,11 @@ TRAILING keeps trailing blanks (`-N').  Rides the control connection via
           (when trailing " -N")
           (format " -t %s" pane)))
 
-(defun tmux-control--paint-seed (buffer text cursor cursor-visible)
+(defun tmux-control--paint-seed (buffer text cursor cursor-visible
+                                        &optional modes)
   "Paint BUFFER's terminal from screen TEXT with CURSOR / CURSOR-VISIBLE.
+MODES, when non-nil, is a `tmux-control--parse-pane-modes' plist replayed
+into Eat before the paint (see `tmux-control--mode-seed-sequence').
 Shared by the synchronous and in-band seed paths."
   (when (and (buffer-live-p buffer) text)
     (with-current-buffer buffer
@@ -6839,9 +6957,12 @@ Shared by the synchronous and in-band seed paths."
         ;; Clear the scrollback (\e[3J) before painting, not just the screen,
         ;; so a reseed (e.g. after a resize) does not leave the previous,
         ;; now-reflowed frame stacked above the fresh one -- an app on a tmux
-        ;; with `alternate-screen off' repaints by appending.
+        ;; with `alternate-screen off' repaints by appending.  The mode
+        ;; replay comes first of all: entering the alternate display clears
+        ;; it, and the paint that follows fills it in.
         (tmux-control--write-terminal
-         (concat "\e[3J"
+         (concat (tmux-control--mode-seed-sequence modes)
+                 "\e[3J"
                  (tmux-control--screen-seed-sequence
                   text cursor cursor-visible)))))))
 
@@ -6859,8 +6980,10 @@ the (re)tile build uses `tmux-control--seed-pane-buffer-async' instead."
                (cursor-visible (or (plist-get tmux-control--pane-info
                                               :cursor-visible)
                                   :unknown))
+               (modes (plist-get tmux-control--pane-info :modes))
                (text (ignore-errors (tmux-control--capture-pane-screen pane))))
-          (tmux-control--paint-seed buffer text cursor cursor-visible))))))
+          (tmux-control--paint-seed buffer text cursor cursor-visible
+                                    modes))))))
 
 (defun tmux-control--seed-pane-buffer-async (buffer controller)
   "Capture BUFFER's pane screen in-band and paint it when the reply lands.
@@ -6877,7 +7000,8 @@ safe no-op."
            (pane (buffer-local-value 'tmux-control--active-pane buffer))
            (trailing (buffer-local-value 'tmux-control--capture-trailing-p buffer))
            (cursor (plist-get info :cursor))
-           (cursor-visible (or (plist-get info :cursor-visible) :unknown)))
+           (cursor-visible (or (plist-get info :cursor-visible) :unknown))
+           (modes (plist-get info :modes)))
       (when pane
         (with-current-buffer controller
           (tmux-control--query
@@ -6886,7 +7010,7 @@ safe no-op."
              (when (buffer-live-p buffer)
                (tmux-control--paint-seed
                 buffer (and reply (string-join reply "\n"))
-                cursor cursor-visible)
+                cursor cursor-visible modes)
                (let ((term (buffer-local-value 'tmux-control--terminal buffer))
                      (win (get-buffer-window buffer t)))
                  (when (and term (eat-term-live-p term) (window-live-p win))

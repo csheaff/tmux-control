@@ -1029,6 +1029,69 @@ each wrapped in an evolving prompt line and a status bar.")
   (should (eq :unknown (tmux-control--parse-cursor-visible '("13,48,2"))))
   (should (eq :unknown (tmux-control--parse-cursor-visible nil))))
 
+(ert-deftest tmux-control-test-parse-pane-modes ()
+  ;; A well-formed seven-flag field (alt, mouse std/btn/all, SGR, cursor
+  ;; keys, wrap) parses to a plist of :on / :off.  This is copilot's shape:
+  ;; alternate screen plus any-event SGR mouse.
+  (let ((modes (tmux-control--parse-pane-modes '("1,0,0,1,1,0,1"))))
+    (should (eq (plist-get modes :alt-screen) :on))
+    (should (eq (plist-get modes :mouse-standard) :off))
+    (should (eq (plist-get modes :mouse-button) :off))
+    (should (eq (plist-get modes :mouse-all) :on))
+    (should (eq (plist-get modes :mouse-sgr) :on))
+    (should (eq (plist-get modes :cursor-keys) :off))
+    (should (eq (plist-get modes :wrap) :on)))
+  ;; An empty flag -- an older tmux renders an unknown format variable as
+  ;; empty -- parses to nil (unknown), NOT :off: the replay must leave a
+  ;; mode it does not know alone rather than actively reset it.
+  (let ((modes (tmux-control--parse-pane-modes '("1,0,0,1,1,0,"))))
+    (should (eq (plist-get modes :alt-screen) :on))
+    (should (null (plist-get modes :wrap))))
+  ;; Reverse-order/padded reply lists and whitespace are tolerated.
+  (should (eq :on (plist-get (tmux-control--parse-pane-modes
+                              '("" "  0,0,0,0,0,0,1 " ""))
+                             :wrap)))
+  ;; Malformed or empty replies yield nil rather than a bogus mode set.
+  (should-not (tmux-control--parse-pane-modes '("1,0,0,1,1,0"))) ; six flags
+  (should-not (tmux-control--parse-pane-modes '("1,0,0,1,1,0,1,0"))) ; eight
+  (should-not (tmux-control--parse-pane-modes '("can't find pane")))
+  (should-not (tmux-control--parse-pane-modes '("")))
+  (should-not (tmux-control--parse-pane-modes nil)))
+
+(ert-deftest tmux-control-test-mode-seed-sequence ()
+  ;; A full-screen mouse TUI (copilot, lazygit): enter the alternate
+  ;; display, enable any-event mouse tracking with the SGR encoding.  The
+  ;; alt-display switch comes FIRST so the screen paint that follows fills
+  ;; the freshly cleared display.
+  (should (equal (tmux-control--mode-seed-sequence
+                  (tmux-control--parse-pane-modes '("1,0,0,1,1,0,1")))
+                 "\e[?1049h\e[?1003h\e[?1006h\e[?1l\e[?7h"))
+  ;; A plain shell pane: every mode known off resets each one, so a seed
+  ;; after the TUI exited (while Eat was not watching) drops the stale
+  ;; alternate-display and mouse state.  One mouse reset covers all three
+  ;; protocols in Eat.
+  (should (equal (tmux-control--mode-seed-sequence
+                  (tmux-control--parse-pane-modes '("0,0,0,0,0,0,1")))
+                 "\e[?1049l\e[?1000l\e[?1006l\e[?1l\e[?7h"))
+  ;; tmux keeps at most one mouse protocol; the one reported is replayed.
+  (should (string-match-p "\\?1002h" (tmux-control--mode-seed-sequence
+                                      (tmux-control--parse-pane-modes
+                                       '("0,0,1,0,0,0,1")))))
+  (should (string-match-p "\\?1000h" (tmux-control--mode-seed-sequence
+                                      (tmux-control--parse-pane-modes
+                                       '("0,1,0,0,0,0,1")))))
+  ;; Unknown flags (empty fields) emit nothing for that mode: no set, no
+  ;; reset.  All-unknown emits the empty string; unknown modes are nil.
+  (should (equal (tmux-control--mode-seed-sequence
+                  (tmux-control--parse-pane-modes '(",,,,,,")))
+                 ""))
+  ;; A partially-unknown mouse trio must not reset the mouse.
+  (should-not (string-match-p "1000l" (tmux-control--mode-seed-sequence
+                                       (tmux-control--parse-pane-modes
+                                        '("0,0,,0,0,0,1")))))
+  ;; No modes at all (query failed): nil, so the seed paints contents only.
+  (should-not (tmux-control--mode-seed-sequence nil)))
+
 (ert-deftest tmux-control-test-capture-n-supported-p ()
   ;; capture-pane -N landed in tmux 3.1.
   (should (tmux-control--capture-n-supported-p "3.1"))
@@ -1324,15 +1387,15 @@ each wrapped in an evolving prompt line and a status bar.")
 
 (ert-deftest tmux-control-test-parse-window-state ()
   ;; The in-band `list-panes' reply (tab-separated: layout, then each pane's
-  ;; geometry / cursor / cmd / title) parses to (LAYOUT . PANES) -- the layout
-  ;; from the first line, the panes in order with their plists.
+  ;; geometry / cursor / cmd / modes / title) parses to (LAYOUT . PANES) --
+  ;; the layout from the first line, the panes in order with their plists.
   (let* ((lines (list (mapconcat #'identity
                                  '("LAY" "%0" "0" "0" "40" "24" "1"
-                                   "5" "3" "1" "bash" "tty")
+                                   "5" "3" "1" "bash" "0,0,0,0,0,0,1" "tty")
                                  "\t")
                       (mapconcat #'identity
                                  '("LAY" "%1" "41" "0" "39" "24" "0"
-                                   "0" "0" "0" "vim" "edit")
+                                   "0" "0" "0" "vim" "1,0,0,1,1,1,0" "edit")
                                  "\t")))
          (state (tmux-control--parse-window-state lines))
          (panes (cdr state)))
@@ -1344,22 +1407,26 @@ each wrapped in an evolving prompt line and a status bar.")
       (should (eq (plist-get p0 :active) t))
       (should (equal (plist-get p0 :cursor) '(5 . 3)))
       (should (equal (plist-get p0 :cmd) "bash"))
+      (should (eq (plist-get (plist-get p0 :modes) :alt-screen) :off))
       (should (equal (plist-get p0 :title) "tty")))
     (let ((p1 (cdr (assoc "%1" panes))))
       (should (eq (plist-get p1 :active) nil))
-      (should (equal (plist-get p1 :cmd) "vim")))
+      (should (equal (plist-get p1 :cmd) "vim"))
+      (should (eq (plist-get (plist-get p1 :modes) :alt-screen) :on))
+      (should (eq (plist-get (plist-get p1 :modes) :mouse-all) :on)))
     ;; A short/garbled line is skipped, not parsed into a bogus pane.
     (should (null (cdr (tmux-control--parse-window-state '("LAY\t%0\t0"))))))
   ;; Empty trailing fields (an unset pane title, sometimes an empty command)
   ;; must NOT drop the pane or shift columns: `split-string' with an explicit
-  ;; separator keeps empty fields, so the line is still 12 fields.
-  (let* ((line (concat "LAY\t%7\t0\t0\t80\t24\t1\t0\t0\t1\t\t")) ; empty cmd + title
+  ;; separator keeps empty fields, so the line is still 13 fields.
+  (let* ((line (concat "LAY\t%7\t0\t0\t80\t24\t1\t0\t0\t1\t\t\t")) ; empty cmd + modes + title
          (panes (cdr (tmux-control--parse-window-state (list line))))
          (p (cdr (assoc "%7" panes))))
     (should (= (length panes) 1))
     (should p)
     (should (= (plist-get p :width) 80))     ; columns did not shift
     (should (equal (plist-get p :cmd) ""))
+    (should (null (plist-get p :modes)))     ; malformed modes parse to nil
     (should (equal (plist-get p :title) ""))))
 
 (ert-deftest tmux-control-test-parse-window-state-validates-pane-id ()
@@ -1369,7 +1436,7 @@ each wrapped in an evolving prompt line and a status bar.")
   (let* ((fields (lambda (id)
                    (mapconcat #'identity
                               (list "LAY" id "0" "0" "80" "24" "1" "0" "0" "1"
-                                    "bash" "title")
+                                    "bash" "0,0,0,0,0,0,1" "title")
                               "\t")))
          (panes (cdr (tmux-control--parse-window-state
                       (list (funcall fields "%2")
@@ -1388,7 +1455,7 @@ each wrapped in an evolving prompt line and a status bar.")
   ;; pre-TAB fragment, and the pane must not be dropped or mis-counted.
   (let* ((line (mapconcat #'identity
                           '("LAY" "%0" "0" "0" "80" "24" "1"
-                            "5" "6" "1" "bash" "a\tb\tc")
+                            "5" "6" "1" "bash" "0,0,0,0,0,0,1" "a\tb\tc")
                           "\t"))
          (panes (cdr (tmux-control--parse-window-state (list line))))
          (p (cdr (assoc "%0" panes))))
@@ -3976,7 +4043,7 @@ output), :calls (side-effect invocations in order), :active-pane,
         (setq-local tmux-control--active-pane "%3")
         (tmux-control--seed-screen)
         (should (equal (mapcar #'car (nreverse sent))
-                       '(:cursor-pos :capture)))
+                       '(:cursor-pos :pane-modes :capture)))
         (should (equal verified (list (current-buffer))))))))
 
 (ert-deftest tmux-control-test-rtrim-screen-lines ()
