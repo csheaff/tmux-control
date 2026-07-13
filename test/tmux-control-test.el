@@ -1236,10 +1236,11 @@ each wrapped in an evolving prompt line and a status bar.")
 
 (ert-deftest tmux-control-test-split-pane-command ()
   ;; Split rides the control connection (`split-window -h'/`-v' at the active
-  ;; pane).  From the single-pane controller view it auto-tiles so both panes
-  ;; show; NOT from a render buffer (which must untile, not tile), NOT when
-  ;; already tiled (the %layout-change re-tiles), and NOT when the option is
-  ;; off.  `kill-pane' targets the active pane after confirmation.
+  ;; pane).  From ANY single-pane view -- the connect buffer or a per-window
+  ;; render buffer (issue #114: the latter used to be mistaken for a tiled
+  ;; pane and skipped) -- it auto-tiles so both panes show; NOT when already
+  ;; tiled (the %layout-change re-tiles), and NOT when the option is off.
+  ;; `kill-pane' targets the active pane after confirmation.
   (let ((cmds '()) (tiles 0) (tiled-p nil))
     (cl-letf (((symbol-function 'tmux-control--ensure-live) #'ignore)
               ((symbol-function 'tmux-control--send-command)
@@ -1264,12 +1265,13 @@ each wrapped in an evolving prompt line and a status bar.")
           (tmux-control-split-pane-right)
           (should (equal cmds '("split-window -h -t %3")))
           (should (= tiles 0)))
-        ;; render buffer (controller set) -> split only
+        ;; per-window render buffer (controller set, not tiled) -> split +
+        ;; auto-tile, same as the connect buffer (issue #114)
         (setq cmds nil tiles 0 tmux-control--controller (current-buffer))
         (let ((tmux-control-split-pane-tiles t))
           (tmux-control-split-pane-right)
-          (should (= tiles 0)))
-        ;; already tiled -> no auto-tile
+          (should (= tiles 1)))
+        ;; already tiled (controller or a tiled pane buffer) -> no auto-tile
         (setq cmds nil tiles 0 tmux-control--controller nil tiled-p (current-buffer))
         (let ((tmux-control-split-pane-tiles t))
           (tmux-control-split-pane-right)
@@ -2242,19 +2244,115 @@ each wrapped in an evolving prompt line and a status bar.")
               ((symbol-function 'tmux-control--run-tmux)
                (lambda (_args) (setq ran-tmux t) ""))
               ((symbol-function 'tmux-control--query)
-               (lambda (cmd cb) (push cmd queries) (funcall cb '("%7"))))
+               (lambda (cmd cb) (push cmd queries) (funcall cb '("@1 %7"))))
               ((symbol-function 'tmux-control--seed-screen)
                (lambda () (cl-incf seeded))))
       (with-temp-buffer
         (setq-local tmux-control--tiled t
                     tmux-control--controller nil
                     tmux-control--active-pane "%0"
-                    tmux-control-window-tab-bar nil)
+                    tmux-control-window-tab-bar nil
+                    tmux-control-window-buffers nil)
         (tmux-control-untile)
         (should-not ran-tmux)                ; no blocking out-of-band ssh
         (should (cl-some (lambda (q) (string-match-p "pane_id" q)) queries))
         (should (equal tmux-control--active-pane "%7")) ; reply applied
         (should (= seeded 1))))))            ; seeded in the callback
+
+(ert-deftest tmux-control-test-untile-window-buffers-hands-off-view ()
+  ;; With per-window render buffers, untiling while the session's current
+  ;; window is NOT the controller's own must hand the view to that window's
+  ;; render buffer (reseeding it -- window buffers do not stream while tiled)
+  ;; and reseed the controller onto its OWN window in the background, rather
+  ;; than seed the controller onto the foreign window's pane, which stranded
+  ;; its %output routing (issue #114 follow-through).
+  (let ((wbuf (generate-new-buffer " tc-test-wbuf"))
+        (displayed '()) (window-seeds '()) (screen-seeds 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'tmux-control--teardown-tiling) #'ignore)
+                  ((symbol-function 'tmux-control--write-terminal) #'ignore)
+                  ((symbol-function 'tmux-control--resize-to-window) #'ignore)
+                  ((symbol-function 'tmux-control--query)
+                   (lambda (_cmd cb) (funcall cb '("@2 %7"))))
+                  ((symbol-function 'tmux-control--window-buffer)
+                   (lambda (id) (when (equal id "@2") wbuf)))
+                  ((symbol-function 'tmux-control--display-window-buffer)
+                   (lambda (id) (push id displayed) wbuf))
+                  ((symbol-function 'tmux-control--seed-window-buffer)
+                   (lambda (buf id) (push (cons buf id) window-seeds)))
+                  ((symbol-function 'tmux-control--seed-screen)
+                   (lambda () (cl-incf screen-seeds)))
+                  ((symbol-function 'tmux-control--quiet-activity) #'ignore)
+                  ((symbol-function 'tmux-control--refresh-windows) #'ignore)
+                  ((symbol-function 'tmux-control--refresh-pane-window-map)
+                   #'ignore))
+          (with-temp-buffer
+            (let ((ctrl (current-buffer)))
+              (setq-local tmux-control--tiled t
+                          tmux-control--controller nil
+                          tmux-control--window-id "@0"
+                          tmux-control--active-pane "%0"
+                          tmux-control-window-buffers t)
+              (tmux-control-untile)
+              (should (equal displayed '("@2")))         ; view handed to @2
+              ;; the stale @2 render buffer and the controller's own window
+              ;; were both reseeded; the controller was NOT seeded onto %7
+              (should (member (cons wbuf "@2") window-seeds))
+              (should (member (cons ctrl "@0") window-seeds))
+              (should (= screen-seeds 0))
+              (should (equal tmux-control--active-pane "%0")))))
+      (kill-buffer wbuf))))
+
+(ert-deftest tmux-control-test-tile-routes-to-controller ()
+  ;; `tmux-control-tile' invoked in a per-window render buffer (which has
+  ;; `tmux-control--controller' set but is NOT a tiled pane) must run the
+  ;; build on the process-owning controller, not error out (issue #114).
+  (let ((ctrl (generate-new-buffer " tc-test-ctrl"))
+        (built '()) (cmds '()))
+    (unwind-protect
+        (cl-letf (((symbol-function 'tmux-control--ensure-live) #'ignore)
+                  ((symbol-function 'tmux-control--tiled-region-size)
+                   (lambda (_frame _ctrl) '(80 . 24)))
+                  ((symbol-function 'tmux-control--send-command)
+                   (lambda (c &optional _k) (push c cmds)))
+                  ((symbol-function 'tmux-control--build-tiling)
+                   (lambda (b) (push b built))))
+          (with-temp-buffer
+            (setq-local tmux-control--controller ctrl)
+            (tmux-control-tile))
+          (should (equal built (list ctrl)))
+          (should (equal cmds '("refresh-client -C 80x24")))
+          (should (equal (buffer-local-value 'tmux-control--tiled-client-size
+                                             ctrl)
+                         '(80 . 24)))
+          ;; From a live tiled pane buffer it still refuses.
+          (with-current-buffer ctrl (setq-local tmux-control--tiled t))
+          (with-temp-buffer
+            (setq-local tmux-control--controller ctrl)
+            (should-error (tmux-control-tile) :type 'user-error)))
+      (kill-buffer ctrl))))
+
+(ert-deftest tmux-control-test-toggle-tiling-from-window-buffer ()
+  ;; C-c C-t in a per-window render buffer of an untiled session must TILE --
+  ;; it used to read the buffer's `tmux-control--controller' flag as "this is
+  ;; a tiled pane" and try to untile, erroring "Not tiling" (issue #114).  In
+  ;; a buffer that really is part of a live tiling it still untiles.
+  (let ((ctrl (generate-new-buffer " tc-test-ctrl"))
+        (tiled 0) (untiled 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'tmux-control-tile)
+                   (lambda () (cl-incf tiled)))
+                  ((symbol-function 'tmux-control-untile)
+                   (lambda () (cl-incf untiled))))
+          (with-temp-buffer
+            (setq-local tmux-control--controller ctrl)
+            (tmux-control-toggle-tiling)
+            (should (= tiled 1))
+            (should (= untiled 0))
+            (with-current-buffer ctrl (setq-local tmux-control--tiled t))
+            (tmux-control-toggle-tiling)
+            (should (= untiled 1))))
+      (kill-buffer ctrl))))
 
 ;;; Tiling preserves a foreign (non-tmux) window sharing the frame.
 
