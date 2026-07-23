@@ -2483,6 +2483,34 @@ buffer's own directory with a prefix arg or when the option is off."
           (tmux-control--call-in-pane-directory 'tmux-control-test--record-dir nil)
           (should (equal seen "/local/")))))))             ; option off -> local
 
+(ert-deftest tmux-control-test-m-x-find-file-is-pane-aware ()
+  "An explicit `M-x find-file' reads its argument at the pane directory.
+This covers M-x, which does not honor command remapping; a prefix argument
+still requests the tmux-control buffer's local directory."
+  (let ((default-directory "/local/")
+        (this-command 'find-file)
+        (tmux-control-pane-aware-find-file t)
+        (tmux-control-pane-aware-m-x-find-file t)
+        seen)
+    (cl-letf (((symbol-function 'derived-mode-p) (lambda (&rest _) t))
+              ((symbol-function 'tmux-control--pane-directory)
+               (lambda () "/rpc:dev:/proj/")))
+      (let ((current-prefix-arg nil))
+        (tmux-control--find-file-read-args-around
+         (lambda (&rest _) (setq seen default-directory))))
+      (should (equal seen "/rpc:dev:/proj/"))
+      (let ((current-prefix-arg '(4)))
+        (tmux-control--find-file-read-args-around
+         (lambda (&rest _) (setq seen default-directory))))
+      (should (equal seen "/local/"))
+      ;; The M-x behavior is separately opt-in even when pane-aware file keys
+      ;; remain enabled.
+      (let ((current-prefix-arg nil)
+            (tmux-control-pane-aware-m-x-find-file nil))
+        (tmux-control--find-file-read-args-around
+         (lambda (&rest _) (setq seen default-directory))))
+      (should (equal seen "/local/")))))
+
 ;;; In-band command replies: id-matched block termination, closure queries.
 
 (defmacro tmux-control-test--with-reply-buffer (&rest body)

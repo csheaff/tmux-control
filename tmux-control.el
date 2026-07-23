@@ -379,6 +379,17 @@ Set this nil to make those commands open at the buffer's own (local)
 directory instead, like ordinary `find-file'."
   :type 'boolean)
 
+(defcustom tmux-control-pane-aware-m-x-find-file nil
+  "Non-nil makes an explicit `M-x find-file' start at the pane's directory.
+
+The ordinary file key is already pane-aware when
+`tmux-control-pane-aware-find-file' is non-nil.  This separate option extends
+that behavior to a command named explicitly through M-x, which Emacs does not
+route through key remapping.  It is opt-in because implementing that behavior
+requires narrowly advising the built-in `find-file' argument reader.  A prefix
+argument still starts at the tmux-control buffer's own local directory."
+  :type 'boolean)
+
 (defcustom tmux-control-window-preview t
   "How `tmux-control-select-window' previews windows as you choose.
 
@@ -2692,6 +2703,27 @@ this buffer's own (local) directory instead.  Bound to the `find-file' key
 `tmux-control-pane-aware-find-file'."
   (interactive "P")
   (tmux-control--call-in-pane-directory #'find-file arg))
+
+(defun tmux-control--find-file-read-args-around (orig-fun &rest args)
+  "Root an explicit `M-x find-file' prompt at the live pane's directory.
+Key remapping handles keys bound to `find-file', but Emacs intentionally does
+not apply command remapping when a command is named explicitly through M-x.
+The interactive arguments are read before advice on `find-file' itself runs,
+so adjust `default-directory' around its argument reader instead."
+  (let ((default-directory
+         (or (and (eq this-command 'find-file)
+                  (derived-mode-p 'tmux-control-mode)
+                  tmux-control-pane-aware-find-file
+                  tmux-control-pane-aware-m-x-find-file
+                  (not current-prefix-arg)
+                  (tmux-control--pane-directory))
+             default-directory)))
+    (apply orig-fun args)))
+
+;; A remap in `tmux-control-mode-map' covers C-x C-f and other keys.  This
+;; narrow advice covers the one route remapping cannot: `M-x find-file'.
+(advice-add #'find-file-read-args :around
+            #'tmux-control--find-file-read-args-around)
 
 (defun tmux-control-find-file-other-window (&optional arg)
   "Like `tmux-control-find-file', but show the file in another window.

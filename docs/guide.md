@@ -383,8 +383,8 @@ for a remote session, lives on another host. So **`find-file` and `dired`
 default to that pane's directory, on the pane's host**: from a buffer
 mirroring a pane on `dev` sitting in `~/proj`, `C-x C-f` opens at
 `/ssh:dev:~/proj/` and you type just the filename, instead of spelling out the
-full TRAMP path. `C-x 4 f` does the same in another window (keeping the live
-pane in view), and `C-x d` opens Dired there.
+full TRAMP path. `C-x 4 f` opens in another window (keeping the live pane in
+view), and `C-x d` opens Dired there.
 
 The remote path is built with **your configured TRAMP method** for that host
 (`tramp-default-method`, or a per-host entry in `tramp-default-method-alist`) —
@@ -395,6 +395,10 @@ hardcoded `/ssh:…`.
 
 - A prefix argument (`C-u C-x C-f`) opens at this buffer's own **local**
   directory instead, for the occasional local file.
+- Emacs does not apply key remapping when a command is named explicitly, so
+  `M-x find-file` keeps its standard local behavior by default.  To make it
+  pane-aware too, set `tmux-control-pane-aware-m-x-find-file` to non-nil; a
+  prefix argument remains the local escape hatch.
 - Only the file-finding commands are pane-aware. The buffer's
   `default-directory` itself stays local and there is no directory tracking, so
   `M-x compile`, `M-x grep`, and similar still run on the machine running
