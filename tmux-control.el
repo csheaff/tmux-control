@@ -2722,6 +2722,9 @@ so adjust `default-directory' around its argument reader instead."
 
 ;; A remap in `tmux-control-mode-map' covers C-x C-f and other keys.  This
 ;; narrow advice covers the one route remapping cannot: `M-x find-file'.
+;; Remove first so reloading the package cannot leave stale advice stacked.
+(advice-remove #'find-file-read-args
+               #'tmux-control--find-file-read-args-around)
 (advice-add #'find-file-read-args :around
             #'tmux-control--find-file-read-args-around)
 
