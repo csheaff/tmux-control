@@ -1020,6 +1020,21 @@ and above the bottom the handler re-dispatches wheel-down there too.")
   (tmux-control--disable-line-numbers)
   (tmux-control--disable-margins))
 
+(defun tmux-control--guard-scrollback-mode-command (orig-fun &rest args)
+  "Prevent replacing a live tmux-control buffer with pager mode.
+`tmux-control-scrollback-mode' is an internal major-mode initializer.  Calling
+it in a live buffer runs `kill-all-local-variables', discarding the connection
+state.  The public `tmux-control-scrollback' command creates a separate buffer
+before initializing the mode there."
+  (if (derived-mode-p 'tmux-control-mode)
+      (user-error "Use M-x tmux-control-scrollback to open the pager")
+    (apply orig-fun args)))
+
+(advice-remove #'tmux-control-scrollback-mode
+               #'tmux-control--guard-scrollback-mode-command)
+(advice-add #'tmux-control-scrollback-mode :around
+            #'tmux-control--guard-scrollback-mode-command)
+
 (defun tmux-control--list-sessions (host socket-name)
   "Return existing tmux session names on HOST using SOCKET-NAME.
 
