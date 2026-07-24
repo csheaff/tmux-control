@@ -2574,6 +2574,28 @@ buffer's own directory with a prefix arg or when the option is off."
             (should (equal default-directory "/fresh/"))
             (should-not tmux-control--pane-directory-sync-pending)))))))
 
+(ert-deftest tmux-control-test-pane-directory-display-refresh-only-on-arrival ()
+  "Unrelated frame window changes must not schedule directory queries."
+  (with-temp-buffer
+    (let ((target (current-buffer))
+          (old-buffer nil)
+          (calls 0))
+      (cl-letf (((symbol-function 'window-buffer) (lambda (_) target))
+                ((symbol-function 'window-old-buffer) (lambda (_) old-buffer))
+                ((symbol-function 'tmux-control--schedule-pane-directory-sync)
+                 (lambda (&rest _) (cl-incf calls))))
+        ;; The hook fires although this window kept showing TARGET.
+        (setq old-buffer target)
+        (tmux-control--pane-directory-buffer-displayed 'fake-window)
+        (should (zerop calls))
+        ;; A different old buffer means TARGET has just arrived.
+        (setq old-buffer (generate-new-buffer " *tc-old*"))
+        (unwind-protect
+            (progn
+              (tmux-control--pane-directory-buffer-displayed 'fake-window)
+              (should (= calls 1)))
+          (kill-buffer old-buffer))))))
+
 (ert-deftest tmux-control-test-pane-directory-mode-keeps-prefix-local ()
   "The pane-aware find-file prefix remains a local escape hatch."
   (let ((seen nil))

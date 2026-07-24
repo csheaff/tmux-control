@@ -2782,9 +2782,13 @@ With IMMEDIATE non-nil, request it now instead."
   (cl-incf tmux-control--pane-directory-sync-generation))
 
 (defun tmux-control--pane-directory-buffer-displayed (window)
-  "Refresh pane directory when WINDOW starts showing this render buffer."
-  (when (eq (window-buffer window) (current-buffer))
-    (tmux-control--schedule-pane-directory-sync t)))
+  "Refresh when WINDOW newly starts showing this render buffer."
+  (let ((buffer (window-buffer window)))
+    (when (and (eq buffer (current-buffer))
+               ;; This buffer-local hook also runs for unchanged windows when
+               ;; another window on the frame changes.  Query only on arrival.
+               (not (eq (window-old-buffer window) buffer)))
+      (tmux-control--schedule-pane-directory-sync t))))
 
 (defun tmux-control-refresh-pane-directory ()
   "Refresh `default-directory' from the active pane asynchronously."
