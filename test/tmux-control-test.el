@@ -916,6 +916,17 @@ each wrapped in an evolving prompt line and a status bar.")
     (tmux-control-scrollback-mode)
     (should-not truncate-lines)))
 
+(ert-deftest tmux-control-test-direct-scrollback-mode-command-is-guarded ()
+  "M-x scrollback-mode must not destroy a live connection buffer."
+  (with-temp-buffer
+    (tmux-control-mode)
+    (setq-local tmux-control--session "still-live")
+    (let ((this-command 'tmux-control-scrollback-mode))
+      (should-error (command-execute 'tmux-control-scrollback-mode)
+                    :type 'user-error))
+    (should (derived-mode-p 'tmux-control-mode))
+    (should (equal tmux-control--session "still-live"))))
+
 (ert-deftest tmux-control-test-coalesced-wheel-events-bound ()
   ;; A fast flick coalesces into double-/triple-wheel; those must route to
   ;; the same handlers as a single tick, not fall through to pixel-scroll.
