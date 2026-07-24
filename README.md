@@ -87,6 +87,10 @@ attaches, typing a new name creates it.
   opens a second terminal beside the current one, tiled so both show at once.
 - **Persistent & remote** — the session lives on the server and outlives Emacs;
   detach, restart, reconnect from another machine.
+- **Optional full TRAMP context** — enable `tmux-control-pane-directory-mode`
+  to keep `default-directory` synchronized with the active pane, making
+  directory-aware commands such as compile, grep, Consult, and project tools
+  naturally operate on the pane's host.
 - **Stays responsive** under a flood of output (optional flow control).
 
 ![Two tmux panes side by side in Emacs via tmux-control — a left pane showing git history and a right pane a file listing, each its own buffer with a mode-line label](docs/images/split-panes.png)

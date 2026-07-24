@@ -402,6 +402,27 @@ hardcoded `/ssh:…`.
 - To turn the pane-directory behavior off entirely (back to plain local
   `find-file`), set `tmux-control-pane-aware-find-file` to nil.
 
+### Full remote directory context
+
+For normal TRAMP behavior across all directory-aware Emacs commands, enable
+`tmux-control-pane-directory-mode` in tmux-control buffers:
+
+```elisp
+(add-hook 'tmux-control-mode-hook #'tmux-control-pane-directory-mode)
+```
+
+The mode keeps the buffer's `default-directory` synchronized with the active
+pane.  On a remote session this is a TRAMP path using your configured method,
+so `compile`, `grep`, `consult-ripgrep`, project commands, and ordinary file
+commands naturally operate on the pane's host.  Disabling the mode restores
+the buffer's prior local directory.
+
+Synchronization uses asynchronous queries over the existing control
+connection after pane changes and after a quiet moment in pane output.  tmux
+does not emit a dedicated event for `cd`, so a silent directory change that
+produces no prompt or output may not be noticed immediately; run
+`M-x tmux-control-refresh-pane-directory` to refresh it explicitly.
+
 ## Scrollback
 
 Scrollback loads **lazily**, so the view opens instantly no matter how deep

@@ -379,6 +379,13 @@ Set this nil to make those commands open at the buffer's own (local)
 directory instead, like ordinary `find-file'."
   :type 'boolean)
 
+(defcustom tmux-control-pane-directory-sync-delay 0.15
+  "Seconds of quiet output before refreshing a pane-aware directory.
+Used by `tmux-control-pane-directory-mode' to notice shell directory changes
+without polling on every keystroke.  Output bursts are debounced into one
+asynchronous query over the existing tmux control connection."
+  :type 'number)
+
 (defcustom tmux-control-window-preview t
   "How `tmux-control-select-window' previews windows as you choose.
 
@@ -523,6 +530,21 @@ per-message decoding leaves the halves as raw bytes, so the trailing
 incomplete bytes are carried here and prepended to the next chunk by
 `tmux-control--feed-terminal'.")
 (defvar-local tmux-control--active-pane nil)
+(defvar-local tmux-control-pane-directory-mode nil
+  "Non-nil when this buffer tracks its active pane's working directory.")
+(defvar-local tmux-control--pane-directory-saved nil
+  "Saved local-binding state and value of `default-directory'.")
+(defvar-local tmux-control--pane-directory-sync-timer nil
+  "Debounce timer for `tmux-control-pane-directory-mode'.")
+(defvar-local tmux-control--pane-directory-sync-pending nil
+  "Non-nil while a pane directory query is in flight.")
+(defvar-local tmux-control--pane-directory-sync-dirty nil
+  "Non-nil when another directory refresh is needed after the pending one.")
+(defvar-local tmux-control--pane-directory-sync-generation 0
+  "Generation used to reject callbacks from an earlier mode lifecycle.")
+(defvar-local tmux-control--pane-directory-reenable nil
+  "Non-nil when a fresh connection should restore pane-directory mode.")
+(put 'tmux-control--pane-directory-reenable 'permanent-local t)
 (defvar-local tmux-control--self-reseed-pending 0
   "Count of reseeds this client just initiated, awaiting their echoed events.
 Incremented by `tmux-control--refresh-active-pane' whenever tmux-control
@@ -1076,15 +1098,19 @@ session (tmux attaches if it exists, otherwise creates it)."
       (setq tmux-control--session session)
       (setq tmux-control--fallback-target (concat session ":"))
       (setq tmux-control--process
-            (make-process
-             :name name
-             :buffer buffer
-             :command command
-             :connection-type 'pipe
-             :coding 'utf-8-unix
-             :noquery t
-             :filter #'tmux-control--filter
-             :sentinel #'tmux-control--sentinel))
+            ;; `make-process' honors remote `default-directory' file handlers.
+            ;; The control transport itself must always start locally even
+            ;; when pane-directory mode made this buffer a TRAMP context.
+            (let ((default-directory temporary-file-directory))
+              (make-process
+               :name name
+               :buffer buffer
+               :command command
+               :connection-type 'pipe
+               :coding 'utf-8-unix
+               :noquery t
+               :filter #'tmux-control--filter
+               :sentinel #'tmux-control--sentinel)))
       ;; tmux runs the `new-session' command from our argv as its first
       ;; control-mode command and emits one %begin..%end reply for it before
       ;; any command we send.  Account for that startup reply so the
@@ -2644,6 +2670,164 @@ back to `tramp-default-method', then \"ssh\", if TRAMP is unavailable."
        (bound-and-true-p tramp-default-method)
        "ssh")))
 
+(defun tmux-control--directory-for-pane-path (path)
+  "Return PATH formatted for this tmux-control buffer's host.
+A local session returns an ordinary directory.  A remote session returns a
+TRAMP directory using the user's configured method.  Return nil unless PATH
+is a nonempty absolute path."
+  (when (and (stringp path)
+             (not (string-empty-p path))
+             (file-name-absolute-p path))
+    (let ((dir (file-name-as-directory path)))
+      (if (and tmux-control--host (not (string-empty-p tmux-control--host)))
+          (concat "/" (tmux-control--remote-file-method tmux-control--host)
+                  ":" tmux-control--host ":" dir)
+        dir))))
+
+(defun tmux-control--pane-directory-controller ()
+  "Return the controller buffer that owns this buffer's tmux connection."
+  (or tmux-control--controller (current-buffer)))
+
+(defun tmux-control--pane-directory-local-fallback ()
+  "Return the local directory saved before pane tracking was enabled."
+  (if (and tmux-control-pane-directory-mode
+           tmux-control--pane-directory-saved)
+      (cdr tmux-control--pane-directory-saved)
+    default-directory))
+
+(defun tmux-control--restore-pane-directory-mode-after-reset ()
+  "Restore an interactive pane-directory opt-in after a fresh connection."
+  (when tmux-control--pane-directory-reenable
+    (setq tmux-control--pane-directory-reenable nil)
+    (unless tmux-control-pane-directory-mode
+      (tmux-control-pane-directory-mode 1))))
+
+(defun tmux-control--initialize-render-buffer-mode (track-directory
+                                                     local-directory)
+  "Initialize a child render buffer without inheriting a remote directory.
+TRACK-DIRECTORY is the controller's pane-directory mode state and
+LOCAL-DIRECTORY is its saved local fallback."
+  (setq-local default-directory local-directory)
+  (tmux-control-mode)
+  ;; The global mode hook usually establishes the same state.  Mirror the
+  ;; controller explicitly as well, so an interactive opt-in/out propagates.
+  (unless (eq tmux-control-pane-directory-mode track-directory)
+    (tmux-control-pane-directory-mode (if track-directory 1 -1))))
+
+(defun tmux-control--request-pane-directory-sync ()
+  "Asynchronously synchronize `default-directory' with the active pane.
+At most one request per render buffer is in flight.  A request arriving while
+one is pending marks the buffer dirty and causes one follow-up query."
+  (when (and tmux-control-pane-directory-mode
+             tmux-control--active-pane
+             (process-live-p tmux-control--process))
+    (if tmux-control--pane-directory-sync-pending
+        (setq tmux-control--pane-directory-sync-dirty t)
+      (let ((target (current-buffer))
+            (pane tmux-control--active-pane)
+            (process tmux-control--process)
+            (controller (tmux-control--pane-directory-controller))
+            (generation (cl-incf tmux-control--pane-directory-sync-generation)))
+        (setq tmux-control--pane-directory-sync-pending t
+              tmux-control--pane-directory-sync-dirty nil)
+        (tmux-control--query
+         (format "display-message -p -t %s \"#{pane_current_path}\"" pane)
+         (lambda (lines)
+           (when (buffer-live-p target)
+             (with-current-buffer target
+               ;; A disable/re-enable can start a new request before this old
+               ;; callback arrives.  It owns no state in the new generation.
+               (when (= generation tmux-control--pane-directory-sync-generation)
+                 (let ((again tmux-control--pane-directory-sync-dirty))
+                   (setq tmux-control--pane-directory-sync-pending nil
+                         tmux-control--pane-directory-sync-dirty nil)
+                   (when (and tmux-control-pane-directory-mode
+                              (eq process tmux-control--process)
+                              (eq controller
+                                  (tmux-control--pane-directory-controller))
+                              (equal pane tmux-control--active-pane))
+                     (when-let* ((path (car lines))
+                                 (directory
+                                  (tmux-control--directory-for-pane-path path)))
+                       (setq default-directory directory)))
+                   (when (and again tmux-control-pane-directory-mode)
+                     (tmux-control--request-pane-directory-sync))))))))))))
+
+(defun tmux-control--schedule-pane-directory-sync (&optional immediate)
+  "Schedule a debounced pane directory refresh.
+With IMMEDIATE non-nil, request it now instead."
+  (when tmux-control-pane-directory-mode
+    (when (timerp tmux-control--pane-directory-sync-timer)
+      (cancel-timer tmux-control--pane-directory-sync-timer))
+    (setq tmux-control--pane-directory-sync-timer nil)
+    (if immediate
+        (tmux-control--request-pane-directory-sync)
+      (let ((buffer (current-buffer)))
+        (setq tmux-control--pane-directory-sync-timer
+              (run-at-time
+               tmux-control-pane-directory-sync-delay nil
+               (lambda ()
+                 (when (buffer-live-p buffer)
+                   (with-current-buffer buffer
+                     (setq tmux-control--pane-directory-sync-timer nil)
+                     (tmux-control--request-pane-directory-sync))))))))))
+
+(defun tmux-control--cancel-pane-directory-sync ()
+  "Cancel this buffer's timer and invalidate any in-flight callback."
+  (when (timerp tmux-control--pane-directory-sync-timer)
+    (cancel-timer tmux-control--pane-directory-sync-timer))
+  (setq tmux-control--pane-directory-sync-timer nil
+        tmux-control--pane-directory-sync-pending nil
+        tmux-control--pane-directory-sync-dirty nil)
+  (cl-incf tmux-control--pane-directory-sync-generation))
+
+(defun tmux-control--pane-directory-buffer-displayed (window)
+  "Refresh when WINDOW newly starts showing this render buffer."
+  (let ((buffer (window-buffer window)))
+    (when (and (eq buffer (current-buffer))
+               ;; This buffer-local hook also runs for unchanged windows when
+               ;; another window on the frame changes.  Query only on arrival.
+               (not (eq (window-old-buffer window) buffer)))
+      (tmux-control--schedule-pane-directory-sync t))))
+
+(defun tmux-control-refresh-pane-directory ()
+  "Refresh `default-directory' from the active pane asynchronously."
+  (interactive)
+  (unless tmux-control-pane-directory-mode
+    (user-error "tmux-control-pane-directory-mode is not enabled"))
+  (tmux-control--schedule-pane-directory-sync t))
+
+(define-minor-mode tmux-control-pane-directory-mode
+  "Keep `default-directory' synchronized with the active tmux pane.
+
+For a remote connection this makes the tmux-control buffer an ordinary TRAMP
+context, so directory-aware commands such as `compile', `grep', and Consult
+commands naturally run on the pane's host.  Synchronization is asynchronous
+and follows pane changes plus debounced pane output.  A silent directory
+change can be refreshed explicitly with `tmux-control-refresh-pane-directory'."
+  :lighter " PaneDir"
+  (if tmux-control-pane-directory-mode
+      (progn
+        (unless tmux-control--pane-directory-saved
+          (setq tmux-control--pane-directory-saved
+                (cons (local-variable-p 'default-directory)
+                      default-directory)))
+        (add-hook 'window-buffer-change-functions
+                  #'tmux-control--pane-directory-buffer-displayed nil t)
+        (add-hook 'kill-buffer-hook
+                  #'tmux-control--cancel-pane-directory-sync nil t)
+        (tmux-control--schedule-pane-directory-sync t))
+    (tmux-control--cancel-pane-directory-sync)
+    (remove-hook 'kill-buffer-hook
+                 #'tmux-control--cancel-pane-directory-sync t)
+    (remove-hook 'window-buffer-change-functions
+                 #'tmux-control--pane-directory-buffer-displayed t)
+    (when tmux-control--pane-directory-saved
+      (if (car tmux-control--pane-directory-saved)
+          (setq default-directory (cdr tmux-control--pane-directory-saved))
+        (kill-local-variable 'default-directory))
+      (setq tmux-control--pane-directory-saved nil))))
+
 (defun tmux-control--pane-directory ()
   "Return the live pane's working directory as a `default-directory' string.
 Queries tmux for the active pane's `#{pane_current_path}'.  For a remote
@@ -2662,12 +2846,7 @@ directory."
                     (tmux-control--run-tmux
                      (list "display-message" "-p" "-t" pane
                            "#{pane_current_path}"))))))
-      (when (and path (not (string-empty-p path)))
-        (let ((dir (file-name-as-directory path)))
-          (if (and tmux-control--host (not (string-empty-p tmux-control--host)))
-              (concat "/" (tmux-control--remote-file-method tmux-control--host)
-                      ":" tmux-control--host ":" dir)
-            dir))))))
+      (tmux-control--directory-for-pane-path path))))
 
 (defun tmux-control--call-in-pane-directory (command arg)
   "Call interactive COMMAND with `default-directory' at the pane's directory.
@@ -2675,10 +2854,15 @@ With ARG non-nil (a prefix argument), or when
 `tmux-control-pane-aware-find-file' is nil, call COMMAND with this buffer's
 own (local) directory instead -- like the plain command."
   (let ((default-directory
-         (or (and (not arg)
-                  tmux-control-pane-aware-find-file
-                  (tmux-control--pane-directory))
-             default-directory)))
+         (cond
+          ((and arg tmux-control-pane-directory-mode
+                tmux-control--pane-directory-saved)
+           (cdr tmux-control--pane-directory-saved))
+          ((and (not arg) tmux-control-pane-aware-find-file)
+           (if tmux-control-pane-directory-mode
+               default-directory
+             (or (tmux-control--pane-directory) default-directory)))
+          (t default-directory))))
     (call-interactively command)))
 
 (defun tmux-control-find-file (&optional arg)
@@ -3614,8 +3798,14 @@ so the tmux-control keys get out of the way; the mode line shows
     (when (timerp tmux-control--auto-reconnect-timer)
       (cancel-timer tmux-control--auto-reconnect-timer))
     (setq tmux-control--auto-reconnect-timer nil)
+    ;; Restore the buffer's original local directory before the major mode
+    ;; hook enables pane-directory tracking for the fresh connection.
+    (when (bound-and-true-p tmux-control-pane-directory-mode)
+      (setq tmux-control--pane-directory-reenable t)
+      (tmux-control-pane-directory-mode -1))
     (erase-buffer)
     (tmux-control-mode)
+    (tmux-control--restore-pane-directory-mode-after-reset)
     (tmux-control--no-line-wrap)
     (setq-local emulation-mode-map-alists
                 (cons tmux-control--emulation-mode-map-alist
@@ -4552,7 +4742,9 @@ per message."
       ;; Mark the render changed so the opt-in drift check (idle) knows this
       ;; pane is worth re-examining; an idle pane with no output stays clean.
       (setq tmux-control--render-dirty t)
-      (tmux-control--feed-terminal out))))
+      (tmux-control--feed-terminal out)
+      (when (bound-and-true-p tmux-control-pane-directory-mode)
+        (tmux-control--schedule-pane-directory-sync)))))
 
 (defun tmux-control--batch-pane-output (pane payload)
   "Queue PANE's encoded output PAYLOAD for rendering.
@@ -4710,7 +4902,9 @@ backing off to the cap."
           ;; A visited background window changed its active pane: retarget
           ;; and repaint THAT buffer; the controller's own view is untouched.
           (with-current-buffer wbuf
-            (setq tmux-control--active-pane pane))
+            (setq tmux-control--active-pane pane)
+            (when tmux-control-pane-directory-mode
+              (tmux-control--schedule-pane-directory-sync t)))
           (tmux-control--seed-window-buffer wbuf win-id))
          ((and tmux-control-window-buffers
                (not tmux-control--tiled)
@@ -4739,6 +4933,8 @@ backing off to the cap."
           ;; the event unconditionally (pre-window-buffers semantics, a
           ;; load-bearing affordance).  Follow it.
           (setq tmux-control--active-pane pane)
+          (when tmux-control-pane-directory-mode
+            (tmux-control--schedule-pane-directory-sync t))
           (unless tmux-control--tiled
             (tmux-control--seed-screen)
             (tmux-control--refresh-alt-screen-option)
@@ -4879,6 +5075,8 @@ swallowed as content and the reply queue would desynchronize."
                                output)))
          (when pane
            (setq tmux-control--active-pane pane)
+           (when tmux-control-pane-directory-mode
+             (tmux-control--schedule-pane-directory-sync t))
            (tmux-control--seed-screen)
            (tmux-control--refresh-alt-screen-option)
            (tmux-control--refresh-pane-size))))
@@ -6316,13 +6514,19 @@ it asynchronously over the control connection."
            (session tmux-control--session)
            (trailing tmux-control--capture-trailing-p)
            (fallback tmux-control--fallback-target)
+           (track-directory tmux-control-pane-directory-mode)
+           (local-directory (tmux-control--pane-directory-local-fallback))
            (size (and tmux-control--terminal
                       (eat-term-live-p tmux-control--terminal)
                       (eat-term-size tmux-control--terminal)))
            (buffer (get-buffer-create name)))
       (with-current-buffer buffer
         (let ((inhibit-read-only t)) (erase-buffer))
-        (tmux-control-mode)
+        ;; A new buffer inherits the controller's current directory, which may
+        ;; be a remote pane.  Seed the real local fallback before the mode hook
+        ;; can enable tracking, then mirror the controller's opt-in state.
+        (tmux-control--initialize-render-buffer-mode
+         track-directory local-directory)
         (tmux-control--no-line-wrap)
         (setq-local emulation-mode-map-alists
                     (cons tmux-control--emulation-mode-map-alist
@@ -6431,7 +6635,9 @@ screen, prefixed by the mode replay (see
                     and return nil)
            (when (and pane (buffer-live-p buffer))
              (with-current-buffer buffer
-               (setq tmux-control--active-pane pane))
+               (setq tmux-control--active-pane pane)
+               (when tmux-control-pane-directory-mode
+                 (tmux-control--schedule-pane-directory-sync t)))
              (with-current-buffer ctrl
                (tmux-control--query
                 (format "capture-pane -p -e%s -t %s"
@@ -6802,7 +7008,9 @@ its own and routes commands through CONTROLLER."
          (buffer (get-buffer-create name)))
     (with-current-buffer buffer
       (let ((inhibit-read-only t)) (erase-buffer))
-      (tmux-control-mode)
+      (tmux-control--initialize-render-buffer-mode
+       (plist-get meta :track-directory)
+       (plist-get meta :local-directory))
       (tmux-control--no-line-wrap)
       (setq-local emulation-mode-map-alists
                   (cons tmux-control--emulation-mode-map-alist
@@ -6825,6 +7033,8 @@ its own and routes commands through CONTROLLER."
             tmux-control--alt-screen-honored t
             tmux-control--seed-cursor nil
             tmux-control--seed-cursor-visible :unknown)
+      (when tmux-control-pane-directory-mode
+        (tmux-control--schedule-pane-directory-sync t))
       (setq tmux-control--terminal (eat-term-make buffer (point-min)))
       (setq eat-terminal tmux-control--terminal)
       (eat-term-resize tmux-control--terminal w h)
@@ -6887,7 +7097,10 @@ still seeded normally."
                            :session tmux-control--session
                            :trailing tmux-control--capture-trailing-p
                            :process tmux-control--process
-                           :fallback tmux-control--fallback-target)))
+                           :fallback tmux-control--fallback-target
+                           :track-directory tmux-control-pane-directory-mode
+                           :local-directory
+                           (tmux-control--pane-directory-local-fallback))))
           (dolist (leaf leaves)
             (let ((pane (concat "%" (plist-get leaf :id))))
               (unless (assoc pane tmux-control--panes)
@@ -6933,7 +7146,9 @@ so there is no reseed or flicker."
                                     'tmux-control--active-pane
                                     tmux-control--controller))))
               (tmux-control--send-command
-               (format "select-pane -t %s" tmux-control--active-pane)))))))))
+               (format "select-pane -t %s" tmux-control--active-pane)))
+            (when tmux-control-pane-directory-mode
+              (tmux-control--schedule-pane-directory-sync t))))))))
 
 (defun tmux-control--pane-screen-command (pane &optional trailing)
   "Return the in-band `capture-pane' command for PANE's visible screen.
@@ -7311,7 +7526,11 @@ once the in-band window-state reply has been parsed."
                                :session tmux-control--session
                                :trailing tmux-control--capture-trailing-p
                                :process tmux-control--process
-                               :fallback tmux-control--fallback-target))
+                               :fallback tmux-control--fallback-target
+                               :track-directory
+                               tmux-control-pane-directory-mode
+                               :local-directory
+                               (tmux-control--pane-directory-local-fallback)))
                    (focus-pane (tmux-control--selected-pane-id old-panes))
                    (new-panes '())
                    ;; Only newly created or resized panes need a (synchronous,
