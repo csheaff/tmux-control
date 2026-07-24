@@ -542,6 +542,39 @@ buffer while another window is current."
 
 ;;; Tab-bar activity: background output flags a window; visiting it clears it.
 
+(ert-deftest tmux-control-it-new-window-buffer-seeds-after-connect ()
+  "A window created through tmux-control replaces its loading placeholder.
+Covers issue #116: pre-existing-window tests do not exercise the notification
+and asynchronous seed chain used by `tmux-control-new-window'."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-n" "w0" "-x" "80" "-y" "24")
+  (let* ((tmux-control-window-buffers t)
+         (buf (tmux-control-connect nil tmux-control-it--socket "t")))
+    (unwind-protect
+        (progn
+          (tmux-control-it--pump 1.0)
+          (with-current-buffer buf
+            (tmux-control-new-window "created"))
+          (should
+           (tmux-control-it--pump-until
+            6 (lambda ()
+                (with-current-buffer buf
+                  (when-let* ((entry (cl-find-if
+                                      (lambda (e) (not (eq (cdr e) buf)))
+                                      tmux-control--window-buffers))
+                              (window-buffer (cdr entry)))
+                    (with-current-buffer window-buffer
+                      (and tmux-control--active-pane
+                           (not (string-match-p
+                                 "loading window"
+                                 (buffer-substring-no-properties
+                                  (point-min) (point-max))))))))))))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf (ignore-errors (tmux-control-disconnect)))
+        (kill-buffer buf))
+      (tmux-control-it--tmux-ok "kill-server"))))
+
 (ert-deftest tmux-control-it-window-activity ()
   "Output produced in a background window flags it in the tab bar's activity
 set, the current window is never flagged, and switching to a flagged window

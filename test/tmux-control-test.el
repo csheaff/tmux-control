@@ -2990,6 +2990,48 @@ output), :calls (side-effect invocations in order), :active-pane,
       (should-not (tmux-control--window-buffer "@7"))
       (should-not (assoc "@7" tmux-control--window-buffers)))))
 
+(ert-deftest tmux-control-test-window-seed-queries-active-pane-directly ()
+  "Window seeding targets its active pane without a strict list-panes filter."
+  (let ((ctrl (generate-new-buffer " *tc-seed-ctrl*"))
+        (buf (generate-new-buffer " *tc-seed-window*"))
+        (display-attempts 0)
+        commands written)
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (setq-local tmux-control--controller ctrl
+                        tmux-control--capture-trailing-p nil))
+          (cl-letf (((symbol-function 'tmux-control--query)
+                     (lambda (command callback)
+                       (push command commands)
+                       (if (string-prefix-p "display-message" command)
+                           (progn
+                             (cl-incf display-attempts)
+                             ;; A transient empty reply must retry instead of
+                             ;; leaving the loading placeholder forever.
+                             (funcall callback
+                                      (and (> display-attempts 1)
+                                           '("%7\t2,3,1\t0,0,0,0,0,0,1"))))
+                         (funcall callback '("seeded screen")))))
+                    ((symbol-function 'tmux-control--write-terminal)
+                     (lambda (text) (setq written text)))
+                    ((symbol-function 'tmux-control--flush-display) #'ignore)
+                    ((symbol-function 'tmux-control--current-sync-windows)
+                     (lambda () nil))
+                    ((symbol-function 'tmux-control--verify-seed) #'ignore))
+            (with-current-buffer buf
+              (tmux-control--seed-window-buffer buf "@9")))
+          (should (string-prefix-p "display-message -p -t @9"
+                                   (car (last commands))))
+          (should (= display-attempts 2))
+          (should-not (seq-some (lambda (c) (string-prefix-p "list-panes" c))
+                                commands))
+          (should (equal (buffer-local-value 'tmux-control--active-pane buf)
+                         "%7"))
+          (should (string-match-p "seeded screen" written)))
+      (kill-buffer buf)
+      (kill-buffer ctrl))))
+
 (ert-deftest tmux-control-test-update-windows-claims-controller-window ()
   ;; The first window list binds the controller buffer to its own window id
   ;; and registers it as that window's render buffer.

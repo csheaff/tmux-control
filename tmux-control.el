@@ -6603,37 +6603,44 @@ it asynchronously over the control connection."
               (cl-remove-if (lambda (e) (eq (cdr e) buf))
                             tmux-control--window-buffers))))))
 
-(defun tmux-control--seed-window-buffer (buffer window-id)
+(defun tmux-control--seed-window-buffer (buffer window-id &optional attempt)
   "Resolve WINDOW-ID's active pane and seed BUFFER from it, asynchronously.
 A closure-query chain over the control connection -- never blocking
 Emacs, and ordered by tmux itself.  Two round trips, not three: the
 active pane, its cursor, and its terminal modes come back in one
-list-panes reply (this is the first-visit latency a remote user sees as
-a blank window, so every round trip counts), then the capture paints the
+`display-message' reply (this is the first-visit latency a remote user sees
+as a blank window, so every round trip counts), then the capture paints the
 screen, prefixed by the mode replay (see
-`tmux-control--mode-seed-sequence')."
-  (let ((ctrl (tmux-control--wb-controller)))
+`tmux-control--mode-seed-sequence').  If tmux transiently returns no pane,
+retry twice rather than leaving BUFFER on its loading placeholder forever."
+  (let ((ctrl (tmux-control--wb-controller))
+        (attempt (or attempt 0)))
     (with-current-buffer ctrl
       (tmux-control--query
-       (format "list-panes -t %s -F \"#{pane_active}\t#{pane_id}\t#{cursor_x},#{cursor_y},#{cursor_flag}\t%s\""
-               window-id
-               tmux-control--pane-modes-format)
+       ;; WINDOW-ID is accepted as a target-pane and resolves to that
+       ;; window's active pane.  Query it directly rather than filtering a
+       ;; `list-panes' result for pane_active=1: a missing/transient active
+       ;; marker made the strict parser silently leave a newly-created window
+       ;; on its loading placeholder forever (issue #116).
+       (format "display-message -p -t %s \"#{pane_id}\t#{cursor_x},#{cursor_y},#{cursor_flag}\t%s\""
+               window-id tmux-control--pane-modes-format)
        (lambda (lines)
          (let (pane cur vis modes)
-           (cl-loop for l in (or lines '())
+           (cl-loop for line in (or lines '())
                     when (string-match
-                          "\\`1\t\\(%[0-9]+\\)\t\\([^\t]*\\)\t\\([^\t]*\\)\\'" l)
-                    ;; Extract every group before the parsers run: they do
-                    ;; their own `string-match', which clobbers this match
-                    ;; data.
-                    do (setq pane (match-string 1 l))
-                       (let ((cline (list (match-string 2 l)))
-                             (mline (list (match-string 3 l))))
-                         (setq cur (tmux-control--parse-cursor-pos cline)
-                               vis (tmux-control--parse-cursor-visible cline)
-                               modes (tmux-control--parse-pane-modes mline)))
+                          "\\`\\(%[0-9]+\\)\t\\([^\t]*\\)\t\\([^\t]*\\)\\'"
+                          line)
+                    do (setq pane (match-string 1 line))
+                       ;; Extract every group before the parsers run: they do
+                       ;; their own `string-match', which clobbers match data.
+                       (let ((cursor-line (list (match-string 2 line)))
+                             (mode-line (list (match-string 3 line))))
+                         (setq cur (tmux-control--parse-cursor-pos cursor-line)
+                               vis (tmux-control--parse-cursor-visible cursor-line)
+                               modes (tmux-control--parse-pane-modes mode-line)))
                     and return nil)
-           (when (and pane (buffer-live-p buffer))
+           (cond
+            ((and pane (buffer-live-p buffer))
              (with-current-buffer buffer
                (setq tmux-control--active-pane pane)
                (when tmux-control-pane-directory-mode
@@ -6645,25 +6652,32 @@ screen, prefixed by the mode replay (see
                              'tmux-control--capture-trailing-p buffer)
                             " -N" "")
                         pane)
-                (lambda (cap-lines)
-                  (when (and cap-lines (buffer-live-p buffer))
+                (lambda (capture-lines)
+                  (when (and capture-lines (buffer-live-p buffer))
                     (with-current-buffer buffer
                       (tmux-control--write-terminal
                        (concat
                         (tmux-control--mode-seed-sequence modes)
                         (tmux-control--screen-seed-sequence
-                         (string-join cap-lines "\n")
+                         (string-join capture-lines "\n")
                          cur (or vis :unknown))))
                       (tmux-control--flush-display
                        (tmux-control--current-sync-windows)))
-                    ;; Same drift detection as the controller seed: output
-                    ;; interleaved between the cursor and capture replies
-                    ;; leaves the baseline shifted; verify and re-seed.
                     (tmux-control--verify-seed
                      buffer
                      (lambda ()
                        (tmux-control--seed-window-buffer
-                        buffer window-id))))))))))))))
+                        buffer window-id))))))))
+            ((and (buffer-live-p buffer) (< attempt 2))
+             ;; Queue the retry behind this completed reply on the same
+             ;; control stream; no blocking process or timer is needed.
+             (with-current-buffer ctrl
+               (tmux-control--seed-window-buffer
+                buffer window-id (1+ attempt))))
+            ((buffer-live-p buffer)
+             (tmux-control--message
+              (format "could not resolve active pane for window %s after 3 attempts"
+                      window-id))))))))))
 
 (defun tmux-control--flush-window-buffers ()
   "Flush each sibling window render buffer's batched output and redisplay.
