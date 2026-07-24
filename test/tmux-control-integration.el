@@ -272,6 +272,31 @@ the full async pipeline (process filter -> batch -> Eat), not just the seed."
         (kill-buffer buf))
       (tmux-control-it--tmux-ok "kill-server"))))
 
+(ert-deftest tmux-control-it-pane-directory-follows-shell-cd ()
+  "Pane-directory mode updates `default-directory' after shell output."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-x" "80" "-y" "24")
+  (let ((buf (tmux-control-connect nil tmux-control-it--socket "t")))
+    (unwind-protect
+        (progn
+          (tmux-control-it--pump 1.0)
+          (with-current-buffer buf
+            (tmux-control-pane-directory-mode 1))
+          (tmux-control-it--tmux
+           "send-keys" "-t" "t" "cd /tmp; printf 'DIRECTORY_SYNCED\\n'" "Enter")
+          (should
+           (tmux-control-it--pump-until
+            6 (lambda ()
+                (with-current-buffer buf
+                  ;; macOS reports /private/tmp as the process cwd for /tmp.
+                  (equal default-directory
+                         (file-name-as-directory (file-truename "/tmp"))))))))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf (ignore-errors (tmux-control-disconnect)))
+        (kill-buffer buf))
+      (tmux-control-it--tmux-ok "kill-server"))))
+
 ;;; Per-pane isolation: each pane renders its own content, not a neighbor's.
 
 (ert-deftest tmux-control-it-two-panes-isolated ()

@@ -2483,6 +2483,110 @@ buffer's own directory with a prefix arg or when the option is off."
           (tmux-control--call-in-pane-directory 'tmux-control-test--record-dir nil)
           (should (equal seen "/local/")))))))             ; option off -> local
 
+(ert-deftest tmux-control-test-pane-directory-mode-restores-local-directory ()
+  "Disabling pane-directory mode restores the buffer's prior directory."
+  (with-temp-buffer
+    (setq-local default-directory "/local/")
+    (tmux-control-pane-directory-mode 1)
+    (setq default-directory "/rpc:dev:/project/")
+    ;; Explicitly enabling an already-enabled mode must not replace the saved
+    ;; local directory with the currently synchronized remote one.
+    (tmux-control-pane-directory-mode 1)
+    (tmux-control-pane-directory-mode -1)
+    (should (equal default-directory "/local/"))
+    (should-not tmux-control--pane-directory-saved)))
+
+(ert-deftest tmux-control-test-render-buffer-keeps-controller-local-fallback ()
+  "A child render buffer must not save the controller's remote directory."
+  (let ((tmux-control-mode-hook '(tmux-control-pane-directory-mode)))
+    (with-temp-buffer
+      ;; Simulate creation while the controller currently points through TRAMP.
+      (setq-local default-directory "/rpc:dev:/other-pane/")
+      (tmux-control--initialize-render-buffer-mode t "/local/")
+      (should tmux-control-pane-directory-mode)
+      (should (equal (cdr tmux-control--pane-directory-saved) "/local/"))
+      (tmux-control-pane-directory-mode -1)
+      (should (equal default-directory "/local/")))))
+
+(ert-deftest tmux-control-test-pane-directory-interactive-opt-in-restores ()
+  "A reconnect marker restores mode even without a global mode hook."
+  (with-temp-buffer
+    (setq-local default-directory "/local/")
+    (setq tmux-control--pane-directory-reenable t)
+    (tmux-control--restore-pane-directory-mode-after-reset)
+    (should tmux-control-pane-directory-mode)
+    (should-not tmux-control--pane-directory-reenable)
+    (tmux-control-pane-directory-mode -1)))
+
+(ert-deftest tmux-control-test-pane-directory-sync-is-async-and-pane-safe ()
+  "Directory sync uses the control query and rejects a stale pane reply."
+  (with-temp-buffer
+    (let ((tmux-control-pane-directory-mode t)
+          (tmux-control--active-pane "%1")
+          (tmux-control--process 'fake-process)
+          (tmux-control--host "dev")
+          (default-directory "/local/")
+          callbacks commands)
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'tmux-control--remote-file-method)
+                 (lambda (_) "rpc"))
+                ((symbol-function 'tmux-control--query)
+                 (lambda (command callback)
+                   (push command commands)
+                   (push callback callbacks))))
+        (tmux-control--request-pane-directory-sync)
+        (should (= (length callbacks) 1))
+        (should (string-match-p "pane_current_path" (car commands)))
+        ;; A pane switch while the first query is pending requests one
+        ;; follow-up; the old pane's reply must not change the directory.
+        (setq tmux-control--active-pane "%2")
+        (tmux-control--request-pane-directory-sync)
+        (funcall (car callbacks) '("/old"))
+        (should (equal default-directory "/local/"))
+        (should (= (length callbacks) 2))
+        (funcall (car callbacks) '("/new project"))
+        (should (equal default-directory
+                       "/rpc:dev:/new project/"))
+        (should-not tmux-control--pane-directory-sync-pending)))))
+
+(ert-deftest tmux-control-test-pane-directory-sync-rejects-old-lifecycle ()
+  "A callback from before disable/re-enable cannot clobber the new request."
+  (with-temp-buffer
+    (let ((tmux-control-pane-directory-mode t)
+          (tmux-control--active-pane "%1")
+          (tmux-control--process 'fake-process)
+          (default-directory "/local/")
+          callbacks)
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'tmux-control--query)
+                 (lambda (_ callback) (push callback callbacks))))
+        (tmux-control--request-pane-directory-sync)
+        (let ((old-callback (car callbacks)))
+          (tmux-control--cancel-pane-directory-sync)
+          ;; Simulate re-enabling and starting the replacement request.
+          (setq tmux-control-pane-directory-mode t)
+          (tmux-control--request-pane-directory-sync)
+          (let ((new-callback (car callbacks)))
+            (funcall old-callback '("/stale"))
+            (should tmux-control--pane-directory-sync-pending)
+            (should (equal default-directory "/local/"))
+            (funcall new-callback '("/fresh"))
+            (should (equal default-directory "/fresh/"))
+            (should-not tmux-control--pane-directory-sync-pending)))))))
+
+(ert-deftest tmux-control-test-pane-directory-mode-keeps-prefix-local ()
+  "The pane-aware find-file prefix remains a local escape hatch."
+  (let ((seen nil))
+    (cl-letf (((symbol-function 'tmux-control-test--record-dir)
+               (lambda () (interactive) (setq seen default-directory))))
+      (let ((default-directory "/rpc:dev:/project/")
+            (tmux-control-pane-directory-mode t)
+            (tmux-control--pane-directory-saved '(t . "/local/"))
+            (tmux-control-pane-aware-find-file t))
+        (tmux-control--call-in-pane-directory
+         'tmux-control-test--record-dir t)
+        (should (equal seen "/local/"))))))
+
 ;;; In-band command replies: id-matched block termination, closure queries.
 
 (defmacro tmux-control-test--with-reply-buffer (&rest body)
