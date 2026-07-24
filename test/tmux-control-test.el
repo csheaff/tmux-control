@@ -921,9 +921,9 @@ each wrapped in an evolving prompt line and a status bar.")
   (with-temp-buffer
     (tmux-control-mode)
     (setq-local tmux-control--session "still-live")
-    (let ((this-command 'tmux-control-scrollback-mode))
-      (should-error (command-execute 'tmux-control-scrollback-mode)
-                    :type 'user-error))
+    ;; Guard noninteractive calls too (`eval-expression', wrapper commands),
+    ;; not only M-x where `this-command' happens to name the mode function.
+    (should-error (tmux-control-scrollback-mode) :type 'user-error)
     (should (derived-mode-p 'tmux-control-mode))
     (should (equal tmux-control--session "still-live"))))
 

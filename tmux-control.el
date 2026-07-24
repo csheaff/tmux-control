@@ -1021,12 +1021,12 @@ and above the bottom the handler re-dispatches wheel-down there too.")
   (tmux-control--disable-margins))
 
 (defun tmux-control--guard-scrollback-mode-command (orig-fun &rest args)
-  "Prevent direct commands from replacing a live buffer with pager mode.
+  "Prevent replacing a live tmux-control buffer with pager mode.
 `tmux-control-scrollback-mode' is an internal major-mode initializer.  Calling
-it through M-x or a direct key binding runs `kill-all-local-variables' in the
-live tmux-control buffer, discarding its connection state before the mode body
-can reject the call.  The public entry point is `tmux-control-scrollback'."
-  (if (eq this-command 'tmux-control-scrollback-mode)
+it in a live buffer runs `kill-all-local-variables', discarding the connection
+state.  The public `tmux-control-scrollback' command creates a separate buffer
+before initializing the mode there."
+  (if (derived-mode-p 'tmux-control-mode)
       (user-error "Use M-x tmux-control-scrollback to open the pager")
     (apply orig-fun args)))
 
