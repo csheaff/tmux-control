@@ -5353,6 +5353,47 @@ wide character does not read as spurious trailing space, matching tmux's
         (tmux-control--rtrim-screen-lines
          (split-string (apply #'string (nreverse out)) "\n"))))))
 
+(defconst tmux-control--arrival-verify-interval 1.0
+  "Seconds within which a second arrival check for a buffer is redundant.
+One switch reaches the check twice over -- the window-swap call and the
+`%session-window-changed' tmux echoes back, plus the display hook when
+redisplay runs -- and they are the same arrival, so only the first pays a
+capture.")
+
+(defvar-local tmux-control--arrival-verified 0
+  "When this buffer's screen was last verified on arrival (`float-time').")
+
+(defun tmux-control--heal-on-arrival (buffer)
+  "Verify BUFFER's screen against tmux when a window arrives at it.
+A window's render buffer keeps streaming in the background, and Eat can
+accumulate a row of divergence over a long incremental stream (upstream:
+emacs-eat#263).  Nothing repaints a buffer that is merely switched to --
+that is exactly what preserves its accumulated scrollback -- so such
+drift used to survive every arrival and stay for the rest of the session.
+
+Costs one in-band `capture-pane' per arrival, and repaints only on a real
+difference.  Unlike the idle `tmux-control-auto-heal-drift' poll this is
+not optional: it answers a user action, and \"arriving at a window shows
+its live screen\" is the documented contract.  A pane truly on the
+alternate screen is skipped, as in `tmux-control--maybe-heal-drift': a
+full-screen application owns and repaints its own display.
+
+Called from BOTH arrival paths, and self-deduplicating across them (see
+`tmux-control--arrival-verify-interval'): the window-swap covers the
+switch commands immediately, while the display hook covers the routes
+that never reach it -- `switch-to-buffer', a window-configuration
+restore -- and would otherwise be the only path, one that waits on
+redisplay."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let ((now (float-time)))
+        (when (and tmux-control--active-pane
+                   (not (tmux-control--alt-screen-p))
+                   (> (- now tmux-control--arrival-verified)
+                      tmux-control--arrival-verify-interval))
+          (setq tmux-control--arrival-verified now)
+          (tmux-control--heal-if-drifted buffer))))))
+
 (defun tmux-control--heal-if-drifted (buffer)
   "Capture BUFFER's pane in-band; reseed it only if its render has drifted."
   (let ((target buffer)
@@ -5784,7 +5825,16 @@ buffers are skipped: the tiling layer anchors its own windows
                                                  tmux-control--controller)))
                    (fboundp 'eat--synchronize-scroll))
           (let ((eat-terminal tmux-control--terminal))
-            (eat--synchronize-scroll (list window))))))))
+            (eat--synchronize-scroll (list window)))
+          ;; Snapping to the live screen shows whatever the background stream
+          ;; left in this buffer -- and over a long incremental stream Eat can
+          ;; accumulate a row of divergence from the pane's true screen
+          ;; (upstream: emacs-eat#263).  Nothing repaints a buffer that is
+          ;; merely switched to, since that is exactly what preserves its
+          ;; scrollback, so the drift used to survive every arrival and stay
+          ;; for the rest of the session.  Verify here, where every arrival
+          ;; route already converges, and repaint only on a real difference.
+          (tmux-control--heal-on-arrival buffer))))))
 
 (defun tmux-control--feed-terminal (output)
   "Process decoded terminal OUTPUT into Eat without redisplaying.
@@ -6879,7 +6929,13 @@ no-ops that strand the view until something happens to resync them."
                (or swapped (not (eq prior new)))
                (get-buffer-window new t))
       (with-current-buffer new
-        (tmux-control--resize-to-window)))
+        (tmux-control--resize-to-window))
+      ;; Verify the screen the switch lands on.  The display hook does this
+      ;; too, but only once redisplay runs `window-buffer-change-functions',
+      ;; so a switch made from a command (or a batch of them) would otherwise
+      ;; show the stale screen until Emacs got around to redisplaying.  The
+      ;; check dedupes against the hook, so this is still one capture.
+      (tmux-control--heal-on-arrival new))
     ;; Record the swap unconditionally: `tmux-control--session-display-buffer'
     ;; readers (the flock switcher, connect-or-switch) find the session's
     ;; on-screen buffer through this pointer, and it must track the session's

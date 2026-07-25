@@ -3081,6 +3081,84 @@ output), :calls (side-effect invocations in order), :active-pane,
 
 ;;; Per-window render buffers.
 
+(ert-deftest tmux-control-test-arrival-verifies-live-screen ()
+  ;; A window's render buffer keeps streaming in the background, where Eat can
+  ;; accumulate a row of divergence (emacs-eat#263).  Nothing repaints a buffer
+  ;; that is merely switched to -- that is what preserves its scrollback -- so
+  ;; the drift used to survive every arrival (live-reproduced: a corrupted
+  ;; background buffer arrived still corrupted).  Every arrival route already
+  ;; converges on `tmux-control--snap-to-live-screen\', so the check lives
+  ;; there: it runs when a window ARRIVES at the buffer, and not when the
+  ;; buffer-local hook merely fires for unrelated window traffic.
+  (let (healed)
+    (cl-letf (((symbol-function 'tmux-control--heal-on-arrival)
+               (lambda (buffer) (push (buffer-name buffer) healed)))
+              ((symbol-function 'eat--synchronize-scroll) (lambda (_windows) nil)))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
+        (eat-term-resize tmux-control--terminal 20 5)
+        (save-window-excursion
+          (let ((window (selected-window)))
+            (set-window-buffer window (current-buffer))
+            ;; Arrival: the window was showing something else.
+            (cl-letf (((symbol-function 'window-old-buffer) (lambda (_w) nil)))
+              (tmux-control--snap-to-live-screen window))
+            (should (= (length healed) 1))
+            ;; Not an arrival: the hook also fires for windows whose buffer did
+            ;; not change, and those must not pay a capture.
+            (setq healed nil)
+            (cl-letf (((symbol-function 'window-old-buffer)
+                       (let ((buf (current-buffer))) (lambda (_w) buf))))
+              (tmux-control--snap-to-live-screen window))
+            (should-not healed)))
+        (eat-term-delete tmux-control--terminal)))))
+
+(ert-deftest tmux-control-test-arrival-verify-dedupes ()
+  ;; One switch reaches the check more than once -- the window swap, the
+  ;; %session-window-changed echo, and the display hook once redisplay runs --
+  ;; and they are the same arrival, so only the first pays a capture.  Both
+  ;; call sites exist because neither alone is enough: the swap misses
+  ;; `switch-to-buffer\' and window-configuration restores, and the hook waits
+  ;; on redisplay (measured: it fired once in a 40-step soak).
+  (let ((checks 0))
+    (cl-letf (((symbol-function 'tmux-control--heal-if-drifted)
+               (lambda (_buffer) (cl-incf checks)))
+              ((symbol-function 'tmux-control--alt-screen-p) (lambda () nil)))
+      (with-temp-buffer
+        (setq tmux-control--active-pane "%1")
+        (tmux-control--heal-on-arrival (current-buffer))
+        (tmux-control--heal-on-arrival (current-buffer))
+        (tmux-control--heal-on-arrival (current-buffer))
+        (should (= checks 1))
+        ;; A later, genuinely separate arrival verifies again.
+        (setq tmux-control--arrival-verified
+              (- (float-time) tmux-control--arrival-verify-interval 1))
+        (tmux-control--heal-on-arrival (current-buffer))
+        (should (= checks 2))))))
+
+(ert-deftest tmux-control-test-heal-on-arrival-skips-alt-screen ()
+  ;; A full-screen application owns its display and repaints itself; the idle
+  ;; drift check skips those panes and arrival must agree, or a repaint from
+  ;; `capture-pane' would fight the application.
+  (let (healed)
+    (cl-letf (((symbol-function 'tmux-control--heal-if-drifted)
+               (lambda (buffer) (push (buffer-name buffer) healed))))
+      (with-temp-buffer
+        (setq tmux-control--active-pane "%1")
+        (cl-letf (((symbol-function 'tmux-control--alt-screen-p) (lambda () t)))
+          (tmux-control--heal-on-arrival (current-buffer))
+          (should-not healed))
+        (cl-letf (((symbol-function 'tmux-control--alt-screen-p) (lambda () nil)))
+          (tmux-control--heal-on-arrival (current-buffer))
+          (should healed)))
+      ;; No pane resolved yet: nothing to compare against.
+      (setq healed nil)
+      (with-temp-buffer
+        (setq tmux-control--active-pane nil)
+        (tmux-control--heal-on-arrival (current-buffer))
+        (should-not healed)))))
+
 (ert-deftest tmux-control-test-window-buffer-registry ()
   ;; Register/lookup round-trips; killing a render buffer deregisters it.
   (with-temp-buffer

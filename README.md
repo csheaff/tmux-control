@@ -128,9 +128,15 @@ emulation that drops a display row when a full-screen TUI repaints, so the
 offset can accumulate over redraws; it's tracked upstream at
 [emacs-eat#263](https://codeberg.org/akib/emacs-eat/issues/263).
 
-To heal it **automatically** instead, set `tmux-control-auto-heal-drift` to
-non-nil: an idle check then compares the rendered screen to tmux's own and
-reseeds a drifted pane on its own.  It's off by default because the check costs
+**Switching to a window always heals it**: a window's buffer keeps streaming
+while you are looking at another one, so it can accumulate that drift in the
+background — arriving at it verifies the screen against tmux and repaints only
+if they differ (one `capture-pane` per switch, no repaint when it already
+matches).
+
+To heal the window you are *already looking at* **automatically**, set
+`tmux-control-auto-heal-drift` to non-nil: an idle check then compares the
+rendered screen to tmux's own and reseeds a drifted pane on its own.  It's off by default because the check costs
 one `capture-pane` round trip per burst of output (taken only when a pane is
 displayed, idle, and on the normal screen) — fine on a fast link, your call on
 a slow one; see the variable's docstring for the exact gating.
