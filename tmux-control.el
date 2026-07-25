@@ -523,6 +523,22 @@ Accumulated by `tmux-control--handle-line' and drained by
 The opt-in `tmux-control-auto-heal-drift' check skips a buffer whose render
 has not changed, so an idle pane costs no round trip; set when output is
 flushed (`tmux-control--flush-output-batch'), cleared when the check runs.")
+(defvar-local tmux-control--output-generation 0
+  "Counter of `%output' flushes into this buffer's terminal.
+A seed paints a `capture-pane' of the pane as it was when tmux RAN that
+command; output arriving after that but before the paint has already been
+rendered, and the paint -- which clears the screen first -- erases it.
+Sampling this counter across the capture makes that race detectable with
+no extra round trip.")
+(defvar-local tmux-control--seed-generation 0
+  "`tmux-control--output-generation' as of the seed's capture command.")
+(defvar-local tmux-control--seed-stale-retries 0
+  "Consecutive seed retries triggered by output racing the capture.")
+(defconst tmux-control--seed-stale-max-retries 2
+  "How many times a capture that raced live output is re-taken.
+Bounded: a pane streaming without pause would otherwise re-seed forever.
+Once the budget is spent the incremental stream carries the screen, as it
+did before this check existed.")
 (defvar-local tmux-control--utf8-carry ""
   "Unibyte bytes of an incomplete trailing UTF-8 sequence held for the next feed.
 tmux can split a multibyte character across two %output messages; the
@@ -4798,9 +4814,41 @@ per message."
       ;; Mark the render changed so the opt-in drift check (idle) knows this
       ;; pane is worth re-examining; an idle pane with no output stays clean.
       (setq tmux-control--render-dirty t)
+      (cl-incf tmux-control--output-generation)
       (tmux-control--feed-terminal out)
       (when (bound-and-true-p tmux-control-pane-directory-mode)
         (tmux-control--schedule-pane-directory-sync)))))
+
+(defun tmux-control--note-seed-capture (buffer)
+  "Record in BUFFER that its seed's capture command is being sent now."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq tmux-control--seed-generation tmux-control--output-generation))))
+
+(defun tmux-control--seed-raced-output-p (buffer)
+  "Return non-nil when BUFFER rendered output while its seed capture flew.
+Such a seed paints a screen tmux captured BEFORE that output, so the paint
+erases lines that really are on the pane -- leaving the cursor where both
+sides agree, which is why `tmux-control--verify-seed' (cursor-only) cannot
+see it.  Callers re-seed, bounded by
+`tmux-control--seed-stale-max-retries'."
+  (and (buffer-live-p buffer)
+       (with-current-buffer buffer
+         (/= tmux-control--seed-generation tmux-control--output-generation))))
+
+(defun tmux-control--seed-stale-retry-p (buffer)
+  "Return non-nil when BUFFER's seed should be re-taken, counting the retry.
+Non-nil exactly when output raced the capture and the retry budget is not
+spent; a clean seed resets the budget."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (if (tmux-control--seed-raced-output-p buffer)
+          (when (< tmux-control--seed-stale-retries
+                   tmux-control--seed-stale-max-retries)
+            (cl-incf tmux-control--seed-stale-retries)
+            t)
+        (setq tmux-control--seed-stale-retries 0)
+        nil))))
 
 (defun tmux-control--batch-pane-output (pane payload)
   "Queue PANE's encoded output PAYLOAD for rendering.
@@ -5213,7 +5261,11 @@ swallowed as content and the reply queue would desynchronize."
          (tmux-control--screen-seed-sequence
           (mapconcat #'identity (nreverse output) "\n")
           tmux-control--seed-cursor
-          tmux-control--seed-cursor-visible)))))))
+          tmux-control--seed-cursor-visible)))
+       ;; Output rendered while this capture was in flight has just been
+       ;; erased by the paint; re-take it (bounded).
+       (when (tmux-control--seed-stale-retry-p (current-buffer))
+         (tmux-control--seed-own-screen))))))
 
 ;;;; Optional auto-heal of render drift
 ;;
@@ -5360,6 +5412,9 @@ routes child render buffers away from it."
     (setq tmux-control--seed-cursor nil)
     (setq tmux-control--seed-cursor-visible :unknown)
     (setq tmux-control--seed-modes nil)
+    ;; Sample the output counter with the queries; the `:capture' handler
+    ;; compares it to spot output that raced this capture.
+    (tmux-control--note-seed-capture (current-buffer))
     (tmux-control--send-command
      (format "display-message -p -t %s \"#{cursor_x},#{cursor_y},#{cursor_flag}\""
              tmux-control--active-pane)
@@ -6738,6 +6793,7 @@ screen, prefixed by the mode replay (see
                (setq tmux-control--active-pane pane)
                (when tmux-control-pane-directory-mode
                  (tmux-control--schedule-pane-directory-sync t)))
+             (tmux-control--note-seed-capture buffer)
              (with-current-buffer ctrl
                (tmux-control--query
                 (format "capture-pane -p -e%s -t %s"
@@ -6756,14 +6812,19 @@ screen, prefixed by the mode replay (see
                          cur (or vis :unknown))))
                       (tmux-control--flush-display
                        (tmux-control--current-sync-windows)))
-                    ;; Same drift detection as the controller seed: output
-                    ;; interleaved between the cursor and capture replies
-                    ;; leaves the baseline shifted; verify and re-seed.
-                    (tmux-control--verify-seed
-                     buffer
-                     (lambda ()
-                       (tmux-control--seed-window-buffer
-                        buffer window-id))))))))))))))
+                    ;; Output rendered while the capture was in flight has
+                    ;; just been erased by the paint: re-take it (bounded).
+                    ;; Otherwise fall through to the same drift detection as
+                    ;; the controller seed: output interleaved between the
+                    ;; cursor and capture replies leaves the baseline
+                    ;; shifted; verify and re-seed.
+                    (if (tmux-control--seed-stale-retry-p buffer)
+                        (tmux-control--seed-window-buffer buffer window-id)
+                      (tmux-control--verify-seed
+                       buffer
+                       (lambda ()
+                         (tmux-control--seed-window-buffer
+                          buffer window-id)))))))))))))))
 
 (defun tmux-control--flush-window-buffers ()
   "Flush each sibling window render buffer's batched output and redisplay.
@@ -7318,6 +7379,7 @@ safe no-op."
            (cursor-visible (or (plist-get info :cursor-visible) :unknown))
            (modes (plist-get info :modes)))
       (when pane
+        (tmux-control--note-seed-capture buffer)
         (with-current-buffer controller
           (tmux-control--query
            (tmux-control--pane-screen-command pane trailing)
@@ -7329,7 +7391,11 @@ safe no-op."
                (let ((term (buffer-local-value 'tmux-control--terminal buffer))
                      (win (get-buffer-window buffer t)))
                  (when (and term (eat-term-live-p term) (window-live-p win))
-                   (set-window-point win (eat-term-display-cursor term))))))))))))
+                   (set-window-point win (eat-term-display-cursor term))))
+               ;; Output rendered while this capture was in flight has just
+               ;; been erased by the paint; re-take it (bounded).
+               (when (tmux-control--seed-stale-retry-p buffer)
+                 (tmux-control--seed-pane-buffer-async buffer controller))))))))))
 
 ;;; Window arrangement from the parsed layout tree.
 

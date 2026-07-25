@@ -4350,6 +4350,45 @@ output), :calls (side-effect invocations in order), :active-pane,
     (should (equal (tmux-control--eat-cursor-xy) '(2 . 1)))
     (eat-term-delete tmux-control--terminal)))
 
+(ert-deftest tmux-control-test-seed-reseeds-when-output-races-capture ()
+  ;; A seed paints `capture-pane' of the pane as it was when tmux RAN the
+  ;; command.  Output arriving after that but before the paint has already
+  ;; been rendered, and the paint clears the screen first -- so those lines
+  ;; are erased even though they really are on the pane.  The cursor ends up
+  ;; where both sides agree (the prompt), which is why the cursor-only
+  ;; `tmux-control--verify-seed' cannot see it; the soak signature was
+  ;; exactly one missing line above the prompt after a flood.
+  (with-temp-buffer
+    (tmux-control--note-seed-capture (current-buffer))
+    (should-not (tmux-control--seed-raced-output-p (current-buffer)))
+    (should-not (tmux-control--seed-stale-retry-p (current-buffer)))
+    ;; Output flushed while the capture was in flight.
+    (cl-incf tmux-control--output-generation)
+    (should (tmux-control--seed-raced-output-p (current-buffer)))
+    ;; Bounded: two retries, then it gives up and lets the stream carry on.
+    (should (tmux-control--seed-stale-retry-p (current-buffer)))
+    (should (tmux-control--seed-stale-retry-p (current-buffer)))
+    (should-not (tmux-control--seed-stale-retry-p (current-buffer)))
+    ;; A clean seed resets the budget.
+    (tmux-control--note-seed-capture (current-buffer))
+    (should-not (tmux-control--seed-stale-retry-p (current-buffer)))
+    (should (= tmux-control--seed-stale-retries 0))
+    (cl-incf tmux-control--output-generation)
+    (should (tmux-control--seed-stale-retry-p (current-buffer)))))
+
+(ert-deftest tmux-control-test-output-flush-bumps-generation ()
+  ;; The counter must be driven by the actual render path, or the check
+  ;; above never fires.
+  (with-temp-buffer
+    (tmux-control-mode)
+    (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
+    (eat-term-resize tmux-control--terminal 20 5)
+    (let ((before tmux-control--output-generation))
+      (setq tmux-control--output-batch (list "hi"))
+      (tmux-control--flush-output-batch)
+      (should (= tmux-control--output-generation (1+ before))))
+    (eat-term-delete tmux-control--terminal)))
+
 (ert-deftest tmux-control-test-verify-seed-reseeds-on-drift-bounded ()
   ;; A seed's cursor query and capture are separate reply blocks; %output
   ;; interleaved between them leaves the seeded baseline shifted -- one
