@@ -4908,7 +4908,11 @@ backing off to the cap."
       (tmux-control--finish-command-output))
      ((and (string-prefix-p "%error " line)
            (tmux-control--block-terminator-p line))
-      (let ((kind tmux-control--current-command-kind))
+      (let ((kind tmux-control--current-command-kind)
+            ;; tmux sends its reason as the block's content lines; they are
+            ;; the only account of WHY a command failed, so keep them before
+            ;; the reply state is reset.
+            (reason (string-join (reverse tmux-control--command-output) "; ")))
         (setq tmux-control--collecting-command nil)
         (setq tmux-control--command-output nil)
         (setq tmux-control--current-command-kind :ignore)
@@ -4918,7 +4922,13 @@ backing off to the cap."
         (if (functionp kind)
             (funcall kind nil)
           (tmux-control--message
-           (format "tmux command failed (%s)" kind)))))
+           ;; Report what tmux said ("can't find window: @9"), not the
+           ;; internal reply kind, which named nothing a user could act on.
+           ;; The reason is tmux's own text; the command's arguments are
+           ;; deliberately not echoed (they can carry pane input).
+           (if (string-empty-p reason)
+               (format "tmux command failed (%s)" kind)
+             (format "tmux: %s" reason))))))
      ;; While collecting a reply block, any other line is block CONTENT --
      ;; including lines that merely LOOK like notifications (a captured
      ;; control-mode transcript can hold %exit/%pause/%continue).  This sits

@@ -2702,6 +2702,24 @@ before the toggle kept a local directory while later ones went remote."
      (should (null called))
      (should-not tmux-control--collecting-command))))
 
+(ert-deftest tmux-control-test-error-reports-tmux-reason ()
+  ;; A failed command reported only the internal reply kind ("tmux command
+  ;; failed (:ignore)"), throwing away the block's content -- which is where
+  ;; tmux says WHY.  Report tmux's own words; fall back to the kind when the
+  ;; block carried no text.
+  (tmux-control-test--with-reply-buffer
+   (setq tmux-control--command-queue (list (cons :ignore (float-time))))
+   (tmux-control--handle-line "%begin 1 9 0")
+   (tmux-control--handle-line "can't find window: @9")
+   (tmux-control--handle-line "%error 2 9 0")
+   (should (string-match-p "can't find window: @9" (buffer-string)))
+   (should-not (string-match-p ":ignore" (buffer-string))))
+  (tmux-control-test--with-reply-buffer
+   (setq tmux-control--command-queue (list (cons :ignore (float-time))))
+   (tmux-control--handle-line "%begin 1 9 0")
+   (tmux-control--handle-line "%error 2 9 0")
+   (should (string-match-p "tmux command failed" (buffer-string)))))
+
 (ert-deftest tmux-control-test-block-collects-notification-shaped-content ()
   ;; Lines that look like %exit/%pause/%continue but arrive INSIDE a reply
   ;; block are captured pane content (a control-mode transcript), not
