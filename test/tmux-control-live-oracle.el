@@ -65,12 +65,16 @@ also what `tmux-control--visible-screen-lines' and the chaos harness both
 do, so all three now measure the same thing."
   (when (buffer-live-p buf)
     (with-current-buffer buf
-      (tmux-control-live--rtrim
-       (split-string
-        (tmux-control-live--visible-text
-         (eat-term-display-beginning tmux-control--terminal)
-         (eat-term-end tmux-control--terminal))
-        "\n")))))
+      ;; Same guard as `tmux-control--visible-screen-lines': a buffer whose
+      ;; terminal is nil or dead (a killed pane, a non-render buffer passed by
+      ;; hand) would otherwise error inside the accessors instead of reporting.
+      (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+        (tmux-control-live--rtrim
+         (split-string
+          (tmux-control-live--visible-text
+           (eat-term-display-beginning tmux-control--terminal)
+           (eat-term-end tmux-control--terminal))
+          "\n"))))))
 
 (defun tmux-control-live--tmux-visible (socket pane)
   "Return tmux PANE's visible screen on SOCKET as normalized plain lines."
