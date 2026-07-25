@@ -54,21 +54,27 @@ not read as spurious trailing spaces against the ground truth."
     (apply #'string (nreverse out))))
 
 (defun tmux-control-live--pane-visible (buf)
-  "Return BUF's Eat visible screen (last `height' rows) as normalized lines.
-Bounded by the TERMINAL's end rather than the buffer's: `tmux-control--message'
-appends its notes after the terminal, and reading to `point-max' counted them
-as screen rows -- reporting a spurious DIFF for a render that is correct."
+  "Return BUF's Eat visible screen as normalized lines.
+Read from Eat's own display region (`eat-term-display-beginning' to
+`eat-term-end'), which is exactly the screen tmux `capture-pane' answers
+with.  Counting `height' buffer lines back from the end instead -- what
+this did before -- over-reads into SCROLLBACK whenever the screen's
+trailing blank rows are not materialized as newlines, and then reports a
+DIFF (an extra leading line) for a render that is in fact correct.  It is
+also what `tmux-control--visible-screen-lines' and the chaos harness both
+do, so all three now measure the same thing."
   (when (buffer-live-p buf)
     (with-current-buffer buf
-      (let ((h (cdr (eat-term-size tmux-control--terminal)))
-            (end (eat-term-end tmux-control--terminal)))
-        (save-excursion
-          (goto-char end)
-          (forward-line (- (1- h)))
-          (tmux-control-live--rtrim
-           (split-string (tmux-control-live--visible-text
-                          (line-beginning-position) end)
-                         "\n")))))))
+      ;; Same guard as `tmux-control--visible-screen-lines': a buffer whose
+      ;; terminal is nil or dead (a killed pane, a non-render buffer passed by
+      ;; hand) would otherwise error inside the accessors instead of reporting.
+      (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+        (tmux-control-live--rtrim
+         (split-string
+          (tmux-control-live--visible-text
+           (eat-term-display-beginning tmux-control--terminal)
+           (eat-term-end tmux-control--terminal))
+          "\n"))))))
 
 (defun tmux-control-live--tmux-visible (socket pane)
   "Return tmux PANE's visible screen on SOCKET as normalized plain lines."
