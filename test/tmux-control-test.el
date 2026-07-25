@@ -4213,13 +4213,14 @@ output), :calls (side-effect invocations in order), :active-pane,
       (eat-term-process-output tmux-control--terminal
                                "L1\r\nL2\r\nL3\r\nL4\r\nL5")
       (eat-term-redisplay tmux-control--terminal))
-    (let ((window (selected-window)))
-      (set-window-buffer window (current-buffer))
-      (tmux-control--anchor-windows-to-screen-top (list window))
-      (let ((anchored (window-start window)))
-        (tmux-control--message "a warning")
+    (save-window-excursion
+      (let ((window (selected-window)))
+        (set-window-buffer window (current-buffer))
         (tmux-control--anchor-windows-to-screen-top (list window))
-        (should (= (window-start window) anchored))))
+        (let ((anchored (window-start window)))
+          (tmux-control--message "a warning")
+          (tmux-control--anchor-windows-to-screen-top (list window))
+          (should (= (window-start window) anchored)))))
     (eat-term-delete tmux-control--terminal)))
 
 (ert-deftest tmux-control-test-message-echoes ()

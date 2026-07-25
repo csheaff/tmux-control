@@ -5733,10 +5733,13 @@ cursor position and their cursor line is kept visible."
 
 (defun tmux-control--anchor-windows-to-screen-top (windows)
   "Set each of WINDOWS to start at the top of the terminal's current screen.
-The current screen is the last `eat-term' height rows of the buffer, so
-this reveals a full-screen TUI from its top while still showing the latest
-screen of a scrolling pane.  `tmux-control--keep-cursor-visible' runs after
-and only pulls the start forward when the cursor would otherwise fall below
+The current screen is the last `eat-term' height rows OF THE TERMINAL --
+counted back from `eat-term-end', not from the end of the buffer, which
+also holds anything appended after the terminal (see
+`tmux-control--message') -- so this reveals a full-screen TUI from its top
+while still showing the latest screen of a scrolling pane.
+`tmux-control--keep-cursor-visible' runs after and only pulls the start
+forward when the cursor would otherwise fall below
 the body (e.g. a tall prompt glyph on a scrolling log), so the follow-bottom
 behavior is preserved."
   (let ((height (and tmux-control--terminal
@@ -6436,17 +6439,17 @@ never steals the window the user is looking at."
     (set-process-sentinel tmux-control--process #'ignore)
     (delete-process tmux-control--process)))
 
-(defun tmux-control--message (message)
-  "Append MESSAGE to the current tmux-control buffer and echo it.
+(defun tmux-control--message (text)
+  "Append TEXT to the current tmux-control buffer and echo it.
 The appended copy lands after the terminal, which the view does not
 necessarily reach -- a tiled pane shows exactly its screen -- so the echo
 area is what makes a warning reliably visible; the buffer copy is the
 record that survives the next keystroke."
   (let ((inhibit-read-only t))
     (goto-char (point-max))
-    (insert (propertize (format "\n[tmux-control] %s\n" message)
+    (insert (propertize (format "\n[tmux-control] %s\n" text)
                         'face 'font-lock-comment-face)))
-  (message "[tmux-control] %s" message))
+  (message "[tmux-control] %s" text))
 
 
 ;;;; Per-window render buffers (window scrollback persistence)
