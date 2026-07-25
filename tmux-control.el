@@ -5330,7 +5330,28 @@ guessing from the prompt) and replays the pane's mode state -- alternate
 screen, mouse tracking -- that `capture-pane' contents alone cannot carry.
 tmux replies in command order, so the `:cursor-pos' and `:pane-modes'
 replies land before the `:capture' reply that paints the screen and
-consumes them."
+consumes them.
+
+Those replies are dispatched by KIND in the CONTROLLER buffer, so this
+seed can only ever paint the controller's own terminal.  Called from a
+child render buffer it would therefore paint that buffer's pane INTO THE
+CONTROLLER -- leaving the connect buffer showing a foreign window's
+screen while the buffer that asked for the repaint stayed stale.  A child
+is routed to its own closure-targeted seeder instead."
+  (if (and tmux-control--controller (buffer-live-p tmux-control--controller))
+      (cond
+       (tmux-control--window-id
+        (tmux-control--seed-window-buffer (current-buffer)
+                                          tmux-control--window-id))
+       (tmux-control--active-pane
+        (tmux-control--seed-pane-buffer-async (current-buffer)
+                                              tmux-control--controller)))
+    (tmux-control--seed-own-screen)))
+
+(defun tmux-control--seed-own-screen ()
+  "Seed the CONTROLLER's terminal from its own active pane.
+The tagged-reply seed proper; see `tmux-control--seed-screen', which
+routes child render buffers away from it."
   (when tmux-control--active-pane
     ;; Start each seed without a cursor or modes: the :cursor-pos and
     ;; :pane-modes replies fill them in before :capture, and if a query
