@@ -2689,6 +2689,51 @@ before the toggle kept a local directory while later ones went remote."
                           "%begin 5 5 0"
                           "%error 999 7 0"))))))
 
+(ert-deftest tmux-control-test-seed-screen-targets-its-own-buffer ()
+  ;; The :cursor-pos/:pane-modes/:capture replies are dispatched by kind in
+  ;; the CONTROLLER, so the tagged seed can only paint the controller.  Run
+  ;; from a child render buffer it painted that child's pane into the
+  ;; controller -- the connect buffer then showed a FOREIGN window's screen
+  ;; (reproduced live: the controller, registered for window @2, rendering
+  ;; pane %0's screen verbatim) while the child stayed stale.  A child must
+  ;; use its own closure-targeted seeder.
+  (let ((ctrl (generate-new-buffer " *tc-ctrl*"))
+        (win (generate-new-buffer " *tc-win*"))
+        (pane (generate-new-buffer " *tc-pane*"))
+        sent seeded-windows seeded-panes)
+    (unwind-protect
+        (cl-letf (((symbol-function 'tmux-control--send-command)
+                   (lambda (command &optional kind) (push (cons kind command) sent)))
+                  ((symbol-function 'tmux-control--seed-window-buffer)
+                   (lambda (buffer id &rest _) (push (cons (buffer-name buffer) id)
+                                                     seeded-windows)))
+                  ((symbol-function 'tmux-control--seed-pane-buffer-async)
+                   (lambda (buffer _controller) (push (buffer-name buffer)
+                                                      seeded-panes))))
+          ;; A per-window render buffer seeds through the window seeder.
+          (with-current-buffer win
+            (setq tmux-control--controller ctrl
+                  tmux-control--window-id "@2"
+                  tmux-control--active-pane "%2")
+            (tmux-control--seed-screen))
+          (should (equal seeded-windows '((" *tc-win*" . "@2"))))
+          (should-not sent)
+          ;; A tiled pane render buffer (no window id) seeds through the pane
+          ;; seeder.
+          (with-current-buffer pane
+            (setq tmux-control--controller ctrl
+                  tmux-control--active-pane "%7")
+            (tmux-control--seed-screen))
+          (should (equal seeded-panes '(" *tc-pane*")))
+          (should-not sent)
+          ;; The controller itself still uses the tagged-reply seed.
+          (with-current-buffer ctrl
+            (setq tmux-control--active-pane "%1")
+            (tmux-control--seed-screen))
+          (should (assq :capture sent))
+          (should (assq :cursor-pos sent)))
+      (dolist (b (list ctrl win pane)) (when (buffer-live-p b) (kill-buffer b))))))
+
 (ert-deftest tmux-control-test-query-callback-gets-nil-on-error ()
   ;; %error completes a closure query with nil so an async consumer can
   ;; show the failure instead of waiting forever.
