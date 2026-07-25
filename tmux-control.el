@@ -5261,7 +5261,11 @@ swallowed as content and the reply queue would desynchronize."
          (tmux-control--screen-seed-sequence
           (mapconcat #'identity (nreverse output) "\n")
           tmux-control--seed-cursor
-          tmux-control--seed-cursor-visible)))))))
+          tmux-control--seed-cursor-visible)))
+       ;; Output rendered while this capture was in flight has just been
+       ;; erased by the paint; re-take it (bounded).
+       (when (tmux-control--seed-stale-retry-p (current-buffer))
+         (tmux-control--seed-own-screen))))))
 
 ;;;; Optional auto-heal of render drift
 ;;
@@ -5408,6 +5412,9 @@ routes child render buffers away from it."
     (setq tmux-control--seed-cursor nil)
     (setq tmux-control--seed-cursor-visible :unknown)
     (setq tmux-control--seed-modes nil)
+    ;; Sample the output counter with the queries; the `:capture' handler
+    ;; compares it to spot output that raced this capture.
+    (tmux-control--note-seed-capture (current-buffer))
     (tmux-control--send-command
      (format "display-message -p -t %s \"#{cursor_x},#{cursor_y},#{cursor_flag}\""
              tmux-control--active-pane)
@@ -7372,6 +7379,7 @@ safe no-op."
            (cursor-visible (or (plist-get info :cursor-visible) :unknown))
            (modes (plist-get info :modes)))
       (when pane
+        (tmux-control--note-seed-capture buffer)
         (with-current-buffer controller
           (tmux-control--query
            (tmux-control--pane-screen-command pane trailing)
@@ -7383,7 +7391,11 @@ safe no-op."
                (let ((term (buffer-local-value 'tmux-control--terminal buffer))
                      (win (get-buffer-window buffer t)))
                  (when (and term (eat-term-live-p term) (window-live-p win))
-                   (set-window-point win (eat-term-display-cursor term))))))))))))
+                   (set-window-point win (eat-term-display-cursor term))))
+               ;; Output rendered while this capture was in flight has just
+               ;; been erased by the paint; re-take it (bounded).
+               (when (tmux-control--seed-stale-retry-p buffer)
+                 (tmux-control--seed-pane-buffer-async buffer controller))))))))))
 
 ;;; Window arrangement from the parsed layout tree.
 
