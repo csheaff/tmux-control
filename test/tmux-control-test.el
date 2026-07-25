@@ -4199,6 +4199,42 @@ output), :calls (side-effect invocations in order), :active-pane,
         (should (cl-some (lambda (c) (string-prefix-p "new-window" c)) sent))
         (should (cl-some (lambda (c) (string-prefix-p "kill-window" c)) sent))))))
 
+(ert-deftest tmux-control-test-anchor-ignores-appended-messages ()
+  ;; The tiled anchor counts the screen's rows back from the END OF THE
+  ;; TERMINAL.  Counting from `point-max' instead let anything appended
+  ;; after the terminal -- `tmux-control--message' writes its notes there --
+  ;; push the anchor down by that many lines, so one warning left a tiled
+  ;; pane permanently scrolled past the top of its own screen.
+  (with-temp-buffer
+    (tmux-control-mode)
+    (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
+    (eat-term-resize tmux-control--terminal 40 5)
+    (let ((inhibit-read-only t))
+      (eat-term-process-output tmux-control--terminal
+                               "L1\r\nL2\r\nL3\r\nL4\r\nL5")
+      (eat-term-redisplay tmux-control--terminal))
+    (let ((window (selected-window)))
+      (set-window-buffer window (current-buffer))
+      (tmux-control--anchor-windows-to-screen-top (list window))
+      (let ((anchored (window-start window)))
+        (tmux-control--message "a warning")
+        (tmux-control--anchor-windows-to-screen-top (list window))
+        (should (= (window-start window) anchored))))
+    (eat-term-delete tmux-control--terminal)))
+
+(ert-deftest tmux-control-test-message-echoes ()
+  ;; A note appended below the terminal can sit off-screen (the view shows
+  ;; the terminal's screen), so it must also reach the echo area or it is
+  ;; invisible.
+  (with-temp-buffer
+    (tmux-control-mode)
+    (let (echoed)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (setq echoed (apply #'format fmt args)))))
+        (tmux-control--message "connection lost"))
+      (should (equal echoed "[tmux-control] connection lost"))
+      (should (string-match-p "connection lost" (buffer-string))))))
+
 (ert-deftest tmux-control-test-eat-cursor-xy-reads-terminal-cursor ()
   ;; The drift detector compares tmux's 0-indexed #{cursor_x},#{cursor_y}
   ;; with Eat's own cursor; the accessor must convert Eat's 1-indexed

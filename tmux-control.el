@@ -5743,8 +5743,13 @@ behavior is preserved."
                      (eat-term-live-p tmux-control--terminal)
                      (cdr (eat-term-size tmux-control--terminal)))))
     (when (and height (> height 0))
+      ;; Count back from the END OF THE TERMINAL, not the end of the buffer.
+      ;; `tmux-control--message' appends its notes AFTER the terminal, and
+      ;; anchoring on `point-max' let one warning push this pane's view that
+      ;; many lines past the top of its own screen -- permanently, since the
+      ;; anchor is recomputed from the same stale reference on every flush.
       (let ((top (save-excursion
-                   (goto-char (point-max))
+                   (goto-char (eat-term-end tmux-control--terminal))
                    (forward-line (- (1- height)))
                    (line-beginning-position))))
         (dolist (window windows)
@@ -6432,11 +6437,16 @@ never steals the window the user is looking at."
     (delete-process tmux-control--process)))
 
 (defun tmux-control--message (message)
-  "Append MESSAGE to the current tmux-control buffer."
+  "Append MESSAGE to the current tmux-control buffer and echo it.
+The appended copy lands after the terminal, which the view does not
+necessarily reach -- a tiled pane shows exactly its screen -- so the echo
+area is what makes a warning reliably visible; the buffer copy is the
+record that survives the next keystroke."
   (let ((inhibit-read-only t))
     (goto-char (point-max))
     (insert (propertize (format "\n[tmux-control] %s\n" message)
-                        'face 'font-lock-comment-face))))
+                        'face 'font-lock-comment-face)))
+  (message "[tmux-control] %s" message))
 
 
 ;;;; Per-window render buffers (window scrollback persistence)
