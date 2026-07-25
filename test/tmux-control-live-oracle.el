@@ -54,16 +54,20 @@ not read as spurious trailing spaces against the ground truth."
     (apply #'string (nreverse out))))
 
 (defun tmux-control-live--pane-visible (buf)
-  "Return BUF's Eat visible screen (last `height' rows) as normalized lines."
+  "Return BUF's Eat visible screen (last `height' rows) as normalized lines.
+Bounded by the TERMINAL's end rather than the buffer's: `tmux-control--message'
+appends its notes after the terminal, and reading to `point-max' counted them
+as screen rows -- reporting a spurious DIFF for a render that is correct."
   (when (buffer-live-p buf)
     (with-current-buffer buf
-      (let ((h (cdr (eat-term-size tmux-control--terminal))))
+      (let ((h (cdr (eat-term-size tmux-control--terminal)))
+            (end (eat-term-end tmux-control--terminal)))
         (save-excursion
-          (goto-char (point-max))
+          (goto-char end)
           (forward-line (- (1- h)))
           (tmux-control-live--rtrim
            (split-string (tmux-control-live--visible-text
-                          (line-beginning-position) (point-max))
+                          (line-beginning-position) end)
                          "\n")))))))
 
 (defun tmux-control-live--tmux-visible (socket pane)
