@@ -417,6 +417,12 @@ so `compile`, `grep`, `consult-ripgrep`, project commands, and ordinary file
 commands naturally operate on the pane's host.  Disabling the mode restores
 the buffer's prior local directory.
 
+Tracking is a property of the **session**, not of one buffer: toggling it in
+any of a session's buffers applies to all of them — the connect buffer, every
+window's buffer, and every tiled pane's buffer — and each one follows its own
+pane, so `M-x tmux-control-pane-directory-mode` once is enough however many
+windows you have open.
+
 Synchronization uses asynchronous queries over the existing control
 connection after pane changes and after a quiet moment in pane output.  tmux
 does not emit a dedicated event for `cd`, so a silent directory change that

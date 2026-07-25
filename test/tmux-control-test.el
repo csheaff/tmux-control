@@ -2519,6 +2519,39 @@ buffer's own directory with a prefix arg or when the option is off."
       (tmux-control-pane-directory-mode -1)
       (should (equal default-directory "/local/")))))
 
+(ert-deftest tmux-control-test-pane-directory-mode-is-session-wide ()
+  "Toggling the mode anywhere applies to the session's other render buffers.
+New render buffers already mirror the controller's opt-in
+\(`tmux-control--initialize-render-buffer-mode'), so a toggle that reached
+only the current buffer left a session half-tracking: windows visited
+before the toggle kept a local directory while later ones went remote."
+  (let ((ctrl (generate-new-buffer " *tc-ctrl*"))
+        (win (generate-new-buffer " *tc-win*"))
+        (pane (generate-new-buffer " *tc-pane*")))
+    (unwind-protect
+        (progn
+          (dolist (buf (list win pane))
+            (with-current-buffer buf
+              (setq tmux-control--controller ctrl)
+              (setq-local default-directory "/local/")))
+          (with-current-buffer ctrl
+            (setq-local default-directory "/local/")
+            (setq tmux-control--window-buffers (list (cons "@1" win))
+                  tmux-control--panes (list (cons "%1" pane)))
+            (tmux-control-pane-directory-mode 1))
+          (should (buffer-local-value 'tmux-control-pane-directory-mode win))
+          (should (buffer-local-value 'tmux-control-pane-directory-mode pane))
+          ;; Turning it off from a child turns the whole session off.
+          (with-current-buffer win (tmux-control-pane-directory-mode -1))
+          (should-not (buffer-local-value 'tmux-control-pane-directory-mode ctrl))
+          (should-not (buffer-local-value 'tmux-control-pane-directory-mode pane))
+          ;; A dead sibling in the registry must not break the fan-out.
+          (kill-buffer pane)
+          (with-current-buffer ctrl (tmux-control-pane-directory-mode 1))
+          (should (buffer-local-value 'tmux-control-pane-directory-mode win)))
+      (dolist (buf (list ctrl win pane))
+        (when (buffer-live-p buf) (kill-buffer buf))))))
+
 (ert-deftest tmux-control-test-pane-directory-interactive-opt-in-restores ()
   "A reconnect marker restores mode even without a global mode hook."
   (with-temp-buffer

@@ -2703,6 +2703,41 @@ is a nonempty absolute path."
   "Return the controller buffer that owns this buffer's tmux connection."
   (or tmux-control--controller (current-buffer)))
 
+(defvar tmux-control--pane-directory-propagating nil
+  "Non-nil while a pane-directory toggle is fanning out to sibling buffers.
+Bound around the fan-out so each sibling's own mode call does not fan out
+again.")
+
+(defun tmux-control--session-render-buffers ()
+  "Return every live render buffer of this buffer's session, controller first.
+A session renders through the controller plus, depending on the mode, a
+buffer per visited window and a buffer per tiled pane."
+  (let ((ctrl (tmux-control--pane-directory-controller)))
+    (when (buffer-live-p ctrl)
+      (cons ctrl
+            (seq-filter
+             #'buffer-live-p
+             (mapcar #'cdr
+                     (append
+                      (buffer-local-value 'tmux-control--window-buffers ctrl)
+                      (buffer-local-value 'tmux-control--panes ctrl))))))))
+
+(defun tmux-control--propagate-pane-directory-mode (state)
+  "Apply pane-directory mode STATE to this session's other render buffers.
+The opt-in is a property of the SESSION, not of one buffer: a new render
+buffer already mirrors the controller's state
+\(`tmux-control--initialize-render-buffer-mode'), so without this a toggle
+left the windows visited before it tracking differently from the ones
+visited after."
+  (unless tmux-control--pane-directory-propagating
+    (let ((tmux-control--pane-directory-propagating t)
+          (self (current-buffer)))
+      (dolist (buf (tmux-control--session-render-buffers))
+        (unless (eq buf self)
+          (with-current-buffer buf
+            (unless (eq (and tmux-control-pane-directory-mode t) state)
+              (tmux-control-pane-directory-mode (if state 1 -1)))))))))
+
 (defun tmux-control--pane-directory-local-fallback ()
   "Return the local directory saved before pane tracking was enabled."
   (if (and tmux-control-pane-directory-mode
@@ -2831,7 +2866,8 @@ change can be refreshed explicitly with `tmux-control-refresh-pane-directory'."
                   #'tmux-control--pane-directory-buffer-displayed nil t)
         (add-hook 'kill-buffer-hook
                   #'tmux-control--cancel-pane-directory-sync nil t)
-        (tmux-control--schedule-pane-directory-sync t))
+        (tmux-control--schedule-pane-directory-sync t)
+        (tmux-control--propagate-pane-directory-mode t))
     (tmux-control--cancel-pane-directory-sync)
     (remove-hook 'kill-buffer-hook
                  #'tmux-control--cancel-pane-directory-sync t)
@@ -2841,7 +2877,8 @@ change can be refreshed explicitly with `tmux-control-refresh-pane-directory'."
       (if (car tmux-control--pane-directory-saved)
           (setq default-directory (cdr tmux-control--pane-directory-saved))
         (kill-local-variable 'default-directory))
-      (setq tmux-control--pane-directory-saved nil))))
+      (setq tmux-control--pane-directory-saved nil))
+    (tmux-control--propagate-pane-directory-mode nil)))
 
 (defun tmux-control--pane-directory ()
   "Return the live pane's working directory as a `default-directory' string.
@@ -3814,10 +3851,14 @@ so the tmux-control keys get out of the way; the mode line shows
       (cancel-timer tmux-control--auto-reconnect-timer))
     (setq tmux-control--auto-reconnect-timer nil)
     ;; Restore the buffer's original local directory before the major mode
-    ;; hook enables pane-directory tracking for the fresh connection.
+    ;; hook enables pane-directory tracking for the fresh connection.  This
+    ;; teardown is buffer-local bookkeeping for the reconnect, not a user
+    ;; opting out, so it must not fan out to the session's other buffers --
+    ;; which the reconnect is about to re-seed anyway.
     (when (bound-and-true-p tmux-control-pane-directory-mode)
       (setq tmux-control--pane-directory-reenable t)
-      (tmux-control-pane-directory-mode -1))
+      (let ((tmux-control--pane-directory-propagating t))
+        (tmux-control-pane-directory-mode -1)))
     (erase-buffer)
     (tmux-control-mode)
     (tmux-control--restore-pane-directory-mode-after-reset)
