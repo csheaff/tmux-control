@@ -1476,6 +1476,58 @@ each wrapped in an evolving prompt line and a status bar.")
     (should (equal (plist-get p :cmd) "bash"))
     (should (equal (plist-get p :title) "a\tb\tc"))))
 
+(ert-deftest tmux-control-test-parse-window-state-normalized-separators ()
+  ;; Recover fixed fields without splitting underscores inside arbitrary
+  ;; pane_current_command and pane_title values.
+  (let* ((line "LAY_%7_0_0_80_24_1_5_6_1_my_command_0,0,0,0,0,0,1_title_here")
+         (panes (cdr (tmux-control--parse-window-state (list line))))
+         (p (cdr (assoc "%7" panes))))
+    (should (= (length panes) 1))
+    (should (equal (plist-get p :cmd) "my_command"))
+    (should (equal (plist-get p :title) "title_here"))
+    (should (equal (plist-get p :cursor) '(5 . 6)))))
+
+(ert-deftest tmux-control-test-parse-window-state-separator-in-text ()
+  ;; Delimiter-like text in arbitrary command/title fields must not shift the
+  ;; fixed modes field or drop the pane.
+  (let* ((sep tmux-control--field-separator)
+         (line (mapconcat
+                #'identity
+                (list "LAY" "%8" "0" "0" "80" "24" "1" "5" "6" "1"
+                      (concat "cmd" sep "part")
+                      "0,0,0,0,0,0,1"
+                      (concat "title" sep "1,1,1,1,1,1,1" sep "tail"))
+                sep))
+         (panes (cdr (tmux-control--parse-window-state (list line))))
+         (p (cdr (assoc "%8" panes))))
+    (should (= (length panes) 1))
+    (should (equal (plist-get p :cmd) (concat "cmd" sep "part")))
+    (should (equal (plist-get p :title)
+                   (concat "title" sep "1,1,1,1,1,1,1" sep "tail")))
+    (should (eq (plist-get (plist-get p :modes) :wrap) :on))))
+
+(ert-deftest tmux-control-test-parse-window-state-normalized-mode-text-in-title ()
+  ;; A mode-shaped substring in a normalized legacy title is title content,
+  ;; not the actual modes field.
+  (let* ((line "LAY_%9_0_0_80_24_1_5_6_1_my_command_0,0,0,0,0,0,1_title_1,1,1,1,1,1,1_tail")
+         (panes (cdr (tmux-control--parse-window-state (list line))))
+         (p (cdr (assoc "%9" panes))))
+    (should (equal (plist-get p :cmd) "my_command"))
+    (should (equal (plist-get p :title) "title_1,1,1,1,1,1,1_tail"))
+    (should (eq (plist-get (plist-get p :modes) :wrap) :on))))
+
+(ert-deftest tmux-control-test-parse-window-state-legacy-title-has-new-separator ()
+  ;; Marker presence alone must not select the new format: a legacy title may
+  ;; contain the printable separator literally.
+  (let* ((line (concat
+                "LAY_%10_0_0_80_24_1_5_6_1_bash_0,0,0,0,0,0,1_title_"
+                tmux-control--field-separator "_tail"))
+         (panes (cdr (tmux-control--parse-window-state (list line))))
+         (p (cdr (assoc "%10" panes))))
+    (should (= (length panes) 1))
+    (should (equal (plist-get p :title)
+                   (concat "title_" tmux-control--field-separator "_tail")))))
+
 (ert-deftest tmux-control-test-build-tiling-callback-aborts-when-cleared ()
   ;; The build is async: a teardown (untile, disconnect) during an in-flight
   ;; layout query clears `tmux-control--tiling-build-active', and the reply
@@ -1535,6 +1587,23 @@ each wrapped in an evolving prompt line and a status bar.")
     (should-not (gethash "2" tmux-control--activity))
     (should (plist-get (nth 2 tmux-control--windows) :active))
     (should (plist-get (nth 1 tmux-control--windows) :bell))))
+
+(ert-deftest tmux-control-test-control-replies-accept-normalized-separators ()
+  ;; Some remote control connections normalize literal TAB format separators
+  ;; to underscores.  Window names containing underscores must remain intact,
+  ;; and the pane routing map must still populate.
+  (with-temp-buffer
+    (setq-local tmux-control--activity (make-hash-table :test 'equal))
+    (tmux-control--update-windows
+     '("2_test_me_1_0_@17" "1_zsh_0_0_@0"))
+    (should (equal (mapcar (lambda (w) (plist-get w :name))
+                           tmux-control--windows)
+                   '("zsh" "test_me")))
+    (should (equal tmux-control--current-window "2"))
+    (should (equal (plist-get (nth 1 tmux-control--windows) :id) "@17"))
+    (tmux-control--update-pane-window-map '("%3_2_@17" "%1_1_@0"))
+    (should (equal (gethash "%3" tmux-control--pane-window)
+                   '("2" . "@17")))))
 
 (ert-deftest tmux-control-test-window-tab-bar-renders ()
   ;; The bar shows every window, marks the busy one, and faces each tab by
@@ -2733,6 +2802,56 @@ before the toggle kept a local directory while later ones went remote."
           (should (assq :capture sent))
           (should (assq :cursor-pos sent)))
       (dolist (b (list ctrl win pane)) (when (buffer-live-p b) (kill-buffer b))))))
+
+(ert-deftest tmux-control-test-window-seed-accepts-normalized-separators ()
+  "A normalized active-pane reply must replace the loading placeholder."
+  (let ((ctrl (generate-new-buffer " *tc-seed-ctrl*"))
+        (buf (generate-new-buffer " *tc-seed-window*"))
+        commands written)
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (setq-local tmux-control--controller ctrl
+                        tmux-control--capture-trailing-p nil))
+          (cl-letf (((symbol-function 'tmux-control--query)
+                     (lambda (command callback)
+                       (push command commands)
+                       (funcall callback
+                                (if (string-prefix-p "list-panes" command)
+                                    '("1_%7_2,3,1_0,0,0,0,0,0,1")
+                                  '("seeded screen")))))
+                    ((symbol-function 'tmux-control--write-terminal)
+                     (lambda (text) (setq written text)))
+                    ((symbol-function 'tmux-control--flush-display) #'ignore)
+                    ((symbol-function 'tmux-control--current-sync-windows)
+                     (lambda () nil))
+                    ((symbol-function 'tmux-control--seed-stale-retry-p)
+                     (lambda (_) nil))
+                    ((symbol-function 'tmux-control--verify-seed) #'ignore))
+            (with-current-buffer buf
+              (tmux-control--seed-window-buffer buf "@9")))
+          (should (string-match-p (regexp-quote tmux-control--field-separator)
+                                  (car (last commands))))
+          (should (equal (buffer-local-value 'tmux-control--active-pane buf)
+                         "%7"))
+          (should (string-match-p "seeded screen" written)))
+      (kill-buffer buf)
+      (kill-buffer ctrl))))
+
+(ert-deftest tmux-control-test-pane-size-accepts-normalized-separator ()
+  (with-temp-buffer
+    (let (applied window-size)
+      (cl-letf (((symbol-function 'tmux-control--apply-eat-size)
+                 (lambda (width height)
+                   (setq applied (cons width height))
+                   nil))
+                ((symbol-function 'tmux-control--maybe-warn-pinned-size)
+                 (lambda (size) (setq window-size size))))
+        (setq-local tmux-control--current-command-kind :pane-size
+                    tmux-control--command-output '("80x24_100x30"))
+        (tmux-control--finish-command-output)
+        (should (equal applied '(80 . 24)))
+        (should (equal window-size '(100 . 30)))))))
 
 (ert-deftest tmux-control-test-query-callback-gets-nil-on-error ()
   ;; %error completes a closure query with nil so an async consumer can

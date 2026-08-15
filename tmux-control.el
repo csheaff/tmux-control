@@ -2172,13 +2172,71 @@ is left untouched."
 ;; connection -- never a blocking CLI call from the process filter -- so a busy
 ;; remote session is not stalled by tab-bar upkeep.
 
+(defconst tmux-control--field-separator "|:tc:|"
+  "Printable separator for formatted replies sent through control mode.
+Some remote tmux control connections normalize literal TABs in command
+arguments to underscores, making TAB-delimited replies ambiguous.")
+
+(defconst tmux-control--field-separator-regexp
+  (concat "\\(?:" (regexp-quote tmux-control--field-separator) "\\|[_\t]\\)")
+  "Regexp accepting current and legacy control-mode field separators.")
+
+(defun tmux-control--split-control-fields (line)
+  "Split formatted control-mode reply LINE into fields.
+Prefer the printable separator emitted by current commands.  Accept literal
+TABs and underscore-normalized legacy replies for live upgrades and older
+tmux-control clients."
+  (split-string
+   line
+   (cond
+    ((string-match-p (regexp-quote tmux-control--field-separator) line)
+     (regexp-quote tmux-control--field-separator))
+    ((string-match-p "\t" line) "\t")
+    (t "_"))))
+
+(defun tmux-control--window-state-fields-with-separator (line separator)
+  "Parse 13 window-state fields from LINE using literal SEPARATOR.
+The command and title fields are arbitrary text.  Locate the fixed-shape modes
+field after the ten fixed prefix fields, then rejoin separator text inside the
+two arbitrary fields without shifting columns."
+  (let* ((parts (split-string line (regexp-quote separator)))
+         (mode-tail (nthcdr 11 parts))
+         (mode-offset
+          (cl-position-if
+           (lambda (field)
+             (string-match-p
+              "\\`[01]?,[01]?,[01]?,[01]?,[01]?,[01]?,[01]?\\'"
+              field))
+           mode-tail))
+         (mode-index (if mode-offset (+ 11 mode-offset)
+                       (and (>= (length parts) 13) 11))))
+    (when (and mode-index (>= (length parts) 13))
+      (append (cl-subseq parts 0 10)
+              (list (string-join (cl-subseq parts 10 mode-index) separator)
+                    (nth mode-index parts)
+                    (string-join (nthcdr (1+ mode-index) parts) separator))))))
+
+(defun tmux-control--window-state-fields (line)
+  "Return the 13 formatted window-state fields from control reply LINE.
+Accept the current printable separator, legacy literal TABs, and legacy
+underscore-normalized replies."
+  (or (tmux-control--window-state-fields-with-separator
+       line tmux-control--field-separator)
+      (tmux-control--window-state-fields-with-separator line "\t")
+      (tmux-control--window-state-fields-with-separator line "_")))
+
 (defun tmux-control--refresh-windows ()
   "Asynchronously refresh the cached window list that feeds the tab bar."
   (when (and (or tmux-control-window-tab-bar tmux-control-window-buffers)
              (process-live-p tmux-control--process))
     (tmux-control--send-command
-     (format "list-windows -t %s -F '#{window_index}\t#{window_name}\t#{window_active}\t#{window_bell_flag}\t#{window_id}'"
-             (tmux-control--window-target tmux-control--session))
+     (format "list-windows -t %s -F '%s'"
+             (tmux-control--window-target tmux-control--session)
+             (mapconcat
+              #'identity
+              '("#{window_index}" "#{window_name}" "#{window_active}"
+                "#{window_bell_flag}" "#{window_id}")
+              tmux-control--field-separator))
      :windows)))
 
 (defun tmux-control--refresh-pane-window-map ()
@@ -2186,8 +2244,11 @@ is left untouched."
   (when (and (or tmux-control-window-tab-bar tmux-control-window-buffers)
              (process-live-p tmux-control--process))
     (tmux-control--send-command
-     (format "list-panes -s -t %s -F '#{pane_id}\t#{window_index}\t#{window_id}'"
-             (tmux-control--window-target tmux-control--session))
+     (format "list-panes -s -t %s -F '%s'"
+             (tmux-control--window-target tmux-control--session)
+             (mapconcat #'identity
+                        '("#{pane_id}" "#{window_index}" "#{window_id}")
+                        tmux-control--field-separator))
      :pane-window)))
 
 (defun tmux-control--update-windows (lines)
@@ -2198,7 +2259,13 @@ active window for the controller buffer the first time its id is learned --
 the controller renders its own window, so a switch back to it swaps here."
   (let (parsed active active-id)
     (dolist (line lines)
-      (when (string-match "\\`\\([0-9]+\\)\t\\(.*\\)\t\\([01]\\)\t\\([01]\\)\\(?:\t\\(@[0-9]+\\)\\)?\\'" line)
+      (when (string-match
+             (concat "\\`\\([0-9]+\\)" tmux-control--field-separator-regexp
+                     "\\(.*\\)" tmux-control--field-separator-regexp
+                     "\\([01]\\)" tmux-control--field-separator-regexp
+                     "\\([01]\\)\\(?:" tmux-control--field-separator-regexp
+                     "\\(@[0-9]+\\)\\)?\\'")
+             line)
         (let ((idx (match-string 1 line))
               (act (string= (match-string 3 line) "1"))
               (id (match-string 5 line)))
@@ -2243,7 +2310,11 @@ Each value is a cons (WINDOW-INDEX . WINDOW-ID); the id may be nil on a
 reply from before the format carried it."
   (let ((map (make-hash-table :test 'equal)))
     (dolist (line lines)
-      (when (string-match "\\`\\(%[0-9]+\\)\t\\([0-9]+\\)\\(?:\t\\(@[0-9]+\\)\\)?\\'" line)
+      (when (string-match
+             (concat "\\`\\(%[0-9]+\\)" tmux-control--field-separator-regexp
+                     "\\([0-9]+\\)\\(?:" tmux-control--field-separator-regexp
+                     "\\(@[0-9]+\\)\\)?\\'")
+             line)
         (puthash (match-string 1 line)
                  (cons (match-string 2 line) (match-string 3 line))
                  map)))
@@ -5195,7 +5266,7 @@ swallowed as content and the reply queue would desynchronize."
            (tmux-control--refresh-alt-screen-option)
            (tmux-control--refresh-pane-size))))
       (:pane-size
-       ;; The reply carries "PANExSIZE\tWINDOWxSIZE": the PANE size drives
+       ;; The reply carries "PANExSIZE<SEP>WINDOWxSIZE": the PANE size drives
        ;; the renderer (in a split window the active pane is narrower than
        ;; the window, and the grid must match the pane); the WINDOW size is
        ;; what refresh-client actually negotiates, so the pin detection
@@ -5203,7 +5274,7 @@ swallowed as content and the reply queue would desynchronize."
        ;; would cry wolf on every split layout.
        (let* ((val (car (cl-remove-if #'string-empty-p
                                       (mapcar #'string-trim output))))
-              (parts (and val (split-string val "\t")))
+              (parts (and val (tmux-control--split-control-fields val)))
               (size (tmux-control--parse-pane-size
                      (list (or (car parts) ""))))
               (win-size (and (cadr parts)
@@ -6393,8 +6464,8 @@ by the `:pane-size' branch of `tmux-control--finish-command-output'."
   (when (and tmux-control--active-pane
              (process-live-p tmux-control--process))
     (tmux-control--send-command
-     (format "display-message -p -t %s \"#{pane_width}x#{pane_height}\t#{window_width}x#{window_height}\""
-             tmux-control--active-pane)
+     (format "display-message -p -t %s \"#{pane_width}x#{pane_height}%s#{window_width}x#{window_height}\""
+             tmux-control--active-pane tmux-control--field-separator)
      :pane-size)))
 
 (defun tmux-control--maybe-warn-pinned-size (actual)
@@ -6820,14 +6891,21 @@ screen, prefixed by the mode replay (see
   (let ((ctrl (tmux-control--wb-controller)))
     (with-current-buffer ctrl
       (tmux-control--query
-       (format "list-panes -t %s -F \"#{pane_active}\t#{pane_id}\t#{cursor_x},#{cursor_y},#{cursor_flag}\t%s\""
-               window-id
+       (format "list-panes -t %s -F \"#{pane_active}%s#{pane_id}%s#{cursor_x},#{cursor_y},#{cursor_flag}%s%s\""
+               window-id tmux-control--field-separator
+               tmux-control--field-separator tmux-control--field-separator
                tmux-control--pane-modes-format)
        (lambda (lines)
          (let (pane cur vis modes)
            (cl-loop for l in (or lines '())
                     when (string-match
-                          "\\`1\t\\(%[0-9]+\\)\t\\([^\t]*\\)\t\\([^\t]*\\)\\'" l)
+                          (concat "\\`1" tmux-control--field-separator-regexp
+                                  "\\(%[0-9]+\\)"
+                                  tmux-control--field-separator-regexp
+                                  "\\([^_\t]*\\)"
+                                  tmux-control--field-separator-regexp
+                                  "\\([^_\t]*\\)\\'")
+                          l)
                     ;; Extract every group before the parsers run: they do
                     ;; their own `string-match', which clobbers this match
                     ;; data.
@@ -7094,11 +7172,13 @@ controller or pane render buffer where those locals are bound."
       (tmux-control--call "tmux" full))))
 
 (defconst tmux-control--window-state-format
-  (concat "#{window_layout}\t#{pane_id}\t#{pane_left}\t#{pane_top}\t"
-          "#{pane_width}\t#{pane_height}\t#{pane_active}\t"
-          "#{cursor_x}\t#{cursor_y}\t#{cursor_flag}\t#{pane_current_command}\t"
-          tmux-control--pane-modes-format "\t"
-          "#{pane_title}")
+  (mapconcat
+   #'identity
+   (list "#{window_layout}" "#{pane_id}" "#{pane_left}" "#{pane_top}"
+         "#{pane_width}" "#{pane_height}" "#{pane_active}"
+         "#{cursor_x}" "#{cursor_y}" "#{cursor_flag}" "#{pane_current_command}"
+         tmux-control--pane-modes-format "#{pane_title}")
+   tmux-control--field-separator)
   "`list-panes -F' format folding the layout and every pane's geometry,
 cursor, command, terminal modes, and title into one query, so a (re)tile
 costs a single round trip rather than a `display-message' for the layout
@@ -7126,7 +7206,7 @@ with INFO a plist of :left :top :width :height :active :cursor
 unit-testable without a live tmux."
   (let ((layout nil) (panes nil))
     (dolist (line lines)
-      (let ((f (split-string line "\t")))
+      (let ((f (tmux-control--window-state-fields line)))
         ;; The pane id (field 1) comes straight from the untrusted reply stream
         ;; and is later used as a command TARGET (send-input, select-pane,
         ;; capture); accept only a canonical "%N" so a hostile/buggy server
@@ -7147,12 +7227,7 @@ unit-testable without a live tmux."
                             :cmd (nth 10 f)
                             :modes (tmux-control--parse-pane-modes
                                     (list (nth 11 f)))
-                            ;; `pane_title' is the last field, but an app can set
-                            ;; an arbitrary title (OSC 2) including a literal TAB;
-                            ;; rejoin any TAB-split fragments so the title is not
-                            ;; truncated to its pre-TAB piece (and the pane is not
-                            ;; mis-counted).
-                            :title (string-join (nthcdr 12 f) "\t")))
+                            :title (nth 12 f)))
                 panes))))
     (cons layout (nreverse panes))))
 
