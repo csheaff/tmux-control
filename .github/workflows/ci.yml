@@ -38,7 +38,7 @@ jobs:
             access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
 
       # Pinned to a commit SHA: the action only publishes a moving master.
-      - uses: purcell/setup-emacs@d37e139fc118479b4396f9277927506a8c384519
+      - uses: purcell/setup-emacs@34c6ded44899fd1bf74d2889558befd1750e61a7
         with:
           version: ${{ matrix.emacs-version }}
 
