@@ -79,8 +79,7 @@ attaches, typing a new name creates it.
   deep the history (loaded lazily, extended as you scroll), faithful by
   default, with opt-in compaction of repeated full-screen redraws (toggle with
   `c`). Optionally, scroll the live view's own history in place, iTerm-style,
-  rather than opening the pager — off by default, so the feel call is yours to
-  make.
+  rather than opening the pager — enabled by default, and configurable.
 - **Tiled view** (`C-c C-t`, experimental) — every pane of a window at once,
   split to match tmux's layout.
 - **Split a pane from Emacs** — `C-c |` (side by side) or `C-c -` (stacked)

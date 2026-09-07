@@ -10,6 +10,7 @@
 
 EMACS  ?= emacs
 EAT_DIR ?= $(HOME)/.emacs.d/straight/build/eat
+PYTHON ?= python3
 
 .PHONY: test
 test:
@@ -44,6 +45,24 @@ test-elc: compile
 .PHONY: clean
 clean:
 	rm -f tmux-control.elc
+
+# Repeatable CPU timings, separate from correctness tests.  Uses the compiled
+# package just as a normal installation does; no running tmux is needed.
+.PHONY: benchmark
+benchmark: compile
+	$(EMACS) -Q --batch \
+	  -L "$(EAT_DIR)" -L . \
+	  -l tmux-control.elc -l test/tmux-control-benchmark.el \
+	  -f tmux-control-benchmark-run
+
+# Check the GUI trace's input plan and coordinate/analysis math in batch.
+.PHONY: test-scroll-trace
+test-scroll-trace:
+	$(EMACS) -Q --batch -L "$(EAT_DIR)" -L . -L test \
+	  -l tmux-control.el -l test/tmux-control-scroll-trace.el \
+	  -l test/tmux-control-scroll-trace-test.el \
+	  -l test/tmux-control-idle-gc-experiment-test.el -f ert-run-tests-batch-and-exit
+	$(PYTHON) -m unittest discover -s test -p 'test_scroll_*analysis.py'
 
 # Live integration tests: assert that the rendered Eat buffer matches tmux's
 # own `capture-pane' for the same screen, across plain text / colors /
