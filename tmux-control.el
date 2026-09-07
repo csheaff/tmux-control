@@ -2761,8 +2761,15 @@ KEY includes the buffer modification tick and the counted endpoints.")
                  tmux-control--terminal
                  (eat-term-live-p tmux-control--terminal))
         (set-window-vscroll window 0 t)
-        (let ((eat-terminal tmux-control--terminal))
-          (eat--synchronize-scroll (list window)))
+        (if (fboundp 'eat--synchronize-scroll)
+            (let ((eat-terminal tmux-control--terminal))
+              (eat--synchronize-scroll (list window)))
+          ;; Eat's private helper is not a compatibility guarantee.  Keep
+          ;; the button functional using its public cursor/screen accessors.
+          (set-window-point window
+                            (eat-term-display-cursor tmux-control--terminal))
+          (tmux-control--anchor-windows-to-screen-top (list window))
+          (tmux-control--keep-cursor-visible (list window)))
         (force-mode-line-update)))))
 
 (defun tmux-control--scroll-position-indicator ()

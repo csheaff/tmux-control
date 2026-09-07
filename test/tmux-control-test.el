@@ -4384,6 +4384,30 @@ output), :calls (side-effect invocations in order), :active-pane,
         (when (buffer-live-p pager) (kill-buffer pager))
         (kill-buffer live)))))
 
+(ert-deftest tmux-control-test-scroll-position-click-without-eat-helper ()
+  ;; A missing private Eat helper must not turn the badge into a no-op or
+  ;; signal void-function.  Resume the cursor and show the live screen.
+  (save-window-excursion
+    (with-temp-buffer
+      (tmux-control--reset-buffer)
+      (eat-term-resize tmux-control--terminal 80 24)
+      (tmux-control--write-terminal
+       (mapconcat (lambda (i) (format "row %d\r\n" i))
+                  (number-sequence 1 100) ""))
+      (switch-to-buffer (current-buffer))
+      (let* ((window (selected-window))
+             (event (list 'mouse-1 (list window 'header-line '(0 . 0) 0))))
+        (goto-char (point-min))
+        (set-window-start window (point-min) t)
+        (should-not (equal (tmux-control--scroll-position-indicator) ""))
+        (cl-letf (((symbol-function 'eat--synchronize-scroll) nil))
+          (tmux-control-scroll-position-live event))
+        (should (= (window-point window)
+                   (eat-term-display-cursor tmux-control--terminal)))
+        (should (>= (window-start window)
+                    (eat-term-display-beginning tmux-control--terminal)))
+        (should (equal (tmux-control--scroll-position-indicator) ""))))))
+
 (ert-deftest tmux-control-test-live-history-retains-reading-marker ()
   ;; Output that exhausted Eat's 128K default used to delete the row being
   ;; read.  Exercise real terminal retention across two substantial bursts.
