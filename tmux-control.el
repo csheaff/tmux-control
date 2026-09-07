@@ -123,14 +123,43 @@ history loads on demand as you scroll up (see
 fills a screen with margin."
   :type 'integer)
 
-(defcustom tmux-control-scrollback-extend-lines 2000
+(defcustom tmux-control-scrollback-extend-lines 500
   "Pane-history lines added each time scrollback extends toward the top.
 
-When you scroll within a screen of the top of the loaded history,
+When you scroll near the top of the loaded history (see
+`tmux-control-scrollback-prefetch-screens'),
 scrollback captures this many older lines and prepends them (up to
 `tmux-control-scrollback-lines'), keeping your viewport fixed.  Larger
 values extend in fewer, chunkier steps; smaller values extend more
 smoothly but more often."
+  :type 'integer)
+
+(defcustom tmux-control-scrollback-prefetch-screens 3
+  "Start loading older history this many screenfuls before the loaded top.
+Earlier prefetch gives a remote capture time to arrive before a fast scroll
+reaches the boundary.  Only one extension is in flight at a time."
+  :type 'natnum)
+
+(defcustom tmux-control-live-scrollback-size 1048576
+  "Maximum characters retained in each live tmux-control buffer.
+The default keeps eight times Eat's default history, so incoming output
+is less likely to discard the rows you are reading and move the viewport.
+This is a character limit, not a byte or line limit; colors and other text
+properties consume additional memory, separately for each visited pane.
+Nil inherits `eat-term-scrollback-size' instead.  Takes effect in newly
+created or reconnected buffers; mode hooks can override it locally."
+  :type '(choice natnum (const :tag "Use Eat's setting" nil)))
+
+(defcustom tmux-control-idle-gc-delay 1.0
+  "Seconds without a completed command before optional idle collection.
+Must be positive.  Used by `tmux-control-idle-gc-mode'.  A collection can
+still delay input that arrives after it starts."
+  :type 'number)
+
+(defcustom tmux-control-idle-gc-cons-threshold 10000000
+  "Cons cells allocated since the last GC before optional idle collection.
+Must be a positive integer.  Counts allocations across Emacs, not just
+tmux-control, and is not a byte limit.  Used by `tmux-control-idle-gc-mode'."
   :type 'integer)
 
 (defcustom tmux-control-pause-after nil
@@ -967,8 +996,99 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     map)
   "Keymap for `tmux-control-mode'.")
 
+(defvar tmux-control--idle-gc-timer nil)
+(defvar tmux-control--idle-gc-last-command 0)
+(defvar tmux-control--idle-gc-cons-at-gc 0)
+(defvar tmux-control--idle-gc-collections 0)
+(defvar tmux-control--idle-gc-seconds 0)
+
+;;;###autoload
+(define-minor-mode tmux-control-idle-gc-mode
+  "Collect during quiet periods while a tmux-control view is selected.
+Global opt-in mode, disabled by default.  Applies to existing and future
+live views and scrollback pagers.  Collection affects all of Emacs, but
+is requested only in these views, after `tmux-control-idle-gc-delay'
+without a command and `tmux-control-idle-gc-cons-threshold' allocations.
+Automatic GC settings are untouched.  More frequent collections may
+increase total GC work; input arriving during a collection still waits.
+Disable this mode to remove its timer and hooks.  See also
+`tmux-control-idle-gc-status' for counters since enabling it."
+  :global t :init-value nil :group 'tmux-control
+  (if (not tmux-control-idle-gc-mode)
+      (tmux-control--idle-gc-stop)
+    (condition-case err
+        (progn
+          (unless (tmux-control--idle-gc-options-valid-p)
+            (user-error "Idle GC needs a positive delay and positive integer allocation threshold"))
+          (unless (timerp tmux-control--idle-gc-timer)
+            (setq tmux-control--idle-gc-collections 0
+                  tmux-control--idle-gc-seconds 0)
+            (tmux-control--idle-gc-note-command)
+            (tmux-control--idle-gc-note-collection)
+            (add-hook 'post-command-hook #'tmux-control--idle-gc-note-command)
+            (add-hook 'post-gc-hook #'tmux-control--idle-gc-note-collection)
+            (setq tmux-control--idle-gc-timer
+                  (run-at-time .05 .05 #'tmux-control--idle-gc-check))))
+      (error
+       (setq tmux-control-idle-gc-mode nil)
+       (tmux-control--idle-gc-stop)
+       (signal (car err) (cdr err))))))
+
+(defun tmux-control--idle-gc-options-valid-p ()
+  "Whether the optional collection settings are usable."
+  (and (numberp tmux-control-idle-gc-delay) (> tmux-control-idle-gc-delay 0)
+       (integerp tmux-control-idle-gc-cons-threshold)
+       (> tmux-control-idle-gc-cons-threshold 0)))
+
+(defun tmux-control--idle-gc-note-command ()
+  (setq tmux-control--idle-gc-last-command (float-time)))
+
+(defun tmux-control--idle-gc-note-collection ()
+  ;; Reset on any collection, including one requested by another package.
+  (setq tmux-control--idle-gc-cons-at-gc (car (memory-use-counts))))
+
+(defun tmux-control--idle-gc-check ()
+  "Request collection when the selected tmux-control view is quiet."
+  (when (and tmux-control-idle-gc-mode
+             (tmux-control--idle-gc-options-valid-p)
+             (not (active-minibuffer-window))
+             (with-current-buffer (window-buffer (selected-window))
+               (derived-mode-p 'tmux-control-mode 'tmux-control-scrollback-mode))
+             (>= (- (float-time) tmux-control--idle-gc-last-command)
+                 tmux-control-idle-gc-delay)
+             (>= (- (car (memory-use-counts)) tmux-control--idle-gc-cons-at-gc)
+                 tmux-control-idle-gc-cons-threshold)
+             (not (input-pending-p)))
+    (let ((before gc-elapsed))
+      (garbage-collect)
+      (cl-incf tmux-control--idle-gc-collections)
+      (cl-incf tmux-control--idle-gc-seconds (- gc-elapsed before)))))
+
+(defun tmux-control--idle-gc-stop ()
+  "Remove only this mode's timer and hooks, retaining its last counters."
+  (when (timerp tmux-control--idle-gc-timer)
+    (cancel-timer tmux-control--idle-gc-timer))
+  (setq tmux-control--idle-gc-timer nil)
+  (remove-hook 'post-command-hook #'tmux-control--idle-gc-note-command)
+  (remove-hook 'post-gc-hook #'tmux-control--idle-gc-note-collection))
+
+(defun tmux-control-idle-gc-status ()
+  "Report mode state and requested collections since the last enable."
+  (interactive)
+  (let ((status (list :enabled tmux-control-idle-gc-mode
+                      :collections tmux-control--idle-gc-collections
+                      :gc-ms (* 1000 tmux-control--idle-gc-seconds))))
+    (when (called-interactively-p 'interactive)
+      (message "tmux-control idle GC %s: %d requested collections, %.1f ms total"
+               (if tmux-control-idle-gc-mode "on" "off")
+               tmux-control--idle-gc-collections
+               (* 1000 tmux-control--idle-gc-seconds)))
+    status))
+
 (define-derived-mode tmux-control-mode eat-mode "tmux-control"
   "Major mode for tmux-control buffers."
+  (when tmux-control-live-scrollback-size
+    (setq-local eat-term-scrollback-size tmux-control-live-scrollback-size))
   (tmux-control--disable-line-numbers)
   (tmux-control--disable-margins)
   ;; Terminal rows are fixed grid lines and must never be re-wrapped, but the
@@ -3084,7 +3204,8 @@ synchronously; BUFFER may have been killed in between."
 (defun tmux-control--scrollback-scroll-watch (window start)
   "Extend scrollback when WINDOW has scrolled near the top (START).
 Installed buffer-locally on `window-scroll-functions'.  When the view
-comes within a screenful of the top of the loaded history, load more --
+comes within `tmux-control-scrollback-prefetch-screens' of the top of the
+loaded history, load more --
 deferred to a timer so nothing captures or modifies the buffer from
 inside redisplay."
   (let ((buffer (window-buffer window)))
@@ -3095,15 +3216,16 @@ inside redisplay."
                       (not tmux-control--scrollback-at-top)
                       (< tmux-control--scrollback-depth
                          tmux-control-scrollback-lines)
-                      ;; Within one window-height of the top.  Test it with a
-                      ;; bounded `forward-line' from the top (at most a
-                      ;; window-height of line moves) rather than
+                      ;; Test the prefetch distance with a bounded
+                      ;; `forward-line' from the top rather than
                       ;; `count-lines' to START, which is O(buffer-size) and
                       ;; would run on every scroll event of a long history.
                       (<= (min start (point-max))
                           (save-excursion
                             (goto-char (point-min))
-                            (forward-line (max 20 (window-body-height window)))
+                            (forward-line
+                             (max 20 (* tmux-control-scrollback-prefetch-screens
+                                        (window-body-height window))))
                             (point))))))
       ;; Guard against a burst of scroll events scheduling many extends.
       (with-current-buffer buffer
@@ -4763,12 +4885,15 @@ Lines are compared by their width-insensitive match keys."
 
 (defun tmux-control--line-list-overlap (left right)
   "Return largest safe suffix/prefix overlap between LEFT and RIGHT.
-Lines are compared by their width-insensitive match keys."
-  (let* ((lkeys (mapcar #'tmux-control--scrollback-match-key left))
-         (rkeys (mapcar #'tmux-control--scrollback-match-key right))
-         (max (min (length left)
-                   (length right)
-                   tmux-control-compact-scrollback-window))
+Lines are compared by their width-insensitive match keys.
+Only the last/first `tmux-control-compact-scrollback-window' lines can
+overlap.  Bound key generation and candidate scans to that seam even
+when LEFT contains thousands of older history lines."
+  (let* ((limit tmux-control-compact-scrollback-window)
+         (lkeys (mapcar #'tmux-control--scrollback-match-key (last left limit)))
+         (rkeys (mapcar #'tmux-control--scrollback-match-key
+                        (seq-take right limit)))
+         (max (min (length lkeys) (length rkeys)))
          (overlap 0))
     (while (and (> max 0) (= overlap 0))
       (let ((candidate (cl-subseq rkeys 0 max)))
@@ -5721,26 +5846,34 @@ unchanged."
       (push (format "\e[m\e[%d;%dH" cursor-row cursor-column) out))
     (apply #'concat (nreverse out))))
 
+(defconst tmux-control--octal-characters
+  (apply #'vector (mapcar #'char-to-string (number-sequence 0 #o777)))
+  "Shared replacements for three-digit octal escapes.  Do not modify.")
+
 (defun tmux-control--decode-output (payload)
-  "Decode tmux control mode output PAYLOAD."
-  (let ((i 0)
-        (len (length payload))
-        (out nil))
-    (while (< i len)
-      (if (and (= (aref payload i) ?\\)
-               (<= (+ i 3) (1- len))
-               (tmux-control--octal-digit-p (aref payload (1+ i)))
-               (tmux-control--octal-digit-p (aref payload (+ i 2)))
-               (tmux-control--octal-digit-p (aref payload (+ i 3))))
+  "Decode tmux control mode output PAYLOAD.
+Copy literal runs together instead of allocating a list cell for every
+character.  Replace only complete octal escapes, once: a decoded backslash
+must not cause the following literal digits to be decoded again."
+  (save-match-data
+    (let ((start 0) pieces)
+      (while (string-match "\\\\[0-7]\\{3\\}" payload start)
+        (let* ((pos (match-beginning 0))
+               (code (+ (* 64 (- (aref payload (+ pos 1)) ?0))
+                        (* 8 (- (aref payload (+ pos 2)) ?0))
+                        (- (aref payload (+ pos 3)) ?0))))
+          (when (< start pos)
+            (push (substring payload start pos) pieces))
+          ;; Reuse the replacement rather than making several temporary
+          ;; strings per escape through `replace-regexp-in-string'.
+          (push (aref tmux-control--octal-characters code) pieces)
+          (setq start (+ pos 4))))
+      (if pieces
           (progn
-            (push (+ (* 64 (- (aref payload (1+ i)) ?0))
-                     (* 8 (- (aref payload (+ i 2)) ?0))
-                     (- (aref payload (+ i 3)) ?0))
-                  out)
-            (setq i (+ i 4)))
-        (push (aref payload i) out)
-        (setq i (1+ i))))
-    (apply #'string (nreverse out))))
+            (when (< start (length payload))
+              (push (substring payload start) pieces))
+            (apply #'concat (nreverse pieces)))
+        payload))))
 
 (defun tmux-control--octal-digit-p (char)
   "Return non-nil when CHAR is an octal digit."

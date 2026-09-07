@@ -112,5 +112,8 @@ jobs:
       - name: Unit tests (byte-compiled)
         run: make test-elc EAT_DIR="$HOME/eat"
 
+      - name: Scroll trace measurement tests
+        run: make test-scroll-trace EAT_DIR="$HOME/eat"
+
       - name: Integration tests (live tmux render oracle)
         run: make test-integration EAT_DIR="$HOME/eat"

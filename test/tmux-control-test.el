@@ -187,6 +187,30 @@
   (should (equal (tmux-control--decode-output "x\\07") "x\\07"))
   (should (equal (tmux-control--decode-output "no\\backslash") "no\\backslash")))
 
+(ert-deftest tmux-control-test-decode-output-shared-replacements-stay-pristine ()
+  (dotimes (code 512)
+    (let* ((payload (format "\\%03o" code))
+           (decoded (tmux-control--decode-output payload)))
+      (should (equal decoded (string code)))
+      (put-text-property 0 1 'face 'bold decoded)
+      (should-not (text-properties-at 0 (tmux-control--decode-output payload)))))
+  (string-match "b" "abc")
+  (let ((data (match-data)))
+    (tmux-control--decode-output "x\\033y")
+    (should (equal (match-data) data))))
+
+(ert-deftest tmux-control-test-decode-output-octets-and-literal-runs ()
+  ;; Every byte value, including NUL, CR and high bytes, must survive the
+  ;; control protocol.  A decoded backslash is literal, never a second escape.
+  (let ((bytes (number-sequence 0 255)))
+    (should (equal (tmux-control--decode-output
+                    (mapconcat (lambda (byte) (format "\\%03o" byte)) bytes ""))
+                   (apply #'string bytes))))
+  (should (equal (tmux-control--decode-output "λ界🙂\\134033\\015\\012tail")
+                 "λ界🙂\\033\r\ntail"))
+  (should (equal (tmux-control--decode-output "\\08x\\078\\8\\\\1019\\")
+                 "\\08x\\078\\8\\A9\\")))
+
 (ert-deftest tmux-control-test-extended-output-parse ()
   ;; With flow control on, output arrives as %extended-output with an age
   ;; (and reserved) field before a colon; the value is decoded like %output.
@@ -409,6 +433,23 @@ line feeds and corrupt full-screen TUI apps like Claude Code."
     ;; A boundary that is not distinctive enough is rejected.
     (should (= (tmux-control--line-list-overlap '("x" "a" "") '("a" "" "y"))
                0))))
+
+(ert-deftest tmux-control-test-line-list-overlap-long-history ()
+  ;; Large histories still choose the largest safe seam, honor the cap,
+  ;; normalize width differences, and retain the original colored text.
+  (let* ((older (make-list 10000 "old output"))
+         (newer (make-list 10000 "new output"))
+         (line (propertize "step  1" 'font-lock-face 'bold))
+         (left (append older (list line "step 2" "step  1" "step 2")))
+         (right (append '("step 1" "step  2" "step 1" "step  2") newer)))
+    (dolist (case '((0 . 0) (1 . 0) (2 . 2) (3 . 2) (4 . 4) (300 . 4)))
+      (let ((tmux-control-compact-scrollback-window (car case)))
+        (should (= (tmux-control--line-list-overlap left right) (cdr case)))))
+    (let* ((tmux-control-compact-scrollback-window 2)
+           (kept (tmux-control--scrollback-drop-seam-overlap left right)))
+      (should (equal (last kept 2) (list line "step 2")))
+      (should (eq (get-text-property 0 'font-lock-face (car (last kept 2)))
+                  'bold)))))
 
 ;;; Scrollback chunking and chrome detection.
 
@@ -4184,12 +4225,12 @@ output), :calls (side-effect invocations in order), :active-pane,
         (with-temp-buffer
           (tmux-control-scrollback-mode)
           (let ((inhibit-read-only t))
-            (dotimes (i 60) (insert (format "line %d\n" i))))
+            (dotimes (i 300) (insert (format "line %d\n" i))))
           (set-window-buffer (selected-window) (current-buffer))
           (let ((win (selected-window))
                 (top (point-min))
                 (deep (save-excursion
-                        (goto-char (point-min)) (forward-line 50) (point))))
+                        (goto-char (point-min)) (forward-line 250) (point))))
             (let ((tmux-control-scrollback-lines 10000))
               ;; Near the top, more to load, nothing in flight -> schedule,
               ;; and latch the in-flight guard.
@@ -4221,6 +4262,58 @@ output), :calls (side-effect invocations in order), :active-pane,
               (tmux-control--scrollback-scroll-watch win top)
               (should (= scheduled 1))
               (should-not tmux-control--scrollback-extending))))))))
+
+(ert-deftest tmux-control-test-scrollback-prefetches-before-last-screen ()
+  (save-window-excursion
+    (with-temp-buffer
+      (tmux-control-scrollback-mode)
+      (let ((inhibit-read-only t)) (insert (make-string 500 ?\n)))
+      (set-window-buffer (selected-window) (current-buffer))
+      (setq tmux-control--scrollback-depth 500)
+      (let* ((window (selected-window))
+             (start (save-excursion
+                      (goto-char (point-min))
+                      (forward-line (* 2 (window-body-height window)))
+                      (point)))
+             (scheduled 0))
+        (cl-letf (((symbol-function 'run-at-time)
+                   (lambda (&rest _) (cl-incf scheduled))))
+          (let ((tmux-control-scrollback-prefetch-screens 1))
+            (tmux-control--scrollback-scroll-watch window start)
+            (should (= scheduled 0)))
+          (let ((tmux-control-scrollback-prefetch-screens 3))
+            (tmux-control--scrollback-scroll-watch window start)
+            (should (= scheduled 1))
+            (tmux-control--scrollback-scroll-watch window start)
+            (should (= scheduled 1))))))))
+
+(ert-deftest tmux-control-test-live-history-retains-reading-marker ()
+  ;; Output that exhausted Eat's 128K default used to delete the row being
+  ;; read.  Exercise real terminal retention across two substantial bursts.
+  (let ((tmux-control-live-scrollback-size 1048576)
+        (eat-term-scrollback-size 131072))
+    (with-temp-buffer
+      (tmux-control--reset-buffer)
+      (eat-term-resize tmux-control--terminal 80 24)
+      (tmux-control--write-terminal
+       (mapconcat (lambda (i) (format "row %04d %s\r\n" i (make-string 60 ?x)))
+                  (number-sequence 1 2000) ""))
+      (goto-char (point-min))
+      (search-forward "row 1000")
+      (let ((anchor (copy-marker (line-beginning-position))))
+        (tmux-control--write-terminal
+         (mapconcat (lambda (i) (format "row %04d %s\r\n" i (make-string 60 ?x)))
+                    (number-sequence 2001 4000) ""))
+        (goto-char anchor)
+        (should (looking-at "row 1000"))
+        (set-marker anchor nil)))
+    ;; The larger budget is buffer-local; unrelated Eat terminals inherit
+    ;; their own configured limit.  Nil opts tmux-control out of the override.
+    (should (= eat-term-scrollback-size 131072))
+    (let ((tmux-control-live-scrollback-size nil))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (should (= eat-term-scrollback-size 131072))))))
 
 (ert-deftest tmux-control-test-window-buffer-mode-line-drops-process-status ()
   ;; A per-window render buffer owns no process (the controller does);
@@ -5084,6 +5177,123 @@ output), :calls (side-effect invocations in order), :active-pane,
       (tmux-control--kill-process)
       (should-not (memq tm timer-list))
       (should (null tmux-control--retile-timer)))))
+
+(defmacro tmux-control-test--with-idle-gc (&rest body)
+  "Isolate the optional GC mode and clean up any real timer it starts."
+  (declare (indent 0) (debug t))
+  `(let ((tmux-control-idle-gc-mode nil)
+         (tmux-control--idle-gc-timer nil)
+         (tmux-control--idle-gc-last-command 0)
+         (tmux-control--idle-gc-cons-at-gc 0)
+         (tmux-control--idle-gc-collections 0)
+         (tmux-control--idle-gc-seconds 0)
+         (tmux-control-idle-gc-delay 1.0)
+         (tmux-control-idle-gc-cons-threshold 100)
+         (post-command-hook '(ignore))
+         (post-gc-hook '(ignore)))
+     (unwind-protect (progn ,@body)
+       (tmux-control-idle-gc-mode -1))))
+
+(ert-deftest tmux-control-test-idle-gc-lifecycle-is-idempotent ()
+  (tmux-control-test--with-idle-gc
+    (let ((threshold gc-cons-threshold) (percentage gc-cons-percentage))
+      (tmux-control-idle-gc-mode 1)
+      (let ((timer tmux-control--idle-gc-timer))
+        (should (memq timer timer-list))
+        (tmux-control-idle-gc-mode 1)
+        (should (eq timer tmux-control--idle-gc-timer))
+        (should (= 1 (cl-count #'tmux-control--idle-gc-note-command post-command-hook)))
+        (tmux-control-idle-gc-mode -1)
+        (should-not (memq timer timer-list)))
+      (should-not tmux-control--idle-gc-timer)
+      (should (equal post-command-hook '(ignore)))
+      (should (equal post-gc-hook '(ignore)))
+      (should (= gc-cons-threshold threshold))
+      (should (= gc-cons-percentage percentage)))))
+
+(ert-deftest tmux-control-test-idle-gc-rejects-invalid-settings-cleanly ()
+  (dolist (settings '((0 100) (-1 100) ("bad" 100) (1 0) (1 1.5)))
+    (tmux-control-test--with-idle-gc
+      (setq tmux-control-idle-gc-delay (car settings)
+            tmux-control-idle-gc-cons-threshold (cadr settings))
+      (should-error (tmux-control-idle-gc-mode 1) :type 'user-error)
+      (should-not tmux-control-idle-gc-mode)
+      (should-not tmux-control--idle-gc-timer)
+      (should (equal post-command-hook '(ignore)))
+      (should (equal post-gc-hook '(ignore))))))
+
+(ert-deftest tmux-control-test-idle-gc-startup-error-cleans-hooks ()
+  (tmux-control-test--with-idle-gc
+    (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) (error "timer failed"))))
+      (should-error (tmux-control-idle-gc-mode 1)))
+    (should-not tmux-control-idle-gc-mode)
+    (should (equal post-command-hook '(ignore)))
+    (should (equal post-gc-hook '(ignore)))))
+
+(ert-deftest tmux-control-test-idle-gc-gates-on-selected-view-and-input ()
+  (tmux-control-test--with-idle-gc
+    (save-window-excursion
+      (with-temp-buffer
+        (set-window-buffer (selected-window) (current-buffer))
+        (let ((tmux-control-idle-gc-mode t)
+              (pending nil) (minibuffer nil) (calls 0))
+          (cl-letf (((symbol-function 'float-time) (lambda (&rest _) 2.0))
+                    ((symbol-function 'memory-use-counts) (lambda () '(200 0 0 0 0 0 0)))
+                    ((symbol-function 'input-pending-p) (lambda (&rest _) pending))
+                    ((symbol-function 'active-minibuffer-window) (lambda () minibuffer))
+                    ((symbol-function 'garbage-collect) (lambda () (cl-incf calls))))
+            ;; Other buffers, active input, and a minibuffer must all prevent GC.
+            (tmux-control--idle-gc-check)
+            (should (= calls 0))
+            (setq major-mode 'tmux-control-mode pending t)
+            (tmux-control--idle-gc-check)
+            (should (= calls 0))
+            (setq pending nil minibuffer t)
+            (tmux-control--idle-gc-check)
+            (should (= calls 0))
+            (setq minibuffer nil)
+            (tmux-control--idle-gc-note-command)
+            (tmux-control--idle-gc-check)
+            (should (= calls 0))
+            (setq tmux-control--idle-gc-last-command 0
+                  tmux-control--idle-gc-cons-at-gc 150)
+            (tmux-control--idle-gc-check)
+            (should (= calls 0))
+            (setq tmux-control--idle-gc-cons-at-gc 0)
+            (tmux-control--idle-gc-check)
+            (should (= calls 1))
+            (setq major-mode 'tmux-control-scrollback-mode)
+            (tmux-control--idle-gc-check)
+            (should (= calls 2))
+            ;; A disabled mode must also reject a stale queued callback.
+            (setq tmux-control-idle-gc-mode nil)
+            (tmux-control--idle-gc-check)
+            (should (= calls 2))))))))
+
+(ert-deftest tmux-control-test-idle-gc-resets-pressure-and-records-own-cost ()
+  (tmux-control-test--with-idle-gc
+    (save-window-excursion
+      (with-temp-buffer
+        (setq major-mode 'tmux-control-mode)
+        (set-window-buffer (selected-window) (current-buffer))
+        (let ((tmux-control-idle-gc-mode t) (gc-elapsed 1.0))
+          (cl-letf (((symbol-function 'float-time) (lambda (&rest _) 2.0))
+                    ((symbol-function 'memory-use-counts) (lambda () '(200 0 0 0 0 0 0)))
+                    ((symbol-function 'input-pending-p) (lambda (&rest _) nil))
+                    ((symbol-function 'active-minibuffer-window) (lambda () nil))
+                    ((symbol-function 'garbage-collect)
+                     (lambda () (cl-incf gc-elapsed .125)
+                       (run-hooks 'post-gc-hook))))
+            (add-hook 'post-gc-hook #'tmux-control--idle-gc-note-collection)
+            (tmux-control--idle-gc-check)
+            (tmux-control--idle-gc-check)
+            (should (= tmux-control--idle-gc-collections 1))
+            (should (= (plist-get (tmux-control-idle-gc-status) :gc-ms) 125))
+            ;; An external collection resets eligibility without adding a request.
+            (setq tmux-control--idle-gc-cons-at-gc 0)
+            (run-hooks 'post-gc-hook)
+            (tmux-control--idle-gc-check)
+            (should (= tmux-control--idle-gc-collections 1))))))))
 
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

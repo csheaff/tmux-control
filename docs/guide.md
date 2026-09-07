@@ -289,7 +289,7 @@ view):
   copy-mode rule: the gesture that took you into history takes you back out,
   no key to remember.  `ESC` also returns to the live view.
 
-### Continuous live-view scrollback (iTerm-style, opt-in)
+### Continuous live-view scrollback (iTerm-style)
 
 ```elisp
 (setq tmux-control-wheel-scrolls-live-history t)
@@ -310,12 +310,12 @@ also opens it directly from the live screen, when the pane is fresh or quiet
 enough that its whole history already fits on screen; from there the pager
 opens at the same tail, so it is seamless.)
 
-Off by default: it changes how the live view itself answers the wheel, so it
-is opt-in. With it off, wheel-up opens the pager immediately.  (Requires
+Enabled by default. With it off, wheel-up opens the pager immediately. (Requires
 `tmux-control-wheel-enters-scrollback` to remain non-nil.)
 
 A few characteristics worth knowing. The retained history is Eat's own
-scrollback (bounded, ~128KB), so it covers this session's output, not the
+scrollback (bounded to 1,048,576 characters per buffer by
+`tmux-control-live-scrollback-size`), so it covers this session's output, not the
 deeper pre-session history — that is what `C-c C-e` is for. During a **flood**
 larger than that buffer, the oldest retained lines (including a spot you had
 scrolled up to) are trimmed away and the view drops to the top of what
@@ -325,7 +325,89 @@ the steadier choice for studying history while a pane is gushing output. The
 feature is also scoped to the single live view — **tiled** panes keep the
 plain pager-on-wheel-up behavior regardless of this setting.
 
+The live-history limit applies to new or reconnected buffers. Raise it to
+retain more output, or set it to `nil` to inherit `eat-term-scrollback-size`.
+More retained text uses more memory in every visited pane; face properties
+add overhead beyond the character count.
+
 Line numbers are disabled locally in live and scrollback buffers.
+
+### Measuring scrolling performance
+
+`M-x tmux-control-idle-gc-mode` enables optional idle-time garbage
+collection for all existing and future tmux-control views, including the
+scrollback pager. Run the same command again to turn it off. It is disabled
+by default. For a persistent opt-in, add `(tmux-control-idle-gc-mode 1)`
+after loading the package in your configuration.
+
+The defaults request collection after one second without a completed
+command and ten million newly allocated cons cells, while a tmux-control
+view is selected and no input is pending. Customize
+`tmux-control-idle-gc-delay` and `tmux-control-idle-gc-cons-threshold` to
+adjust these positive values. The allocation count covers all of Emacs;
+collection itself also affects the whole process. Emacs's automatic GC
+settings remain unchanged. The mode keeps a small polling timer while
+enabled and removes its timer and hooks when disabled.
+
+In a controlled five-minute comparison, idle scheduling reduced the worst
+software response from 242 ms to 12 ms. It also increased total collection
+work, and a deliberate test of input resuming during collection still
+produced 62–71 ms responses. Try it with your normal workload before making
+it permanent. `M-x tmux-control-idle-gc-status` reports the number and total
+GC time of collections requested by the mode since enabling it. These
+counters exclude collections requested automatically or by other packages.
+
+For repeatable input-to-redisplay measurements and content-position traces,
+see [Quantifying GUI scroll trajectories](scroll-tracing.md). The GUI
+recorder compares fixed pixel-input sequences at 60 and 120 Hz, including
+queue delays, history-loading boundaries, and unwanted movement.
+
+The live view uses your normal Emacs wheel handling, including
+`pixel-scroll-precision-mode` when enabled. Smoothness also depends on how
+long Emacs spends processing output and preparing newly captured history:
+those run on the same thread that handles wheel events.
+
+To identify which work is causing pauses in your actual session:
+
+1. Run `M-x profiler-start` and choose `cpu`.
+2. Scroll for 10–15 seconds in the view that feels slow.
+3. Run `M-x profiler-stop`, then `M-x profiler-report`. Expand the busiest
+   entries with `TAB`.
+
+Compare separate recordings of a quiet live pane, a live pane receiving
+output, and the `C-c C-e` pager while scrolling far enough to load older
+history. Time in `pixel-scroll-precision`/redisplay points toward display
+work; `tmux-control--filter` and Eat point toward incoming output; scrollback
+preparation and seam matching point toward history extension. CPU sampling
+does not measure the network wait for a capture. The profiler is Emacs-wide,
+so unrelated buffers and packages may also appear.
+
+For repeatable CPU measurements without touching a running pane:
+
+```sh
+make benchmark EAT_DIR=/path/to/eat
+```
+
+This uses synthetic plain and colored histories of 500, 2,000 and 10,000
+rows, plus live-output decoding. It reports mean elapsed and GC time for
+the compiled package. Compare the same Emacs version and machine; these are
+component timings, not scroll frame rates or an iTerm comparison.
+
+In a local Emacs 30.2 run, limiting overlap matching to the history seam
+reduced the 2,000-row case from 6.35 ms to 1.03 ms, and the 10,000-row case
+from 29.68 ms to 1.10 ms. Copying literal output in runs reduced the
+1,000-row plain-output decode from 0.81 ms to 0.05 ms. Colored-history
+preparation still took about 10 ms for 2,000 rows and 48 ms for 10,000 rows;
+the default lazy chunks avoid preparing the full history on each extension.
+
+A follow-up GUI test with colored, numbered rows reproduced a visible jump
+when Eat's original 131,072-character budget discarded the row being read.
+With the new 1,048,576-character budget the reading position survived the
+same 2,000-row stream. Reducing extension chunks from 2,000 to 500 rows
+reduced the largest observed capture-processing callback from 35.1 ms to
+11.4 ms (14.2 ms in a final pass with earlier prefetch enabled). These were
+short local tests using injected wheel events, not a
+measurement of physical trackpad momentum or remote capture latency.
 
 ## Keys, raw mode, and paste
 
@@ -439,9 +521,14 @@ the pane history is:
   capture, colorize, and (when compaction is on) collapse, so the pager
   appears immediately.
 - Scrolling toward the top loads more, `tmux-control-scrollback-extend-lines`
-  (default `2000`) at a time, prepended above what you are reading with your
+  (default `500`) at a time, prepended above what you are reading with your
   viewport held in place — so the cost of older history is paid only for the
   lines you actually look at, in bounded chunks, never all at once.
+- Loading starts `tmux-control-scrollback-prefetch-screens` (default `3`)
+  screenfuls before the loaded top, giving a capture time to arrive before
+  you reach it. Smaller chunks reduce processing pauses but require more
+  capture round trips; increase the chunk size or prefetch distance on a
+  slow connection if you keep reaching the boundary before history arrives.
 - `tmux-control-scrollback-lines` (default `10000`) only **caps** how deep the
   lazy extension will go.  Raise it if you routinely scroll back very far; it
   is itself capped by the pane's own tmux `history-limit`.  Because the open no
