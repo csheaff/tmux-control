@@ -4287,6 +4287,103 @@ output), :calls (side-effect invocations in order), :active-pane,
             (tmux-control--scrollback-scroll-watch window start)
             (should (= scheduled 1))))))))
 
+(ert-deftest tmux-control-test-scroll-position-live-viewport ()
+  ;; Point can remain at the live cursor during pixel scrolling.  The badge
+  ;; must follow the viewport, update with output, and vanish back at live.
+  (save-window-excursion
+    (with-temp-buffer
+      (tmux-control--reset-buffer)
+      (eat-term-resize tmux-control--terminal 80 24)
+      (tmux-control--write-terminal
+       (mapconcat (lambda (i) (format "row %d\r\n" i))
+                  (number-sequence 1 200) ""))
+      (switch-to-buffer (current-buffer))
+      (let* ((window (selected-window))
+             (top (eat-term-display-beginning tmux-control--terminal))
+             (start (save-excursion (goto-char top) (forward-line -120) (point)))
+             (cursor (point))
+             (tmux-control-scroll-position-indicator t))
+        (set-window-start window start t)
+        (should (equal (substring-no-properties
+                        (tmux-control--scroll-position-indicator))
+                       " ↑ 120 lines "))
+        (should (= (point) cursor))
+        (should (string-prefix-p " ↑ 120 lines " (tmux-control--header-line)))
+        (let ((tmux-control-scroll-position-indicator nil))
+          (should (equal (tmux-control--scroll-position-indicator) "")))
+        (tmux-control--feed-terminal "another row\r\n")
+        (should (equal (substring-no-properties
+                        (tmux-control--scroll-position-indicator))
+                       " ↑ 121 lines "))
+        (set-window-start window
+                          (eat-term-display-beginning tmux-control--terminal) t)
+        (should (equal (tmux-control--scroll-position-indicator) ""))))))
+
+(ert-deftest tmux-control-test-scroll-position-pager ()
+  ;; The pager measures its visible snapshot, independent of point and of
+  ;; history prepended by lazy loading; it makes no claim about live output.
+  (save-window-excursion
+    (with-temp-buffer
+      (tmux-control-scrollback-mode)
+      (let ((inhibit-read-only t)) (insert (make-string 200 ?\n)))
+      (switch-to-buffer (current-buffer))
+      (let ((visible-end 81)
+            (tmux-control-scroll-position-indicator t))
+        (cl-letf (((symbol-function 'window-end) (lambda (&rest _) visible-end)))
+          (let ((badge (tmux-control--scroll-position-indicator)))
+            (should (equal (substring-no-properties badge) " ↑ 120 lines "))
+            (should (eq (lookup-key (get-text-property 0 'keymap badge)
+                                   [header-line mouse-1])
+                        #'tmux-control-scroll-position-live)))
+          (let ((inhibit-read-only t))
+            (goto-char (point-min))
+            (insert (make-string 500 ?\n)))
+          (cl-incf visible-end 500)
+          (should (equal (substring-no-properties
+                          (tmux-control--scroll-position-indicator))
+                         " ↑ 120 lines "))
+          (setq visible-end (1- (point-max)))
+          (should (equal (substring-no-properties
+                          (tmux-control--scroll-position-indicator))
+                         " ↑ 1 line "))
+          (setq visible-end (point-max))
+          (should (equal (tmux-control--scroll-position-indicator) "")))))))
+
+(ert-deftest tmux-control-test-scroll-position-click-target-window ()
+  ;; A click in another window must resume that terminal, including from
+  ;; its separate pager, without relying on an eventual redisplay hook.
+  (save-window-excursion
+    (let ((live (generate-new-buffer " *tc-position-live*"))
+          (pager (generate-new-buffer " *tc-position-pager*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer live
+              (tmux-control--reset-buffer)
+              (eat-term-resize tmux-control--terminal 80 24)
+              (tmux-control--write-terminal
+               (mapconcat (lambda (i) (format "row %d\r\n" i))
+                          (number-sequence 1 100) "")))
+            (let ((window (split-window-below)))
+              (set-window-buffer window live)
+              (set-window-start window 1 t)
+              (let ((event (list 'mouse-1 (list window 'header-line '(0 . 0) 0))))
+                (tmux-control-scroll-position-live event)
+                (should (eq (selected-window) window))
+                (should (= (window-point window)
+                           (eat-term-display-cursor tmux-control--terminal)))
+                (should (equal (tmux-control--scroll-position-indicator) ""))
+                (with-current-buffer pager
+                  (tmux-control-scrollback-mode)
+                  (setq tmux-control--live-buffer live))
+                (set-window-buffer window pager)
+                (tmux-control-scroll-position-live event)
+                (should (eq (window-buffer window) live))
+                (should-not (buffer-live-p pager))
+                (should (= (window-point window)
+                           (eat-term-display-cursor tmux-control--terminal))))))
+        (when (buffer-live-p pager) (kill-buffer pager))
+        (kill-buffer live)))))
+
 (ert-deftest tmux-control-test-live-history-retains-reading-marker ()
   ;; Output that exhausted Eat's 128K default used to delete the row being
   ;; read.  Exercise real terminal retention across two substantial bursts.

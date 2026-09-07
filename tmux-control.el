@@ -448,6 +448,13 @@ A small debounce keeps navigation snappy when previews require a remote
 tmux query over SSH."
   :type 'number)
 
+(defcustom tmux-control-scroll-position-indicator t
+  "Non-nil shows a clickable line count while viewing history.
+The live header counts rows above the live screen; the scrollback pager
+counts text lines below the viewport in its captured snapshot.  Click to
+return to live output.  Tiled panes show it in their mode line instead."
+  :type 'boolean)
+
 (defcustom tmux-control-window-tab-bar t
   "Non-nil shows a header-line tab bar of the session's windows.
 
@@ -1294,7 +1301,8 @@ session (tmux attaches if it exists, otherwise creates it)."
       ;; Header line: the window tab bar and/or the cross-session activity
       ;; strip (independent features sharing one row).  Both must ignore the
       ;; connect seed's repaint burst, so quiet activity for either.
-      (when (or tmux-control-window-tab-bar tmux-control-session-activity
+      (when (or tmux-control-scroll-position-indicator
+                tmux-control-window-tab-bar tmux-control-session-activity
                 tmux-control-session-label)
         (setq-local header-line-format '(:eval (tmux-control--header-line)))
         ;; The connect seed repaints every pane; don't let that flag everything.
@@ -2730,6 +2738,68 @@ server is always named (see `tmux-control--connection-name')."
                 (format "tmux session %s"
                         (tmux-control--connection-name host tmux-control--session)))))
 
+(defvar-local tmux-control--scroll-position-cache nil
+  "Cached (KEY . COUNT) for the visible scroll position.
+KEY includes the buffer modification tick and the counted endpoints.")
+
+(defvar tmux-control--scroll-position-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [header-line mouse-1] #'tmux-control-scroll-position-live)
+    (define-key map [mode-line mouse-1] #'tmux-control-scroll-position-live)
+    map)
+  "Mouse bindings for the scroll position indicator.")
+
+(defun tmux-control-scroll-position-live (event)
+  "Return the window clicked in EVENT to live output."
+  (interactive "e")
+  (let ((window (posn-window (event-start event))))
+    (when (window-live-p window)
+      (select-window window)
+      (when (derived-mode-p 'tmux-control-scrollback-mode)
+        (tmux-control-live))
+      (when (and (derived-mode-p 'tmux-control-mode)
+                 tmux-control--terminal
+                 (eat-term-live-p tmux-control--terminal))
+        (set-window-vscroll window 0 t)
+        (let ((eat-terminal tmux-control--terminal))
+          (eat--synchronize-scroll (list window)))
+        (force-mode-line-update)))))
+
+(defun tmux-control--scroll-position-indicator ()
+  "Return a clickable history offset for the window being redisplayed.
+Uses viewport positions, never point: pixel scrolling can leave point at
+the live cursor while the window is reading history.  Cache counts so an
+unchanged header does not repeatedly scan retained history."
+  (let ((window (selected-window)))
+    (if (not (and tmux-control-scroll-position-indicator
+                  (eq (window-buffer window) (current-buffer))
+                  (derived-mode-p 'tmux-control-mode
+                                  'tmux-control-scrollback-mode)))
+        ""
+      (let* ((pager (derived-mode-p 'tmux-control-scrollback-mode))
+             (start (if pager (window-end window t) (window-start window)))
+             (end (if pager (point-max)
+                    (when (and tmux-control--terminal
+                               (eat-term-live-p tmux-control--terminal))
+                      (let ((beg (eat-term-display-beginning
+                                  tmux-control--terminal)))
+                        (if (markerp beg) (marker-position beg) beg)))))
+             (key (list (buffer-chars-modified-tick) start end))
+             (count (if (equal key (car tmux-control--scroll-position-cache))
+                        (cdr tmux-control--scroll-position-cache)
+                      (let ((n (if (and start end (< start end))
+                                   (count-lines start end) 0)))
+                        (setq tmux-control--scroll-position-cache (cons key n))
+                        n))))
+        (if (zerop count) ""
+          (propertize (format " ↑ %d %s " count (if (= count 1) "line" "lines"))
+                      'face 'mode-line-emphasis
+                      'mouse-face 'highlight
+                      'help-echo (if pager
+                                     "Lines below this view in the snapshot; click to return to live output"
+                                   "Rows above the live screen; click to return to live output")
+                      'keymap tmux-control--scroll-position-map))))))
+
 (defun tmux-control--header-line ()
   "Compose the live buffer's header line as \"here\" on the left, \"elsewhere\"
 in the right corner.
@@ -2751,7 +2821,8 @@ self-gates on its option."
          (connector (if (and (> (length label) 0) (> (length tabs) 0))
                         (propertize " ›" 'face 'tmux-control-tab-inactive)
                       ""))
-         (left (concat label connector tabs))
+         (left (concat (tmux-control--scroll-position-indicator)
+                       label connector tabs))
          (others (if (and tmux-control-session-activity (not tmux-control--tiled))
                      (tmux-control--flagged-other-session-buffers)
                    nil)))
@@ -2774,6 +2845,7 @@ hint, so entering scrollback does not look like the header vanished.  Falls
 back to a plain info line only when neither the label nor the tabs are
 available."
   (let* ((live tmux-control--live-buffer)
+         (position (tmux-control--scroll-position-indicator))
          ;; Show the CURRENT mode, then what `c' switches to, so it never
          ;; reads as if verbatim were active while compaction is on.
          (cmode (if tmux-control-compact-scrollback
@@ -2792,16 +2864,21 @@ available."
                         (propertize " ›" 'face 'tmux-control-tab-inactive)
                       ""))
          (head (concat label connector (or tabs ""))))
-    (if (> (length head) 0)
-        (concat head (propertize (format "  ⇡ scrollback  g:refresh  %s  q/RET:live "
-                                         cmode)
-                                 'face 'tmux-control-tab-inactive))
-      (format " %s socket:%s session:%s target:%s    g:refresh  %s  q/l/RET:live"
-              (or tmux-control--host "local")
-              tmux-control--socket-name
-              tmux-control--session
-              tmux-control--scrollback-target
-              cmode))))
+    (concat
+     position
+     (if (> (length head) 0)
+         (concat head
+                 (propertize
+                  (format "%s  q/RET:live  g:refresh  %s "
+                          (if (string-empty-p position) "  ⇡ scrollback" "")
+                          cmode)
+                  'face 'tmux-control-tab-inactive))
+       (format " %s socket:%s session:%s target:%s    q/l/RET:live  g:refresh  %s"
+               (or tmux-control--host "local")
+               tmux-control--socket-name
+               tmux-control--session
+               tmux-control--scrollback-target
+               cmode)))))
 
 (defun tmux-control-other-pane ()
   "Switch the live view to the next pane in the current window.
@@ -6983,7 +7060,8 @@ it asynchronously over the control connection."
         ;; "no process" -- alarming for a perfectly live view.  Keep the
         ;; rest (the [semi-char] mode indicator), drop the status.
         (setq mode-line-process (remove ":%s" mode-line-process))
-        (when (or tmux-control-window-tab-bar tmux-control-session-activity
+        (when (or tmux-control-scroll-position-indicator
+                  tmux-control-window-tab-bar tmux-control-session-activity
                 tmux-control-session-label)
           (setq-local header-line-format
                       '(:eval (tmux-control--header-line))))
@@ -7401,7 +7479,7 @@ apart), then the running command and, when distinct, the pane title."
          (pane (tmux-control--mode-line-safe (or tmux-control--active-pane "?")))
          (cmd (tmux-control--mode-line-safe (plist-get info :cmd)))
          (title (tmux-control--mode-line-safe (plist-get info :title))))
-    (concat " "
+    (concat (tmux-control--scroll-position-indicator) " "
             (propertize (format "[%s]" pane) 'face 'mode-line-emphasis)
             (when (and cmd (not (string-empty-p cmd))) (concat " " cmd))
             (when (and title (not (string-empty-p title)) (not (equal title cmd)))
