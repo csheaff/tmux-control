@@ -6,13 +6,9 @@
 the [iTerm2 tmux-integration](https://iterm2.com/documentation-tmux-integration.html)
 idea, but in Emacs.
 
-![A live tmux session in Emacs via tmux-control: the session's windows as a header-line tab bar, switched with one key, with a dot flagging a background window that produced output and other sessions named in the right corner](docs/images/demo.gif)
+![Switching tmux windows in Emacs, scrolling through history with a line indicator, and clicking the indicator to return to live output](docs/images/demo.gif)
 
-*A live tmux session in Emacs. Each window is a **tab** in the header line,
-flipped with one key (`C-c C-n`); a **dot** marks a background window with new
-output. Other connected sessions that want you are **named in the right corner**
-— click one to jump there. Every pane is just an Emacs buffer you can search and
-copy from.*
+*Switch tmux windows, browse history, and jump back to live output—all inside Emacs.*
 
 Other ways to pair Emacs with tmux either **send it commands**
 ([`emamux`](https://github.com/emacsorphanage/emamux)), **navigate** between
