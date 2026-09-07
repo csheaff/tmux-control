@@ -5981,28 +5981,20 @@ cursor position and their cursor line is kept visible."
 
 (defun tmux-control--anchor-windows-to-screen-top (windows)
   "Set each of WINDOWS to start at the top of the terminal's current screen.
-The current screen is the last `eat-term' height rows OF THE TERMINAL --
-counted back from `eat-term-end', not from the end of the buffer, which
-also holds anything appended after the terminal (see
-`tmux-control--message') -- so this reveals a full-screen TUI from its top
+The current screen begins at `eat-term-display-beginning' of the terminal --
+not counted back from the end of the buffer or terminal, which overshoots
+into scrollback whenever the screen has unmaterialized trailing blank
+rows or wrapped lines -- so this reveals a full-screen TUI from its top
 while still showing the latest screen of a scrolling pane.
 `tmux-control--keep-cursor-visible' runs after and only pulls the start
 forward when the cursor would otherwise fall below
 the body (e.g. a tall prompt glyph on a scrolling log), so the follow-bottom
 behavior is preserved."
-  (let ((height (and tmux-control--terminal
-                     (eat-term-live-p tmux-control--terminal)
-                     (cdr (eat-term-size tmux-control--terminal)))))
-    (when (and height (> height 0))
-      ;; Count back from the END OF THE TERMINAL, not the end of the buffer.
-      ;; `tmux-control--message' appends its notes AFTER the terminal, and
-      ;; anchoring on `point-max' let one warning push this pane's view that
-      ;; many lines past the top of its own screen -- permanently, since the
-      ;; anchor is recomputed from the same stale reference on every flush.
-      (let ((top (save-excursion
-                   (goto-char (eat-term-end tmux-control--terminal))
-                   (forward-line (- (1- height)))
-                   (line-beginning-position))))
+  (when (and tmux-control--terminal
+             (eat-term-live-p tmux-control--terminal))
+    (let* ((beg (eat-term-display-beginning tmux-control--terminal))
+           (top (if (markerp beg) (marker-position beg) beg)))
+      (when top
         (dolist (window windows)
           (when (window-live-p window)
             (set-window-start window top t)))))))
