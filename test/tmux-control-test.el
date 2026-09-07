@@ -4557,7 +4557,7 @@ output), :calls (side-effect invocations in order), :active-pane,
         (set-window-buffer window (current-buffer))
         (tmux-control--anchor-windows-to-screen-top (list window))
         (should (= (window-start window)
-                   (marker-position (eat-term-display-beginning tmux-control--terminal))))))
+                   (eat-term-display-beginning tmux-control--terminal)))))
     (eat-term-delete tmux-control--terminal)))
 
 (ert-deftest tmux-control-test-message-echoes ()
