@@ -299,6 +299,24 @@
     (should (equal (car r) "héllo"))
     (should (equal (cdr r) ""))))
 
+(ert-deftest tmux-control-test-utf8-decode-stream-preserves-carriage-returns ()
+  "Ensure `tmux-control--utf8-decode-stream' does not convert \\r to \\n.
+Emacs's `utf-8' coding system performs newline translation (Mac/DOS EOL
+decoding), which turns \\r into \\n.  Terminal streams require exact byte
+preservation (`utf-8-unix'), otherwise \\r cursor repositions become \\n
+line feeds and corrupt full-screen TUI apps like Claude Code."
+  (let ((r (tmux-control--utf8-decode-stream "" "line1\rline2\r\nline3\r")))
+    (should (equal (car r) "line1\rline2\r\nline3\r"))
+    (should (equal (cdr r) "")))
+  (let* ((e2 (decode-char 'eight-bit #xe2))
+         (b94 (decode-char 'eight-bit #x94))
+         (b80 (decode-char 'eight-bit #x80))
+         (r1 (tmux-control--utf8-decode-stream "" (format "\r%c%c" e2 b94)))
+         (r2 (tmux-control--utf8-decode-stream (cdr r1) (format "%c\r\n" b80))))
+    (should (equal (car r1) "\r"))
+    (should (equal (car r2) "─\r\n"))
+    (should (equal (cdr r2) ""))))
+
 ;;; Input hex encoding.
 
 (ert-deftest tmux-control-test-string-to-hex-args ()

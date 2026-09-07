@@ -5816,9 +5816,9 @@ may itself contain raw eight-bit bytes left when tmux split a multibyte
 character across two %output messages.  DECODED is the complete-UTF-8
 prefix as characters; NEW-CARRY is the leftover incomplete tail to prepend
 next time.  Pure, for unit testing."
-  (let* ((bytes (concat carry (encode-coding-string output 'utf-8)))
+  (let* ((bytes (concat carry (encode-coding-string output 'utf-8-unix)))
          (len (tmux-control--utf8-complete-len bytes)))
-    (cons (decode-coding-string (substring bytes 0 len) 'utf-8)
+    (cons (decode-coding-string (substring bytes 0 len) 'utf-8-unix)
           (substring bytes len))))
 
 (defun tmux-control--current-sync-windows ()
