@@ -4534,6 +4534,32 @@ output), :calls (side-effect invocations in order), :active-pane,
           (should (= (window-start window) anchored)))))
     (eat-term-delete tmux-control--terminal)))
 
+(ert-deftest tmux-control-test-anchor-screen-top-preserves-trailing-blank-rows ()
+  ;; Anchoring to screen top must start at `eat-term-display-beginning'.
+  ;; Counting buffer lines backwards from the terminal's end overshoots into
+  ;; scrollback whenever trailing rows are blank (Eat does not materialize
+  ;; trailing blank rows as newlines), leaving the window scrolled into
+  ;; scrollback history.
+  (with-temp-buffer
+    (tmux-control-mode)
+    (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
+    (eat-term-resize tmux-control--terminal 40 5)
+    (let ((inhibit-read-only t))
+      (dotimes (i 10)
+        (eat-term-process-output tmux-control--terminal (format "OLD %d\r\n" i)))
+      (eat-term-redisplay tmux-control--terminal)
+      ;; Clear screen and output only 2 lines on a 5-line terminal
+      (eat-term-process-output tmux-control--terminal "\e[H\e[2J")
+      (eat-term-process-output tmux-control--terminal "NEW 1\r\nNEW 2")
+      (eat-term-redisplay tmux-control--terminal))
+    (save-window-excursion
+      (let ((window (selected-window)))
+        (set-window-buffer window (current-buffer))
+        (tmux-control--anchor-windows-to-screen-top (list window))
+        (should (= (window-start window)
+                   (eat-term-display-beginning tmux-control--terminal)))))
+    (eat-term-delete tmux-control--terminal)))
+
 (ert-deftest tmux-control-test-message-echoes ()
   ;; A note appended below the terminal can sit off-screen (the view shows
   ;; the terminal's screen), so it must also reach the echo area or it is
