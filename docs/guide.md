@@ -304,6 +304,13 @@ moment you scroll back down or type, exactly like iTerm).  Scrolling back to
 the bottom returns to live; scrolling up simply stops at the top of the
 retained history.
 
+While you read history, a compact **↑ 120 lines** indicator appears in the
+header. In the live view it counts rows above the live screen; in the separate
+pager it counts text lines below the viewport in the captured snapshot. Click
+it to return to live output. It disappears at the bottom, and tiled panes
+show it in their mode line. Disable it with
+`(setq tmux-control-scroll-position-indicator nil)`.
+
 For the deeper, pre-session history that lives in tmux rather than Eat, use
 `C-c C-e` (`tmux-control-scrollback`) — the full pager, unchanged.  (Wheel-up
 also opens it directly from the live screen, when the pane is fresh or quiet
