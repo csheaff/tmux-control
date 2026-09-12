@@ -32,7 +32,7 @@ jobs:
       # setup-emacs then finds Nix already on
       # PATH, skips its own install, and runs `nix profile install`
       # authenticated.  contents:read suffices for the API read.
-      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
         with:
           extra-conf: |
             access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
