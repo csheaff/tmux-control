@@ -275,6 +275,10 @@ view):
 - `C-c C-r` reconnects it — see "Reconnecting" below.
 - `C-c C-l` refreshes the live view from tmux's current visible screen without
   sending input to the pane.
+- `C-c M-o` clears the pane's scrollback — the Emacs-side history above the
+  live screen, tmux's own pane history, and any `[tmux-control]` notes — and
+  repaints.  Handy after a resize leaves a TUI's previous frame duplicated in
+  scrollback.
 - `C-c C-e` opens a normal Emacs scrollback view of the pane (movement/search/
   copy, `g` to refresh, `q`/`RET`/`C-c C-e` to return).  Typing an ordinary
   character also returns to the live pane and forwards that key, so you can

@@ -4748,6 +4748,39 @@ output), :calls (side-effect invocations in order), :active-pane,
           (should (= (window-start window) anchored)))))
     (eat-term-delete tmux-control--terminal)))
 
+(ert-deftest tmux-control-test-clear-scrollback ()
+  ;; A TUI that repaints on resize can only erase rows still on screen, so
+  ;; its previous frame stays behind in scrollback -- in BOTH tmux's history
+  ;; and the Eat text above the live screen (live-reproduced with Claude Code
+  ;; after `tmux-control-adopt-window-size'; clearing tmux alone left the
+  ;; duplicate in Emacs).  Clearing must drop both, plus the notes appended
+  ;; below the terminal, and keep the live screen.
+  (with-temp-buffer
+    (tmux-control-mode)
+    (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min))
+          tmux-control--active-pane "%3")
+    (eat-term-resize tmux-control--terminal 40 3)
+    (let ((inhibit-read-only t))
+      (eat-term-process-output tmux-control--terminal
+                               "OLD1\r\nOLD2\r\nOLD3\r\nNEW1\r\nNEW2\r\nNEW3")
+      (eat-term-redisplay tmux-control--terminal))
+    (tmux-control--message "stale warning")
+    (let (sent repainted)
+      (cl-letf (((symbol-function 'tmux-control--send-command)
+                 (lambda (command &optional _kind) (push command sent)))
+                ((symbol-function 'tmux-control-clear-and-repaint)
+                 (lambda () (setq repainted t)))
+                ((symbol-function 'message) #'ignore))
+        (tmux-control-clear-scrollback))
+      (should (equal sent '("clear-history -t %3")))
+      (should repainted))
+    (should (= (point-min)
+               (eat-term-display-beginning tmux-control--terminal)))
+    (should (= (point-max) (eat-term-end tmux-control--terminal)))
+    (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                   "NEW1\nNEW2\nNEW3"))
+    (eat-term-delete tmux-control--terminal)))
+
 (ert-deftest tmux-control-test-anchor-screen-top-preserves-trailing-blank-rows ()
   ;; Anchoring to screen top must start at `eat-term-display-beginning'.
   ;; Counting buffer lines backwards from the terminal's end overshoots into
