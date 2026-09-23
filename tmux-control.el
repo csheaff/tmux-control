@@ -1106,7 +1106,12 @@ Disable this mode to remove its timer and hooks.  See also
   ;; Arriving at a live buffer always shows the live screen, however the
   ;; buffer got into the window; see `tmux-control--snap-to-live-screen'.
   (add-hook 'window-buffer-change-functions
-            #'tmux-control--snap-to-live-screen nil t))
+            #'tmux-control--snap-to-live-screen nil t)
+  ;; See `tmux-control--protect-terminal-text'.
+  (add-hook 'input-method-activate-hook
+            #'tmux-control--input-method-activated nil t)
+  (add-hook 'input-method-deactivate-hook
+            #'tmux-control--input-method-deactivated nil t))
 
 (defvar tmux-control-scrollback-mode-map
   (let ((map (make-sparse-keymap)))
@@ -4062,10 +4067,44 @@ when the mode is set, so a mode-body setting would be undone at once."
   (setq-local word-wrap nil)
   (setq-local truncate-lines t))
 
+(defun tmux-control--protect-terminal-text (&optional input-method)
+  "Make the current live buffer read-only unless INPUT-METHOD is active.
+The buffer text is Eat's model of the pane's screen, and Eat's cursor
+state assumes nothing else edits it.  Eat's semi-char and char modes
+leave the buffer writable anyway, so an ordinary Emacs editing command
+-- a modal editor's command-mode delete, a plain `yank' -- would silently
+change the text under Eat.  The pane never sees that edit, and the next
+cursor motion over the shortened row fails an Eat assertion in the
+process filter on every output chunk, wedging the buffer.  Read-only
+turns such an edit into a harmless error; typing is unaffected, since it
+is sent to the pane rather than inserted, and tmux-control's own writes
+bind `inhibit-read-only'.
+
+Eat keeps the buffer writable deliberately because input methods do
+not work in read-only buffers, so while one is active (INPUT-METHOD
+non-nil) the buffer stays writable, as in plain Eat."
+  (setq buffer-read-only (not input-method)))
+
+(defun tmux-control--input-method-activated ()
+  "Let an input method work in a live buffer.
+See `tmux-control--protect-terminal-text'."
+  (when (or (bound-and-true-p eat--semi-char-mode)
+            (bound-and-true-p eat--char-mode))
+    (tmux-control--protect-terminal-text t)))
+
+(defun tmux-control--input-method-deactivated ()
+  "Protect a live buffer again once its input method is turned off.
+`input-method-deactivate-hook' runs before `current-input-method' is
+cleared, so it cannot be consulted here."
+  (when (or (bound-and-true-p eat--semi-char-mode)
+            (bound-and-true-p eat--char-mode))
+    (tmux-control--protect-terminal-text nil)))
+
 (defun tmux-control--eat-semi-char-mode-advice (orig-fn &rest args)
   "Make `eat-semi-char-mode' return tmux-control scrollback buffers live.
 In a live tmux-control buffer, also restore the full override keymap
-that char mode swapped out (see `tmux-control--char-mode-keys')."
+that char mode swapped out (see `tmux-control--char-mode-keys'), and
+keep the buffer read-only (see `tmux-control--protect-terminal-text')."
   (if (derived-mode-p 'tmux-control-scrollback-mode)
       (progn
         (tmux-control-live)
@@ -4073,6 +4112,7 @@ that char mode swapped out (see `tmux-control--char-mode-keys')."
           (eat-semi-char-mode)))
     (apply orig-fn args)
     (when (derived-mode-p 'tmux-control-mode)
+      (tmux-control--protect-terminal-text current-input-method)
       (setq tmux-control--char-mode-keys nil)
       (setq tmux-control--keys-active t))))
 
@@ -4100,6 +4140,7 @@ then enter char mode there."
           (eat-char-mode)))
     (apply orig-fn args)
     (when (derived-mode-p 'tmux-control-mode)
+      (tmux-control--protect-terminal-text current-input-method)
       (setq tmux-control--keys-active nil)
       (setq tmux-control--char-mode-keys t))))
 
@@ -8068,7 +8109,8 @@ once the in-band window-state reply has been parsed."
                               ;; resize, so Eat reflows.
                               (unless tmux-control--pane-fed-live
                                 (setq seed t))
-                              (eat-term-resize tmux-control--terminal w h))))
+                              (let ((inhibit-read-only t))
+                                (eat-term-resize tmux-control--terminal w h)))))
                         ;; The fed-live skip is for the opening placement only.
                         ;; Clear it now so a LATER resize reseeds normally: by
                         ;; then the pane is quiescent (no seed/stream race), and

@@ -429,6 +429,14 @@ major-mode map.  For those users the ESC key switches modes as usual; to
 send ESC to the pane they bind `tmux-control-send-escape` to a free key,
 or use char mode (below), where every key goes to the pane.
 
+**The live buffer is read-only.**  Typing reaches the pane as input, never
+as buffer edits, so nothing is lost; what read-only stops is an Emacs
+editing command (a modal package's command-mode delete, a plain `yank`)
+changing the text behind Eat's back.  The pane would never see that edit,
+and Eat's model of the screen would fall out of step with it (formerly a
+wedged buffer spewing `eat--t-cur-left` assertion errors).  While an input
+method is active the buffer stays writable, since input methods need that.
+
 **Sending C-c and friends.**  In the default semi-char mode, `C-c` is the
 Emacs prefix, so interrupting the pane's process is `C-c C-c` — the comint
 convention.  `C-u`, `C-h`, `C-x` and `M-x` likewise stay Emacs keys.  When
