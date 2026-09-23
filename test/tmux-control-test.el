@@ -1647,6 +1647,17 @@ each wrapped in an evolving prompt line and a status bar.")
     (should (plist-get (nth 2 tmux-control--windows) :active))
     (should (plist-get (nth 1 tmux-control--windows) :bell))))
 
+(ert-deftest tmux-control-test-update-windows-redraws-all-header-lines ()
+  ;; With per-window buffers the visible tab bar is a render buffer's header
+  ;; reading the controller's list; a bare `force-mode-line-update' on the
+  ;; controller left it highlighting the previous window.
+  (with-temp-buffer
+    (let (args)
+      (cl-letf (((symbol-function 'force-mode-line-update)
+                 (lambda (&optional all) (push all args))))
+        (tmux-control--update-windows '("0\talpha\t0\t0" "1\tbeta\t1\t0")))
+      (should (equal args '(t))))))
+
 (ert-deftest tmux-control-test-control-replies-accept-normalized-separators ()
   ;; Some remote control connections normalize literal TAB format separators
   ;; to underscores.  Window names containing underscores must remain intact,
@@ -1719,6 +1730,25 @@ each wrapped in an evolving prompt line and a status bar.")
       (setq-local tmux-control--activity-quiet-until 0)
       (tmux-control--note-pane-activity "%1")
       (should-not (gethash "1" tmux-control--activity)))))
+
+(ert-deftest tmux-control-test-note-pane-activity-redraws-all-header-lines ()
+  ;; Newly flagging a background window redraws EVERY header line (the tab
+  ;; bar on screen may be a render buffer's); repeat output does not redraw.
+  (with-temp-buffer
+    (setq-local tmux-control--tiled nil)
+    (setq-local tmux-control--current-window "0")
+    (setq-local tmux-control--activity (make-hash-table :test 'equal))
+    (setq-local tmux-control--pane-window (make-hash-table :test 'equal))
+    (puthash "%1" (cons "1" "@1") tmux-control--pane-window)
+    (setq-local tmux-control--activity-quiet-until 0)
+    (let ((tmux-control-window-tab-bar t)
+          args)
+      (cl-letf (((symbol-function 'force-mode-line-update)
+                 (lambda (&optional all) (push all args))))
+        (tmux-control--note-pane-activity "%1")
+        (should (equal args '(t)))
+        (tmux-control--note-pane-activity "%1")
+        (should (equal args '(t)))))))
 
 (ert-deftest tmux-control-test-paste-remapped-to-terminal ()
   ;; GUI / macOS paste gestures -- Cmd-V (`s-v'), the `[paste]' event, the

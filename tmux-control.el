@@ -2466,7 +2466,11 @@ the controller renders its own window, so a switch back to it swaps here."
                (not tmux-control--homeless))
       (setq tmux-control--window-id active-id)
       (tmux-control--register-window-buffer active-id (current-buffer)))
-    (force-mode-line-update)))
+    ;; ALL buffers, not just this one: with per-window buffers the tab bar
+    ;; on screen belongs to a render buffer that reads this controller's
+    ;; list, and a bare update never redraws it -- an idle window (no
+    ;; output to trigger redisplay) kept highlighting the previous tab.
+    (force-mode-line-update t)))
 
 (defun tmux-control--update-pane-window-map (lines)
   "Parse a list-panes reply LINES into `tmux-control--pane-window'.
@@ -2529,7 +2533,8 @@ path costs nothing then, and during the quiet period after a full repaint
           (setq tmux-control--activity (make-hash-table :test 'equal)))
         (unless (gethash win tmux-control--activity)
           (puthash win t tmux-control--activity)
-          (force-mode-line-update))))))
+          ;; All buffers: the on-screen tab bar may be a render buffer's.
+          (force-mode-line-update t))))))
 
 (defun tmux-control--note-session-activity ()
   "Flag the current session as having unseen output when it is off screen.
