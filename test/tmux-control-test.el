@@ -1647,6 +1647,17 @@ each wrapped in an evolving prompt line and a status bar.")
     (should (plist-get (nth 2 tmux-control--windows) :active))
     (should (plist-get (nth 1 tmux-control--windows) :bell))))
 
+(ert-deftest tmux-control-test-update-windows-redraws-all-header-lines ()
+  ;; With per-window buffers the visible tab bar is a render buffer's header
+  ;; reading the controller's list; a bare `force-mode-line-update' on the
+  ;; controller left it highlighting the previous window.
+  (with-temp-buffer
+    (let (args)
+      (cl-letf (((symbol-function 'force-mode-line-update)
+                 (lambda (&optional all) (push all args))))
+        (tmux-control--update-windows '("0\talpha\t0\t0" "1\tbeta\t1\t0")))
+      (should (equal args '(t))))))
+
 (ert-deftest tmux-control-test-control-replies-accept-normalized-separators ()
   ;; Some remote control connections normalize literal TAB format separators
   ;; to underscores.  Window names containing underscores must remain intact,
