@@ -3980,6 +3980,46 @@ output), :calls (side-effect invocations in order), :active-pane,
     (tmux-control--eat-semi-char-mode-advice #'ignore)
     (should tmux-control--keys-active)
     (should-not tmux-control--char-mode-keys)))
+(ert-deftest tmux-control-test-live-buffer-rejects-direct-edits ()
+  ;; The buffer text is Eat's model of the pane.  An Emacs editing command
+  ;; that changed it (field report: a xah-fly-keys command-mode delete on
+  ;; the shell line) desynced Eat's cursor from its row, and every later
+  ;; cursor-left failed an Eat assertion in the process filter, wedging
+  ;; the buffer.  The live buffer is read-only; pane output still renders.
+  (with-temp-buffer
+    (tmux-control--reset-buffer)
+    (let ((inhibit-read-only t))
+      (eat-term-resize tmux-control--terminal 80 24))
+    (tmux-control--write-terminal "$ echo 1")
+    (should buffer-read-only)
+    (goto-char (point-max))
+    (should-error (delete-char -1) :type 'buffer-read-only)
+    (should-error (insert "x") :type 'buffer-read-only)
+    ;; Output keeps flowing, including the cursor motion that failed.
+    (tmux-control--write-terminal "\b\b2")
+    (should (equal (car (last (tmux-control--visible-screen-lines
+                               (current-buffer))))
+                   "$ echo21"))
+    ;; Char mode and the way back keep the protection.
+    (tmux-control--eat-char-mode-advice #'ignore)
+    (should buffer-read-only)
+    (tmux-control--eat-semi-char-mode-advice #'ignore)
+    (should buffer-read-only)))
+
+(ert-deftest tmux-control-test-live-buffer-writable-under-input-method ()
+  ;; Input methods do not work in a read-only buffer -- why Eat leaves
+  ;; its buffer writable -- so an active one lifts the protection.
+  (with-temp-buffer
+    (tmux-control--reset-buffer)
+    (should buffer-read-only)
+    (run-hooks 'input-method-activate-hook)
+    (should-not buffer-read-only)
+    (run-hooks 'input-method-deactivate-hook)
+    (should buffer-read-only)
+    (let ((current-input-method "TeX"))
+      (tmux-control--eat-semi-char-mode-advice #'ignore))
+    (should-not buffer-read-only)))
+
 (ert-deftest tmux-control-test-snap-to-live-screen-on-arrival ()
   ;; A window ARRIVING at a live render buffer is pointed at the live
   ;; screen.  Emacs restores the window's remembered per-buffer point,
