@@ -1731,6 +1731,25 @@ each wrapped in an evolving prompt line and a status bar.")
       (tmux-control--note-pane-activity "%1")
       (should-not (gethash "1" tmux-control--activity)))))
 
+(ert-deftest tmux-control-test-note-pane-activity-redraws-all-header-lines ()
+  ;; Newly flagging a background window redraws EVERY header line (the tab
+  ;; bar on screen may be a render buffer's); repeat output does not redraw.
+  (with-temp-buffer
+    (setq-local tmux-control--tiled nil)
+    (setq-local tmux-control--current-window "0")
+    (setq-local tmux-control--activity (make-hash-table :test 'equal))
+    (setq-local tmux-control--pane-window (make-hash-table :test 'equal))
+    (puthash "%1" (cons "1" "@1") tmux-control--pane-window)
+    (setq-local tmux-control--activity-quiet-until 0)
+    (let ((tmux-control-window-tab-bar t)
+          args)
+      (cl-letf (((symbol-function 'force-mode-line-update)
+                 (lambda (&optional all) (push all args))))
+        (tmux-control--note-pane-activity "%1")
+        (should (equal args '(t)))
+        (tmux-control--note-pane-activity "%1")
+        (should (equal args '(t)))))))
+
 (ert-deftest tmux-control-test-paste-remapped-to-terminal ()
   ;; GUI / macOS paste gestures -- Cmd-V (`s-v'), the `[paste]' event, the
   ;; Edit > Paste menu -- resolve to the `yank' / `clipboard-yank' commands.
