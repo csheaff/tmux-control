@@ -4758,19 +4758,26 @@ output), :calls (side-effect invocations in order), :active-pane,
   (with-temp-buffer
     (tmux-control-mode)
     (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min))
+          tmux-control--session "s"
           tmux-control--active-pane "%3")
     (eat-term-resize tmux-control--terminal 40 3)
     (let ((inhibit-read-only t))
       (eat-term-process-output tmux-control--terminal
                                "OLD1\r\nOLD2\r\nOLD3\r\nNEW1\r\nNEW2\r\nNEW3")
       (eat-term-redisplay tmux-control--terminal))
-    (tmux-control--message "stale warning")
+    (cl-letf (((symbol-function 'message) #'ignore))
+      (tmux-control--message "stale warning"))
+    ;; Disconnected: refuse outright.  Clearing only the Emacs side would
+    ;; leave tmux's history and nothing to repaint the screen from.
+    (let ((before (buffer-string)))
+      (should-error (tmux-control-clear-scrollback) :type 'user-error)
+      (should (equal (buffer-string) before)))
     (let (sent repainted)
-      (cl-letf (((symbol-function 'tmux-control--send-command)
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_p) t))
+                ((symbol-function 'tmux-control--send-command)
                  (lambda (command &optional _kind) (push command sent)))
                 ((symbol-function 'tmux-control-clear-and-repaint)
-                 (lambda () (setq repainted t)))
-                ((symbol-function 'message) #'ignore))
+                 (lambda () (setq repainted t))))
         (tmux-control-clear-scrollback))
       (should (equal sent '("clear-history -t %3")))
       (should repainted))

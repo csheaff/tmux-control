@@ -1697,6 +1697,9 @@ Useful after a resize: a TUI that repaints on resize can only erase the rows
 still on screen, so its previous frame stays behind in scrollback as a
 duplicate."
   (interactive)
+  ;; Refuse while disconnected rather than clear only the Emacs side: tmux's
+  ;; history would survive and nothing could repaint the screen.
+  (tmux-control--ensure-live)
   (unless (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
     (user-error "No live tmux-control terminal in this buffer"))
   (let ((beg (eat-term-display-beginning tmux-control--terminal))
