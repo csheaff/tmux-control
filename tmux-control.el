@@ -852,6 +852,7 @@ kills, which are deliberate.")
     (define-key map (kbd "C-c C-e") #'tmux-control-scrollback)
     (define-key map (kbd "C-c C-k") #'tmux-control-disconnect)
     (define-key map (kbd "C-c C-l") #'tmux-control-clear-and-repaint)
+    (define-key map (kbd "C-c M-o") #'tmux-control-clear-scrollback)
     (define-key map (kbd "C-c C-o") #'tmux-control-other-pane)
     (define-key map (kbd "C-c C-t") #'tmux-control-toggle-tiling)
     (define-key map (kbd "C-c C-n") #'tmux-control-next-window)
@@ -951,6 +952,7 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     (define-key map (kbd "C-c C-e") #'tmux-control-scrollback)
     (define-key map (kbd "C-c C-k") #'tmux-control-disconnect)
     (define-key map (kbd "C-c C-l") #'tmux-control-clear-and-repaint)
+    (define-key map (kbd "C-c M-o") #'tmux-control-clear-scrollback)
     (define-key map (kbd "C-c C-o") #'tmux-control-other-pane)
     (define-key map (kbd "C-c C-t") #'tmux-control-toggle-tiling)
     (define-key map (kbd "C-c C-n") #'tmux-control-next-window)
@@ -1687,6 +1689,35 @@ buffer, or the scrollback pager."
   "Refresh the live view from the current tmux pane screen."
   (interactive)
   (tmux-control--seed-screen))
+
+(defun tmux-control-clear-scrollback ()
+  "Discard the pane's scrollback, in Emacs and in tmux, then repaint.
+The terminal's \"Clear Scrollback\": everything above the live screen goes,
+both the Eat text this buffer keeps there and tmux's own pane history (so
+the scrollback view, \\[tmux-control-scrollback], starts empty too), along
+with the `[tmux-control]' notes appended below it.  The live screen itself
+is kept and reseeded from tmux.
+
+Useful after a resize: a TUI that repaints on resize can only erase the rows
+still on screen, so its previous frame stays behind in scrollback as a
+duplicate."
+  (interactive)
+  ;; Refuse while disconnected rather than clear only the Emacs side: tmux's
+  ;; history would survive and nothing could repaint the screen.
+  (tmux-control--ensure-live)
+  (unless (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+    (user-error "No live tmux-control terminal in this buffer"))
+  (let ((beg (eat-term-display-beginning tmux-control--terminal))
+        (end (eat-term-end tmux-control--terminal))
+        (inhibit-read-only t))
+    ;; Notes first: deleting above the screen shifts END.
+    (delete-region (if (markerp end) (marker-position end) end) (point-max))
+    (delete-region (point-min) (if (markerp beg) (marker-position beg) beg)))
+  (when tmux-control--active-pane
+    (tmux-control--send-command
+     (format "clear-history -t %s" tmux-control--active-pane)))
+  (force-mode-line-update)
+  (tmux-control-clear-and-repaint))
 
 (defun tmux-control--walk-keymap (keymap fn &optional prefix)
   "Call FN with a (KEY-VECTOR . COMMAND) cons for each binding in KEYMAP.
