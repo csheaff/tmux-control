@@ -136,6 +136,21 @@ one `capture-pane` round trip per burst of output (taken only when a pane is
 displayed, idle, and on the normal screen) — fine on a fast link, your call on
 a slow one; see the variable's docstring for the exact gating.
 
+**If ESC switches your modal package's mode instead of reaching the pane**
+(xah-fly-keys, evil, viper), that's by design: tmux-control lets the modal
+package keep ESC.  To send a real ESC to a TUI, bind
+`tmux-control-send-escape` to a free key:
+
+```elisp
+(with-eval-after-load 'tmux-control
+  (define-key tmux-control-mode-map (kbd "C-c <escape>")
+              #'tmux-control-send-escape))
+```
+
+For a single ESC, `C-q ESC` also sends it through.  For a long TUI session,
+switch to char mode, where every key goes to the pane (see
+[docs/guide.md](docs/guide.md)).
+
 ## Terminal agent frameworks
 
 Some CLI coding-agent tools run a session per agent in tmux — one **pane** per
