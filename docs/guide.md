@@ -658,11 +658,13 @@ the pane).  Two situations break the following, and both used to fail
   the window — every hand-off makes the TUI reflow and repaint.
 
 tmux-control now notices when tmux did not follow a size request, probes the
-window's `window-size` in-band, and tells you which case you are in — once,
-in the session buffer and the echo area.  **`M-x
+window's `window-size` in-band, and tells you which case you are in — once
+per sizing problem, in the live view buffer and the echo area.  **`M-x
 tmux-control-adopt-window-size`** resolves either: it sets the rendered
 window's `window-size` back to `latest` and resizes it to your Emacs window
-on the spot.
+on the spot, even when your Emacs window's dimensions have not changed.
+The recorded warning disappears when you adopt the size or tmux follows
+the requested size again.
 
 When you *want* long-term cohabitation with another client, consider
 `set-option -g window-size smallest` on that server (both clients see the
