@@ -1803,15 +1803,18 @@ Includes versions, dimensions, key bindings, pending command counts, recovery
 state and relevant options.  Live sizing/client queries append asynchronously.
 Pane contents, input text, titles, directories and SSH options are omitted."
   (interactive)
-  (let* ((source (current-buffer))
+  (let* ((source (if (and (derived-mode-p 'tmux-control-scrollback-mode)
+                          (buffer-live-p tmux-control--live-buffer))
+                     tmux-control--live-buffer (current-buffer)))
          (controller (tmux-control--context-controller))
          (process (buffer-local-value 'tmux-control--process controller))
-         (pane tmux-control--active-pane)
-         (window-id tmux-control--window-id)
-         (size (and tmux-control--terminal (eat-term-live-p tmux-control--terminal)
-                    (eat-term-size tmux-control--terminal)))
-         (bindings (mapcar (lambda (key) (cons key (key-binding (kbd key))))
-                           '("C-c C-c" "C-c C-r" "C-c C-e" "C-y" "<escape>")))
+         (pane (buffer-local-value 'tmux-control--active-pane source))
+         (window-id (buffer-local-value 'tmux-control--window-id source))
+         (terminal (buffer-local-value 'tmux-control--terminal source))
+         (size (and terminal (eat-term-live-p terminal) (eat-term-size terminal)))
+         (bindings (with-current-buffer source
+                     (mapcar (lambda (key) (cons key (key-binding (kbd key))))
+                             '("C-c C-c" "C-c C-r" "C-c C-e" "C-y" "<escape>"))))
          (report (get-buffer-create "*tmux-control diagnostics*"))
          (token (list 'report)))
     (with-current-buffer report
@@ -6783,11 +6786,11 @@ bracketed-paste state, but tmux does."
     (with-current-buffer controller
       (tmux-control--ensure-live)
       (let ((head (tmux-control--oldest-command)))
-        (when (or tmux-control--command-watchdog-warned
-                  (and (numberp tmux-control-command-timeout)
-                       (numberp (cdr-safe head))
-                       (>= (- (float-time) (cdr head))
-                           tmux-control-command-timeout)))
+        (when (and (numberp tmux-control-command-timeout)
+                   (or tmux-control--command-watchdog-warned
+                       (and (numberp (cdr-safe head))
+                            (>= (- (float-time) (cdr head))
+                                tmux-control-command-timeout))))
           (user-error "tmux is not replying; C-c C-r reconnects. Input was not sent"))))))
 
 (defun tmux-control-yank (&optional _arg)
@@ -7320,10 +7323,10 @@ never steals the window the user is looking at."
             (tmux-control--message
              (format "%d input command%s unacknowledged; delivery is unknown. Input will not be replayed"
                      count (if (= count 1) "" "s")))))
-        ;; If the session died while tiled, tear the tiling down so its
-        ;; pane render buffers are not left orphaned without a process.
-        (when tmux-control--tiled
-          (setq tmux-control--resume-tiling t)
+        ;; A connection loss ends both active tiling and retained hidden
+        ;; pane caches.  Only an actively tiled view should resume tiling.
+        (when (or tmux-control--tiled tmux-control--pane-buffers)
+          (when tmux-control--tiled (setq tmux-control--resume-tiling t))
           (tmux-control--teardown-tiling (current-buffer)))
         (let ((deliberate tmux-control--disconnecting))
           (setq tmux-control--disconnecting nil)

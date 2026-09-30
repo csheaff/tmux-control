@@ -6,10 +6,10 @@ Tests use dedicated local tmux sockets, with raw input recorded by
 
 ## Automated results
 
-- Source unit suite: 283/283 passed.
+- Source unit suite: 285/285 passed.
 - Byte compilation: passed with warnings treated as errors.
-- Compiled unit suite: 283/283 passed.
-- Live integration suite: 30/30 passed against both source and the compiled package.
+- Compiled unit suite: 285/285 passed.
+- Live integration suite: 32/32 passed against both source and the compiled package.
 - Scroll trace checks: 8 Elisp and 8 Python tests passed.
 - Python TUI helper compilation and `git diff --check`: passed.
 
@@ -27,12 +27,15 @@ Use `EAT_DIR=/path/to/eat` with the Makefile targets documented in the
 | Unacknowledged input | Record delivery uncertainty and verify reconnect sends no replayed input |
 | Automatic retry | Kill the local control transport, wait for real retry timer, restore tiling and reset retry budget |
 | Diagnostics | Immediate cached report plus successful asynchronous pane/sizing/client queries |
+| Pager diagnostics | Resolve the linked live pane/grid, bindings/options, and controller for asynchronous server queries |
+| Disconnect after untile | Kill retained pane caches on deliberate and unexpected disconnects; reconnect stays untiled |
 | Existing TUI | Attach after alternate screen/mouse/cursor-key/paste modes enabled; compare Unicode screen with tmux and verify every byte of cursor-key, Unicode input, mouse press/release, and a 5,000-character bracketed paste |
 
 Unit regressions also cover incomplete reply blocks, superseded repaint replies,
 resuming a paused pane when another repaint supersedes its seed, accents split
 across chunks/color escapes, bookmark file persistence, stale report replies,
-killed cached-buffer cleanup, and old watchdog timer cancellation on reset.
+killed cached-buffer cleanup, old watchdog timer cancellation on reset, and
+immediate input recovery when the command timeout is disabled after a warning.
 
 Batch Emacs does not run the normal user-idle event loop, so integration tests
 explicitly execute their own pending retile timer callback to settle layouts.

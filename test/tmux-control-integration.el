@@ -1288,5 +1288,44 @@ initial+extend instead of initial)."
       (tmux-control-it--tmux-ok "kill-server")
       (delete-file input-file))))
 
+(ert-deftest tmux-control-it-untiled-cache-cleaned-on-disconnect ()
+  (save-window-excursion
+    (tmux-control-it--with-session
+      (dolist (deliberate '(nil t))
+        (with-current-buffer controller (tmux-control-tile))
+        (should (tmux-control-it--settle-tiles controller 1))
+        (let ((cached (mapcar #'cdr (buffer-local-value 'tmux-control--pane-buffers controller))))
+          (with-current-buffer controller (tmux-control-untile))
+          (should (tmux-control-it--ready controller))
+          (should (cl-every #'buffer-live-p cached))
+          (if deliberate
+              (with-current-buffer controller (tmux-control-disconnect))
+            (delete-process (buffer-local-value 'tmux-control--process controller)))
+          (should (tmux-control-it--pump-until
+                   3 (lambda () (not (buffer-local-value 'tmux-control--process controller)))))
+          (should (cl-every (lambda (buffer) (not (buffer-live-p buffer))) cached))
+          (should-not (buffer-local-value 'tmux-control--pane-buffers controller))
+          (should-not (buffer-local-value 'tmux-control--resume-tiling controller)))
+        (with-current-buffer controller (tmux-control-reconnect))
+        (should (tmux-control-it--ready controller))
+        (should-not (buffer-local-value 'tmux-control--tiled controller))))))
+
+(ert-deftest tmux-control-it-pager-diagnostics-query-live-pane ()
+  (save-window-excursion
+    (tmux-control-it--with-session
+      (with-temp-buffer
+        (tmux-control-scrollback-mode)
+        (setq tmux-control--live-buffer controller)
+        (let ((report (tmux-control-diagnostics)))
+          (unwind-protect
+              (progn
+                (should (tmux-control-it--ready controller))
+                (with-current-buffer report
+                  (should (string-match-p (regexp-quote (concat "Pane: " pane)) (buffer-string)))
+                  (should (string-match-p "Pane state:" (buffer-string)))
+                  (should (string-match-p "Window sizing policy:" (buffer-string)))
+                  (should-not (string-match-p "Query failed" (buffer-string)))))
+            (kill-buffer report)))))))
+
 (provide 'tmux-control-integration)
 ;;; tmux-control-integration.el ends here

@@ -6032,5 +6032,57 @@ output), :calls (side-effect invocations in order), :active-pane,
             (should resumed)))
       (kill-buffer pane))))
 
+(ert-deftest tmux-control-test-disabled-timeout-immediately-allows-input ()
+  (tmux-control-test--with-watchdog-buffer
+   (setq tmux-control--session "t" tmux-control--active-pane "%7"
+         tmux-control--command-watchdog-warned t
+         tmux-control--command-queue (list (cons :ignore (- (float-time) 90))))
+   (let ((tmux-control-command-timeout nil) sent)
+     (cl-letf (((symbol-function 'tmux-control--send-command)
+                (lambda (&rest args) (push args sent))))
+       (tmux-control--send-input nil "x")
+       (tmux-control--paste-to-pane "clip")
+       (should (= 3 (length sent)))))))
+
+(ert-deftest tmux-control-test-pager-diagnostics-use-live-view-and-controller ()
+  (save-window-excursion
+    (let ((owner (generate-new-buffer " *tc-report-owner*"))
+          (live (generate-new-buffer " *tc-report-view*")) report queries)
+      (unwind-protect
+          (progn
+            (with-current-buffer owner
+              (tmux-control-mode)
+              (setq tmux-control--host nil tmux-control--session "t"
+                    tmux-control--socket-name "s" tmux-control--process 'live))
+            (with-current-buffer live
+              (tmux-control-mode)
+              (setq tmux-control--controller owner tmux-control--active-pane "%9"
+                    tmux-control--window-id "@4"
+                    tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
+              (eat-term-resize tmux-control--terminal 40 8)
+              (setq-local tmux-control-window-buffers nil)
+              (use-local-map (copy-keymap tmux-control-mode-map))
+              (define-key (current-local-map) (kbd "C-y") #'ignore))
+            (with-temp-buffer
+              (tmux-control-scrollback-mode)
+              (setq tmux-control--live-buffer live)
+              (cl-letf (((symbol-function 'process-live-p) (lambda (p) (eq p 'live)))
+                        ((symbol-function 'tmux-control--query)
+                         (lambda (command _callback)
+                           (should (eq (current-buffer) owner))
+                           (push command queries))))
+                (setq report (tmux-control-diagnostics))))
+            (with-current-buffer report
+              (should (string-match-p "Pane: %9; window: @4; Eat grid: (40 . 8)" (buffer-string)))
+              (should (string-match-p "View:  \\*tc-report-view\\*" (buffer-string)))
+              (should (string-match-p "\"C-y\" . ignore" (buffer-string)))
+              (should (string-match-p "tmux-control-window-buffers: nil" (buffer-string)))
+              (should (string-match-p "socket: s" (buffer-string))))
+            (should (= 3 (length queries)))
+            (should (cl-some (lambda (command) (string-match-p "-t %9" command)) queries))
+            (should (cl-some (lambda (command) (string-match-p "-t @4 window-size" command)) queries)))
+        (when (buffer-live-p report) (kill-buffer report))
+        (kill-buffer live) (kill-buffer owner)))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
