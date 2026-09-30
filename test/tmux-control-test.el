@@ -274,14 +274,14 @@
 
 (ert-deftest tmux-control-test-handle-pause-tiled-discards-stale-batch ()
   ;; In tiling mode a %pause reseeds the paused pane's own buffer
-  ;; synchronously; its pre-pause output batch must be discarded, or
+  ;; asynchronously; its pre-pause output batch must be discarded, or
   ;; `tmux-control--flush-tiled-panes' (end of chunk) replays that stale
   ;; backlog over the fresh seed -- the very thing %pause means to skip.
   (let ((panebuf (generate-new-buffer " *tc-pane*"))
         (seeded nil) (sent '()))
     (unwind-protect
-        (cl-letf (((symbol-function 'tmux-control--seed-pane-buffer-sync)
-                   (lambda (b) (setq seeded b)))
+        (cl-letf (((symbol-function 'tmux-control--seed-pane-buffer-async)
+                   (lambda (b _controller after) (setq seeded b) (funcall after)))
                   ((symbol-function 'tmux-control--send-command)
                    (lambda (cmd &optional _kind) (push cmd sent))))
           (with-current-buffer panebuf
@@ -362,7 +362,8 @@ line feeds and corrupt full-screen TUI apps like Claude Code."
   ;; A paste larger than the chunk size is split into several bounded
   ;; send-keys commands (tmux drops an over-long control command).
   (let ((sent '()))
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+    (cl-letf (((symbol-function 'tmux-control--ensure-input-ready) #'ignore)
+              ((symbol-function 'process-live-p) (lambda (_) t))
               ((symbol-function 'tmux-control--send-command)
                (lambda (cmd &optional _kind) (push cmd sent))))
       (let ((tmux-control--process 'fake)
@@ -1851,7 +1852,8 @@ each wrapped in an evolving prompt line and a status bar.")
       (with-temp-buffer
         (setq-local tmux-control--tiled t)
         (let ((buf0 (generate-new-buffer " *tc-test-eager-existing*")))
-          (setq-local tmux-control--panes (list (cons "%0" buf0)))
+          (setq-local tmux-control--panes (list (cons "%0" buf0))
+                      tmux-control--pane-buffers (list (cons "%0" buf0)))
           (unwind-protect
               (progn
                 ;; A horizontal split of panes %0 (existing) and %1 (new).
@@ -1975,7 +1977,7 @@ each wrapped in an evolving prompt line and a status bar.")
                  (lambda (_host _socket) '("a" "b" "c")))
                 ;; "a" is already live; "b"/"c" are not.
                 ((symbol-function 'tmux-control--session-live-buffer)
-                 (lambda (_host session) (equal session "a")))
+                 (lambda (_host session &optional _socket) (equal session "a")))
                 ((symbol-function 'tmux-control-connect)
                  (lambda (_host _socket session) (push session connected))))
         (tmux-control--connect-all-sessions)
@@ -2386,7 +2388,7 @@ each wrapped in an evolving prompt line and a status bar.")
         (previewed '()) (committed nil))
     (unwind-protect
         (cl-letf (((symbol-function 'tmux-control--session-live-buffer)
-                   (lambda (_host s) (when (equal s "b") bbuf))) ; only "b" connected
+                   (lambda (_host s &optional _socket) (when (equal s "b") bbuf))) ; only "b" connected
                   ((symbol-function 'set-window-buffer)
                    (lambda (_w buf) (push buf previewed)))
                   ((symbol-function 'tmux-control--connect-or-switch)
@@ -2540,6 +2542,9 @@ tagged pane window as ours, and a foreign window as not ours."
             (should (tmux-control--our-tiling-window-p cw ctrl-buf))      ; controller
             (should-not (tmux-control--our-tiling-window-p ow ctrl-buf))  ; foreign
             (set-window-parameter ow 'tmux-control-pane "%3")
+            (should-not (tmux-control--our-tiling-window-p ow ctrl-buf))
+            (with-current-buffer foreign-buf
+              (setq-local tmux-control--controller ctrl-buf))
             (should (tmux-control--our-tiling-window-p ow ctrl-buf))))    ; tagged pane
       (kill-buffer ctrl-buf)
       (kill-buffer foreign-buf))))
@@ -3108,15 +3113,17 @@ before the toggle kept a local directory while later ones went remote."
      (should-not tmux-control--command-watchdog-timer))))
 
 (ert-deftest tmux-control-test-begin-reply-pairs-kind-and-recovers ()
-  ;; A %begin reply takes its kind from the queue entry cons and, after a
-  ;; warned episode, announces recovery and clears the flag.
+  ;; %begin pairs the queued kind; only a completed reply ends a warned
+  ;; episode, announces recovery and clears the flag.
   (tmux-control-test--with-watchdog-buffer
    (setq tmux-control--command-queue
-         (list (cons :capture (float-time))))
+         (list (cons :ignore (float-time))))
    (setq tmux-control--command-watchdog-warned t)
    (tmux-control--handle-line "%begin 1717171717 42 1")
-   (should (eq tmux-control--current-command-kind :capture))
+   (should (eq tmux-control--current-command-kind :ignore))
    (should-not tmux-control--command-queue)
+   (should tmux-control--command-watchdog-warned)
+   (tmux-control--handle-line "%end 1717171717 42 1")
    (should-not tmux-control--command-watchdog-warned)
    (should (string-match-p "recovered" (buffer-string)))))
 ;;; Process-filter fuzz: chunking invariance.
@@ -4196,7 +4203,8 @@ output), :calls (side-effect invocations in order), :active-pane,
   ;; line by line (verified live) instead of arriving as one reviewable
   ;; block.
   (let ((sent '()))
-    (cl-letf (((symbol-function 'tmux-control--send-command)
+    (cl-letf (((symbol-function 'tmux-control--ensure-input-ready) #'ignore)
+              ((symbol-function 'tmux-control--send-command)
                (lambda (cmd &optional _kind) (push cmd sent))))
       (with-temp-buffer
         (tmux-control-mode)
@@ -4215,7 +4223,8 @@ output), :calls (side-effect invocations in order), :active-pane,
   ;; A paste longer than one command's worth appends with set-buffer -a,
   ;; in order, before the single paste-buffer delivery.
   (let ((sent '()))
-    (cl-letf (((symbol-function 'tmux-control--send-command)
+    (cl-letf (((symbol-function 'tmux-control--ensure-input-ready) #'ignore)
+              ((symbol-function 'tmux-control--send-command)
                (lambda (cmd &optional _kind) (push cmd sent))))
       (with-temp-buffer
         (tmux-control-mode)
@@ -5766,6 +5775,314 @@ output), :calls (side-effect invocations in order), :active-pane,
             (run-hooks 'post-gc-hook)
             (tmux-control--idle-gc-check)
             (should (= tmux-control--idle-gc-collections 1))))))))
+
+;;; Connection bookmarks, recovery, and retained tiled history.
+
+(ert-deftest tmux-control-test-connection-identity-includes-socket-and-renames ()
+  (let ((a (generate-new-buffer " *tc-identity-a*"))
+        (b (generate-new-buffer " *tc-identity-b*")))
+    (unwind-protect
+        (progn
+          (dolist (entry (list (cons a "one") (cons b "two")))
+            (with-current-buffer (car entry)
+              (tmux-control-mode)
+              (setq tmux-control--session "same" tmux-control--host nil
+                    tmux-control--socket-name (cdr entry))))
+          (with-current-buffer a (rename-buffer " *renamed connection*"))
+          (should (eq a (tmux-control--connection-buffer "" "one" "same")))
+          (should (eq b (tmux-control--connection-buffer nil "two" "same")))
+          (should-not (tmux-control--connection-buffer nil "three" "same")))
+      (kill-buffer a) (kill-buffer b))))
+
+(ert-deftest tmux-control-test-bookmark-persists-connection-not-terminal ()
+  (let* ((file (make-temp-file "tc-bookmarks"))
+         (bookmark-alist nil) (bookmark-alist-modification-count 0)
+         (bookmark-save-flag nil) (bookmark-default-file (concat file "-default"))
+         calls)
+    (unwind-protect
+        (with-temp-buffer
+          (tmux-control-mode)
+          (setq tmux-control--host "user@dev" tmux-control--socket-name "work"
+                tmux-control--session "project with spaces")
+          (let ((inhibit-read-only t)) (insert "PRIVATE TERMINAL OUTPUT"))
+          (bookmark-set "Development")
+          (bookmark-save nil file)
+          (setq bookmark-alist nil)
+          (bookmark-load file t t)
+          (should-not (with-temp-buffer
+                        (insert-file-contents file)
+                        (string-match-p "PRIVATE TERMINAL OUTPUT" (buffer-string))))
+          (cl-letf (((symbol-function 'tmux-control--connect-or-switch)
+                     (lambda (&rest args) (setq calls args))))
+            (tmux-control-bookmark-jump "Development"))
+          (should (equal calls '("user@dev" "work" "project with spaces"))))
+      (delete-file file))))
+
+(ert-deftest tmux-control-test-bookmark-from-child-uses-owner ()
+  (let ((owner (generate-new-buffer " *tc-bookmark-owner*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer owner
+            (tmux-control-mode)
+            (setq tmux-control--host nil tmux-control--socket-name "s"
+                  tmux-control--session "t"))
+          (with-temp-buffer
+            (tmux-control-mode)
+            (setq tmux-control--controller owner)
+            (should (equal (alist-get 'tmux-control-socket
+                                      (funcall bookmark-make-record-function)) "s"))))
+      (kill-buffer owner))))
+
+(ert-deftest tmux-control-test-bookmark-rejects-invalid-coordinates ()
+  (should-error (tmux-control-bookmark-jump
+                 '("bad" (tmux-control-host . "-Fbad")
+                   (tmux-control-socket . "s") (tmux-control-session . "t")))
+                :type 'user-error)
+  (should-error (tmux-control-bookmark-jump '("bad" (tmux-control-session . "t")))
+                :type 'user-error))
+
+(ert-deftest tmux-control-test-watchdog-tracks-incomplete-reply ()
+  (tmux-control-test--with-watchdog-buffer
+   (setq tmux-control--command-queue (list (cons :input (- (float-time) 90))))
+   (tmux-control--handle-line "%begin 1 42 1")
+   (should-not tmux-control--command-queue)
+   (should (= 1 (tmux-control--unacknowledged-input-count)))
+   (tmux-control--command-watchdog-check (current-buffer))
+   (should tmux-control--command-watchdog-warned)
+   (tmux-control--handle-line "%end 1 42 1")
+   (should-not tmux-control--command-watchdog-warned)
+   (should (= 0 (tmux-control--unacknowledged-input-count)))))
+
+(ert-deftest tmux-control-test-stuck-connection-refuses-input-and-paste ()
+  (tmux-control-test--with-watchdog-buffer
+   (setq tmux-control--session "t" tmux-control--active-pane "%1"
+         tmux-control--command-queue (list (cons :ignore (- (float-time) 90))))
+   (let (sent)
+     (cl-letf (((symbol-function 'tmux-control--send-command)
+                (lambda (&rest args) (push args sent))))
+       (should-error (tmux-control--send-input nil "danger\n") :type 'user-error)
+       (should-error (tmux-control--paste-to-pane "danger\n") :type 'user-error))
+     (should-not sent))))
+
+(ert-deftest tmux-control-test-reconnect-does-not-forward-triggering-key ()
+  (with-temp-buffer
+    (setq tmux-control--session "t" tmux-control--process nil)
+    (let (live sent)
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) live))
+                ((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+                ((symbol-function 'tmux-control-reconnect) (lambda () (setq live t)))
+                ((symbol-function 'tmux-control--send-command)
+                 (lambda (&rest args) (push args sent))))
+        (tmux-control--send-input nil "\n")
+        (should live) (should-not sent)))))
+
+(ert-deftest tmux-control-test-pane-paint-preserves-history ()
+  (with-temp-buffer
+    (tmux-control-mode)
+    (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
+    (setq eat-terminal tmux-control--terminal)
+    (eat-term-resize tmux-control--terminal 40 5)
+    (tmux-control--write-terminal
+     (mapconcat (lambda (i) (format "HISTORY-%02d\r\n" i)) (number-sequence 0 20) ""))
+    (should (< (point-min) (eat-term-display-beginning tmux-control--terminal)))
+    (tmux-control--paint-seed (current-buffer) "CURRENT" '(7 . 0) :visible)
+    (should (string-match-p "HISTORY-00" (buffer-string)))
+    (should (string-match-p "CURRENT" (buffer-string)))))
+
+(ert-deftest tmux-control-test-cached-pane-streams-while-background-and-untiled ()
+  (let ((pane (generate-new-buffer " *tc-cached-pane*")))
+    (unwind-protect
+        (with-temp-buffer
+          (setq tmux-control--pane-buffers (list (cons "%7" pane))
+                tmux-control--panes nil tmux-control--active-pane "%0")
+          (dolist (tiled '(t nil))
+            (setq tmux-control--tiled tiled)
+            (cl-letf (((symbol-function 'tmux-control--note-pane-activity) #'ignore)
+                      ((symbol-function 'tmux-control--note-session-activity) #'ignore))
+              (tmux-control--batch-pane-output "%7" "AWAY\\015\\012")))
+          (with-current-buffer pane
+            (should (equal tmux-control--output-batch '("AWAY\r\n" "AWAY\r\n")))))
+      (kill-buffer pane))))
+
+(ert-deftest tmux-control-test-pane-seed-rejects-superseded-replies ()
+  (let ((pane (generate-new-buffer " *tc-seed-target*")) callbacks painted)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((owner (current-buffer)))
+            (with-current-buffer pane (setq tmux-control--active-pane "%7"))
+            (cl-letf (((symbol-function 'tmux-control--query)
+                       (lambda (_command callback) (push callback callbacks)))
+                      ((symbol-function 'tmux-control--paint-seed)
+                       (lambda (&rest args) (push args painted)))
+                      ((symbol-function 'tmux-control--seed-stale-retry-p) (lambda (_) nil)))
+              (tmux-control--seed-pane-buffer-async pane owner)
+              (let ((old (reverse callbacks)))
+                (setq callbacks nil)
+                (tmux-control--seed-pane-buffer-async pane owner)
+                (funcall (cadr old) '("STALE"))
+                (should-not painted)
+                (funcall (car callbacks) '("FRESH"))
+                (should (equal (cadr (car painted)) "FRESH"))))))
+      (kill-buffer pane))))
+
+(ert-deftest tmux-control-test-diagnostics-ignore-replaced-report ()
+  (with-temp-buffer
+    (special-mode)
+    (let ((old (list 'old)))
+      (setq tmux-control--diagnostics-token (list 'new))
+      (tmux-control--diagnostics-append (current-buffer) old "old" '("STALE"))
+      (should (string-empty-p (buffer-string)))
+      (tmux-control--diagnostics-append (current-buffer) tmux-control--diagnostics-token
+                                       "current" '("FRESH"))
+      (should (string-match-p "FRESH" (buffer-string))))))
+
+(ert-deftest tmux-control-test-diagnostics-disconnected-is-immediate-and-private ()
+  (save-window-excursion
+    (with-temp-buffer
+      (tmux-control-mode)
+      (setq tmux-control--host nil tmux-control--socket-name "s"
+            tmux-control--session "t" tmux-control--server-version "3.6a"
+            tmux-control--command-queue (list (cons :input (float-time))))
+      (let ((inhibit-read-only t)) (insert "SECRET OUTPUT"))
+      (let ((report (tmux-control-diagnostics)))
+        (unwind-protect
+            (with-current-buffer report
+              (should (string-match-p "Unacknowledged input commands: 1" (buffer-string)))
+              (should (string-match-p "Disconnected" (buffer-string)))
+              (should (string-match-p "Server tmux: 3.6a" (buffer-string)))
+              (should-not (string-match-p "SECRET OUTPUT" (buffer-string))))
+          (kill-buffer report))))))
+
+(ert-deftest tmux-control-test-unicode-composition-across-chunks-and-sgr ()
+  (with-temp-buffer
+    (tmux-control-mode)
+    (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min))
+          eat-terminal tmux-control--terminal)
+    (eat-term-resize tmux-control--terminal 40 5)
+    (tmux-control--write-terminal "é e")
+    (tmux-control--write-terminal "́ e\e[31ḿ\e[0m 世界 😀")
+    (should (string-prefix-p "é é é 世界 😀"
+                             (car (tmux-control--visible-screen-lines (current-buffer)))))
+    (let ((cursor (eat--t-disp-cursor (eat--t-term-display tmux-control--terminal))))
+      (should (= 14 (eat--t-cur-x cursor)))
+      (should (= 1 (eat--t-cur-y cursor))))))
+
+(ert-deftest tmux-control-test-superseded-paused-seed-still-resumes ()
+  (let ((pane (generate-new-buffer " *tc-paused-seed*")) callbacks resumed painted)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((owner (current-buffer)))
+            (with-current-buffer pane (setq tmux-control--active-pane "%7"))
+            (cl-letf (((symbol-function 'tmux-control--query)
+                       (lambda (_command callback) (push callback callbacks)))
+                      ((symbol-function 'tmux-control--paint-seed)
+                       (lambda (&rest _) (setq painted t))))
+              (tmux-control--seed-pane-buffer-async pane owner (lambda () (setq resumed t)))
+              (let ((old-capture (car callbacks)))
+                (tmux-control--seed-pane-buffer-async pane owner)
+                (funcall old-capture '("OLD"))
+                (should resumed)
+                (should-not painted)
+                (setq resumed nil tmux-control--process 'different-connection)
+                (funcall old-capture '("OLD"))
+                (should-not resumed)))))
+      (kill-buffer pane))))
+
+(ert-deftest tmux-control-test-killed-cached-pane-deregisters ()
+  (let ((pane (generate-new-buffer " *tc-killed-cache*")))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((owner (current-buffer)))
+            (setq tmux-control--pane-buffers (list (cons "%7" pane)))
+            (with-current-buffer pane
+              (setq tmux-control--controller owner)
+              (add-hook 'kill-buffer-hook #'tmux-control--pane-buffer-killed nil t))
+            (kill-buffer pane)
+            (should-not tmux-control--pane-buffers)))
+      (when (buffer-live-p pane) (kill-buffer pane)))))
+
+(ert-deftest tmux-control-test-reset-cancels-old-command-watchdog ()
+  (with-temp-buffer
+    (tmux-control-mode)
+    (setq tmux-control--command-watchdog-timer
+          (run-at-time 100 nil #'ignore))
+    (let ((old tmux-control--command-watchdog-timer))
+      (should (memq old timer-list))
+      (tmux-control--reset-buffer)
+      (should-not (memq old timer-list))
+      (should-not tmux-control--command-watchdog-timer))))
+
+(ert-deftest tmux-control-test-paused-untiled-pane-repairs-cache-and-live-view ()
+  (let ((pane (generate-new-buffer " *tc-untiled-pause*")) cached live resumed)
+    (unwind-protect
+        (with-temp-buffer
+          (setq tmux-control--pane-buffers (list (cons "%7" pane))
+                tmux-control--active-pane "%7" tmux-control--tiled nil)
+          (cl-letf (((symbol-function 'tmux-control--seed-pane-buffer-async)
+                     (lambda (buffer _controller after)
+                       (setq cached buffer)
+                       (funcall after)))
+                    ((symbol-function 'tmux-control--seed-screen)
+                     (lambda () (setq live t)))
+                    ((symbol-function 'tmux-control--send-command)
+                     (lambda (&rest _) (setq resumed t))))
+            (tmux-control--handle-pause "%7")
+            (should (eq pane cached))
+            (should live)
+            (should resumed)))
+      (kill-buffer pane))))
+
+(ert-deftest tmux-control-test-disabled-timeout-immediately-allows-input ()
+  (tmux-control-test--with-watchdog-buffer
+   (setq tmux-control--session "t" tmux-control--active-pane "%7"
+         tmux-control--command-watchdog-warned t
+         tmux-control--command-queue (list (cons :ignore (- (float-time) 90))))
+   (let ((tmux-control-command-timeout nil) sent)
+     (cl-letf (((symbol-function 'tmux-control--send-command)
+                (lambda (&rest args) (push args sent))))
+       (tmux-control--send-input nil "x")
+       (tmux-control--paste-to-pane "clip")
+       (should (= 3 (length sent)))))))
+
+(ert-deftest tmux-control-test-pager-diagnostics-use-live-view-and-controller ()
+  (save-window-excursion
+    (let ((owner (generate-new-buffer " *tc-report-owner*"))
+          (live (generate-new-buffer " *tc-report-view*")) report queries)
+      (unwind-protect
+          (progn
+            (with-current-buffer owner
+              (tmux-control-mode)
+              (setq tmux-control--host nil tmux-control--session "t"
+                    tmux-control--socket-name "s" tmux-control--process 'live))
+            (with-current-buffer live
+              (tmux-control-mode)
+              (setq tmux-control--controller owner tmux-control--active-pane "%9"
+                    tmux-control--window-id "@4"
+                    tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
+              (eat-term-resize tmux-control--terminal 40 8)
+              (setq-local tmux-control-window-buffers nil)
+              (use-local-map (copy-keymap tmux-control-mode-map))
+              (define-key (current-local-map) (kbd "C-y") #'ignore))
+            (with-temp-buffer
+              (tmux-control-scrollback-mode)
+              (setq tmux-control--live-buffer live)
+              (cl-letf (((symbol-function 'process-live-p) (lambda (p) (eq p 'live)))
+                        ((symbol-function 'tmux-control--query)
+                         (lambda (command _callback)
+                           (should (eq (current-buffer) owner))
+                           (push command queries))))
+                (setq report (tmux-control-diagnostics))))
+            (with-current-buffer report
+              (should (string-match-p "Pane: %9; window: @4; Eat grid: (40 . 8)" (buffer-string)))
+              (should (string-match-p "View:  \\*tc-report-view\\*" (buffer-string)))
+              (should (string-match-p "\"C-y\" . ignore" (buffer-string)))
+              (should (string-match-p "tmux-control-window-buffers: nil" (buffer-string)))
+              (should (string-match-p "socket: s" (buffer-string))))
+            (should (= 3 (length queries)))
+            (should (cl-some (lambda (command) (string-match-p "-t %9" command)) queries))
+            (should (cl-some (lambda (command) (string-match-p "-t @4 window-size" command)) queries)))
+        (when (buffer-live-p report) (kill-buffer report))
+        (kill-buffer live) (kill-buffer owner)))))
 
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

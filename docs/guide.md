@@ -6,6 +6,20 @@ and install. Connect with `M-x tmux-control-connect` (the session prompt
 completes over existing sessions on the chosen host/socket; a new name creates
 that session).
 
+## Connection bookmarks
+
+From a live view, tiled pane, or scrollback pager, run
+`M-x tmux-control-bookmark-set` and give the connection a name. Jump back with
+`C-x r b` (`bookmark-jump`), or use `C-x r l` to browse your bookmarks. The
+normal `C-x r m` (`bookmark-set`) also saves connections from live views.
+Persistence follows Emacs's `bookmark-save-flag`; `C-x r s` saves explicitly.
+
+A bookmark stores the host, tmux socket, and session. It reuses an existing
+connection or attaches/creates the session through the normal connection
+path. It does not save pane output, input, or a particular tmux window/layout.
+Connections on different sockets stay separate even with identical session
+names; renaming an Emacs connection buffer does not change its identity.
+
 ## Window and session management
 
 These commands act on the connected session (`C-c C-n`/`C-c C-p`/`C-c C-s` are
@@ -244,6 +258,12 @@ In the tiled view:
   panes re-fit instead of clipping.
 - Each pane is a normal `tmux-control` buffer, so `C-c C-e` scrollback and
   the usual movement/search/copy work in any of them.
+- Visited panes keep their Emacs-side live history across window switches,
+  resizing, repaints, and untile/retile. Hidden panes continue streaming.
+  Their buffers remain cached until the pane leaves the session or the
+  connection ends. Each buffer uses `tmux-control-live-scrollback-size`, so
+  visiting many panes increases memory use. Reconnection starts fresh local
+  buffers; server history remains available through `C-c C-e`.
 
 For a session with **several multi-pane windows**, tile one window, then
 switch windows (`M-x tmux-control-select-window`) to bring another into the
@@ -263,8 +283,6 @@ remote session is not stalled by layout changes.
 Known limitations of the tiled view (none of which affect the single-pane
 view):
 
-- Switching windows while tiled rebuilds the new window's pane buffers, so a
-  window's Emacs-side scrollback is not kept across a switch.
 - A vertical stack spends one row on an Emacs mode line where tmux spends it on
   a pane border, so a stacked pane can sit one row short — but content is never
   clipped.
@@ -686,8 +704,16 @@ reusing the buffer's saved host, socket and session — nothing to re-enter,
 and the view reseeds from the running session exactly where it is now.  It
 works from the live view, a per-window render buffer, a tiled pane, or the
 scrollback pager.  Typing into a dead session offers the same reconnect, so
-the natural "is this thing on?" keystroke is itself the recovery path.  A
-deliberate `C-c C-k` disconnect stays quiet.
+the natural "is this thing on?" keystroke is itself the recovery path. That
+triggering key is not sent: type it again once connected. A previously tiled
+view is restored on reconnect, preserving neighboring code windows and their
+focus. A deliberate `C-c C-k` disconnect stays quiet.
+
+If input was sent before the connection failed but its reply never finished,
+the loss notice records the number of unacknowledged input commands. Delivery
+is unknown: tmux may have accepted the input before the reply was lost.
+Reconnection never replays it. Check the running program before resending a
+command.
 
 ## A connection that stops replying
 
@@ -698,7 +724,35 @@ oldest pending command has waited longer than `tmux-control-command-timeout`
 (default 10 seconds) and says so in the session buffer and echo area, pointing
 at `C-c C-r` (`tmux-control-reconnect`).  It never guesses at recovery — a
 late reply still pairs with its own command, and the client announces when
-one arrives.  Set the timeout to `nil` to disable the watchdog.
+a complete reply arrives. An incomplete reply block still counts as pending.
+While the connection is overdue, further keystrokes and pastes are refused
+instead of accumulating input for later delivery. Late replies keep their
+original command ordering. Set the timeout to `nil` to disable the watchdog
+and its age-based input guard.
+
+## Diagnostics and terminal fidelity
+
+Run `M-x tmux-control-diagnostics` from a live view, pane, or scrollback pager.
+The report appears immediately, even on a dead connection. It includes
+Emacs/Eat/package/server versions, Eat and requested client dimensions,
+relevant options and actual key bindings, queue age, incomplete replies,
+unacknowledged input, and reconnect state. A live connection adds pane mode
+flags, the inherited window sizing policy, and attached-client flags through
+asynchronous queries. `g` refreshes the report; copy its text into a bug report.
+Unavailable server fields are shown as unknown. Host/session/socket and buffer
+names are included; pane contents, input text, titles, directories, and SSH
+options are omitted.
+
+Attaching to an already-running TUI seeds its alternate screen, cursor-key,
+mouse, and bracketed-paste modes. Repainting or flow-control recovery refreshes
+those modes over the control connection. Pastes use tmux's paste buffer so the
+running program decides whether bracketed paste is enabled.
+
+Eat 0.9.4 drops zero-width combining characters. tmux-control preserves common
+U+0300–U+036F accents with a single-cell canonical composition, including when
+a process chunk or color escape separates the accent from its base. Sequences
+without such a composition, complex emoji clusters, and glyph display widths
+still depend on Eat and the Emacs font configuration.
 
 ## Development
 

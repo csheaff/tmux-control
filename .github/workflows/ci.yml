@@ -55,6 +55,11 @@ jobs:
           path: ~/eat
           key: eat-v0.9.4-compat-31.0.0.1-${{ runner.os }}-r1
 
+      # Runner images may carry package lists for versions already removed
+      # from Ubuntu mirrors.  Refresh regardless of the Eat cache hit.
+      - name: Refresh apt package lists
+        run: sudo apt-get update -q
+
       - name: Install eat (pinned) and its compat dependency
         if: steps.cache-eat.outputs.cache-hit != 'true'
         run: |
@@ -86,7 +91,7 @@ jobs:
           cp "$HOME/compat"/compat*.el "$HOME/eat/"
           # Compile eat's terminfo so a real terminal can run in integration
           # tests.  Built into ~/eat so the cache captures it too.
-          sudo apt-get update -q && sudo apt-get install -y -q ncurses-bin
+          sudo apt-get install -y -q ncurses-bin
           make -C "$HOME/eat" terminfo
 
       - name: Install tmux (distro)

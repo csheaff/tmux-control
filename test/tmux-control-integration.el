@@ -1034,5 +1034,298 @@ initial+extend instead of initial)."
               (delete-process (buffer-local-value 'tmux-control--process live)))
             (kill-buffer live)))))))
 
+;;; Real session lifecycle, background history, and raw TUI input.
+
+(defconst tmux-control-it--probe-file
+  (expand-file-name "terminal-probe.py" (file-name-directory (or load-file-name buffer-file-name))))
+
+(defun tmux-control-it--ready (controller)
+  "Wait for CONTROLLER's command queue and reply block to drain."
+  (tmux-control-it--pump-until
+   8 (lambda ()
+       (with-current-buffer controller
+         (and tmux-control--active-pane (null tmux-control--command-queue)
+              (not tmux-control--collecting-command))))))
+
+(defmacro tmux-control-it--with-session (&rest body)
+  "Run BODY with a disposable local session, binding controller and pane."
+  (declare (indent 0))
+  `(progn
+     (skip-unless (tmux-control-it--available-p))
+     (tmux-control-it--tmux-ok "kill-server")
+     (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-x" "100" "-y" "35")
+     (let* ((pane (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" "t" "#{pane_id}")))
+            (tmux-control-auto-reconnect nil)
+            (controller (tmux-control-connect nil tmux-control-it--socket "t")))
+       (unwind-protect
+           (progn (should (tmux-control-it--ready controller)) ,@body)
+         (when (buffer-live-p controller)
+           (with-current-buffer controller (ignore-errors (tmux-control-disconnect)))
+           (kill-buffer controller))
+         (tmux-control-it--tmux-ok "kill-server")))))
+
+(ert-deftest tmux-control-it-same-session-on-different-sockets ()
+  (tmux-control-it--with-session
+    (let* ((other-socket (concat tmux-control-it--socket "-other"))
+           (other (tmux-control-connect nil other-socket "t")))
+      (unwind-protect
+          (progn
+            (should (tmux-control-it--ready other))
+            (should-not (eq controller other))
+            (with-current-buffer controller (rename-buffer "R"))
+            (should (eq controller (tmux-control--session-live-buffer nil "t" tmux-control-it--socket)))
+            (should (eq other (tmux-control--session-live-buffer nil "t" other-socket)))
+            (should (eq controller (tmux-control--connect-or-switch nil tmux-control-it--socket "t")))
+            (with-current-buffer controller (tmux-control-reconnect))
+            (should (tmux-control-it--ready controller))
+            (should (process-live-p (buffer-local-value 'tmux-control--process other))))
+        (when (buffer-live-p other) (kill-buffer other))
+        (call-process "tmux" nil nil nil "-L" other-socket "kill-server")))))
+
+(defun tmux-control-it--settle-tiles (controller count)
+  "Run batch idle re-tiles until COUNT panes are placed and queries drain."
+  (tmux-control-it--pump-until
+   8 (lambda ()
+       (with-current-buffer controller
+         (when (timerp tmux-control--retile-timer)
+           (let ((timer tmux-control--retile-timer))
+             (cancel-timer timer)
+             (apply (timer--function timer) (timer--args timer))))
+         (and (= count (length tmux-control--panes))
+              (null tmux-control--command-queue)
+              (not tmux-control--collecting-command))))))
+
+(ert-deftest tmux-control-it-tiled-history-survives-switch-resize-and-untile ()
+  (save-window-excursion
+    (set-frame-size (selected-frame) 120 35)
+    (tmux-control-it--with-session
+      (tmux-control-it--tmux "split-window" "-h" "-t" pane)
+      (tmux-control-it--tmux "new-window" "-t" "t:" "-n" "other")
+      (tmux-control-it--tmux "select-window" "-t" "t:0")
+      (tmux-control-it--pump 0.3)
+      (with-current-buffer controller (tmux-control-tile))
+      (should (tmux-control-it--settle-tiles controller 2))
+      (should (tmux-control-it--ready controller))
+      (let ((cached (cdr (assoc pane (buffer-local-value 'tmux-control--pane-buffers controller)))))
+        (tmux-control-it--tmux "send-keys" "-t" pane
+                               "for i in $(seq 1 60); do echo RETAINED-$i; done" "Enter")
+        (should (tmux-control-it--pump-until 5 (lambda () (string-match-p "RETAINED-60" (tmux-control-it--buffer-text cached)))))
+        (tmux-control-it--tmux "select-window" "-t" "t:1")
+        (should (tmux-control-it--settle-tiles controller 1))
+        (tmux-control-it--tmux "send-keys" "-t" pane "echo OUTPUT_WHILE_AWAY" "Enter")
+        (should (tmux-control-it--pump-until 5 (lambda () (string-match-p "OUTPUT_WHILE_AWAY" (tmux-control-it--buffer-text cached)))))
+        (tmux-control-it--tmux "select-window" "-t" "t:0")
+        (should (tmux-control-it--settle-tiles controller 2))
+        (should (tmux-control-it--ready controller))
+        (should (eq cached (cdr (assoc pane (buffer-local-value 'tmux-control--panes controller)))))
+        (should (string-match-p "RETAINED-1\r?\n" (tmux-control-it--buffer-text cached)))
+        (with-current-buffer controller (tmux-control--send-command "refresh-client -C 110x30"))
+        (tmux-control-it--pump 0.4)
+        (with-current-buffer cached (tmux-control-clear-and-repaint))
+        (should (tmux-control-it--ready controller))
+        (should (string-match-p "RETAINED-1\r?\n" (tmux-control-it--buffer-text cached)))
+        (with-current-buffer cached (tmux-control-untile))
+        (should (tmux-control-it--ready controller))
+        (should (buffer-live-p cached))
+        (with-current-buffer controller (tmux-control-tile))
+        (should (tmux-control-it--settle-tiles controller 2))
+        (should (eq cached (cdr (assoc pane (buffer-local-value 'tmux-control--panes controller)))))
+        (tmux-control-it--tmux "kill-pane" "-t" pane)
+        (tmux-control-it--pump 0.2)
+        (should (tmux-control-it--settle-tiles controller 1))
+        (should (tmux-control-it--pump-until 8 (lambda () (not (buffer-live-p cached)))))))))
+
+(ert-deftest tmux-control-it-stalled-transport-refuses-input-and-recovers ()
+  (tmux-control-it--with-session
+    (let ((server-pid (string-to-number (string-trim (tmux-control-it--tmux "display-message" "-p" "#{pid}"))))
+          (process (buffer-local-value 'tmux-control--process controller))
+          (tmux-control-command-timeout 0.2))
+      (unwind-protect
+          (progn
+            (signal-process server-pid 'SIGSTOP)
+            (with-current-buffer controller
+              (tmux-control--send-input nil "echo ONE_DELIVERY\r"))
+            (should (tmux-control-it--pump-until 2 (lambda () (buffer-local-value 'tmux-control--command-watchdog-warned controller))))
+            (with-current-buffer controller
+              (should-error (tmux-control--send-input nil "echo SHOULD_NOT_SEND\r") :type 'user-error)
+              (should-error (tmux-control--paste-to-pane "SHOULD_NOT_PASTE") :type 'user-error))
+            (signal-process server-pid 'SIGCONT)
+            (should (tmux-control-it--ready controller))
+            (should (tmux-control-it--pump-until 3 (lambda () (string-match-p "ONE_DELIVERY" (tmux-control-it--tmux "capture-pane" "-p" "-t" pane)))))
+            (should-not (string-match-p "SHOULD_NOT" (tmux-control-it--tmux "capture-pane" "-p" "-t" pane)))
+            (should-not (buffer-local-value 'tmux-control--command-watchdog-warned controller)))
+        (ignore-errors (signal-process server-pid 'SIGCONT))))))
+
+(ert-deftest tmux-control-it-reconnect-restores-tiling-and-preserves-code-window ()
+  (save-window-excursion
+    (set-frame-size (selected-frame) 120 35)
+    (tmux-control-it--with-session
+      (tmux-control-it--tmux "split-window" "-h" "-t" pane)
+      (let* ((code (get-buffer-create " *tc-it-code*"))
+             (code-window (split-window (selected-window) nil 'below)))
+        (unwind-protect
+            (progn
+              (set-window-buffer code-window code)
+              (with-current-buffer controller (tmux-control-tile))
+              (should (tmux-control-it--settle-tiles controller 2))
+              (select-window code-window)
+              (tmux-control-it--tmux "resize-pane" "-t" pane "-x" "45")
+              (with-current-buffer controller (tmux-control--build-tiling controller))
+              (should (tmux-control-it--ready controller))
+              (should (eq (selected-window) code-window))
+              (should (eq (window-buffer code-window) code))
+              (delete-process (buffer-local-value 'tmux-control--process controller))
+              (should (tmux-control-it--pump-until 2 (lambda () (not (buffer-local-value 'tmux-control--process controller)))))
+              (should (window-live-p code-window))
+              (with-current-buffer controller (tmux-control--auto-reconnect-now controller))
+              (should (tmux-control-it--settle-tiles controller 2))
+              (should (tmux-control-it--ready controller))
+              (should (eq (window-buffer code-window) code))
+              (should (eq (selected-window) code-window)))
+          (when (buffer-live-p code) (kill-buffer code)))))))
+
+(ert-deftest tmux-control-it-disconnect-records-unacknowledged-input ()
+  (tmux-control-it--with-session
+    (let ((server-pid (string-to-number (string-trim (tmux-control-it--tmux "display-message" "-p" "#{pid}"))))
+          (process (buffer-local-value 'tmux-control--process controller)))
+      (unwind-protect
+          (progn
+            (signal-process server-pid 'SIGSTOP)
+            (with-current-buffer controller (tmux-control--send-input nil "echo UNCERTAIN\r"))
+            (delete-process process)
+            (should (tmux-control-it--pump-until 2 (lambda () (buffer-local-value 'tmux-control--last-disconnect controller))))
+            (should (= 1 (plist-get (buffer-local-value 'tmux-control--last-disconnect controller) :unacknowledged-input)))
+            (signal-process server-pid 'SIGCONT)
+            (let ((send-command (symbol-function 'tmux-control--send-command)) replayed)
+              (cl-letf (((symbol-function 'tmux-control--send-command)
+                         (lambda (command &optional kind)
+                           (when (eq kind :input) (push command replayed))
+                           (funcall send-command command kind))))
+                (with-current-buffer controller (tmux-control-reconnect))
+                (should (tmux-control-it--ready controller)))
+              ;; The old command may have reached tmux despite a lost reply;
+              ;; the reconnect must never send a second copy.
+              (should-not replayed)))
+        (ignore-errors (signal-process server-pid 'SIGCONT))))))
+
+(ert-deftest tmux-control-it-auto-reconnect-restores-tiled-view ()
+  (save-window-excursion
+    (tmux-control-it--with-session
+      (tmux-control-it--tmux "split-window" "-h" "-t" pane)
+      (tmux-control-it--pump 0.2)
+      (with-current-buffer controller (tmux-control-tile))
+      (should (tmux-control-it--settle-tiles controller 2))
+      (let ((tmux-control-auto-reconnect t)
+            (old (buffer-local-value 'tmux-control--process controller)))
+        (delete-process old)
+        (should (tmux-control-it--pump-until
+                 6 (lambda ()
+                     (let ((current (buffer-local-value 'tmux-control--process controller)))
+                       (and (not (eq current old)) (process-live-p current))))))
+        (should (tmux-control-it--settle-tiles controller 2))
+        (should (tmux-control-it--ready controller))
+        (with-current-buffer controller
+          (should (= 0 tmux-control--auto-reconnect-attempts))
+          (should-not tmux-control--auto-reconnect-timer)
+          (should tmux-control--tiled))))))
+
+(ert-deftest tmux-control-it-diagnostics-query-live-state ()
+  (save-window-excursion
+    (tmux-control-it--with-session
+      (let ((report (with-current-buffer controller (tmux-control-diagnostics))))
+        (unwind-protect
+            (progn
+              (should (tmux-control-it--ready controller))
+              (with-current-buffer report
+                (should (string-match-p "Server tmux: [3-9]" (buffer-string)))
+                (should (string-match-p "Window sizing policy:" (buffer-string)))
+                (should (string-match-p "Attached clients:" (buffer-string)))
+                (should-not (string-match-p "Query failed" (buffer-string)))))
+          (kill-buffer report))))))
+
+(ert-deftest tmux-control-it-existing-tui-modes-unicode-and-large-paste ()
+  (skip-unless (and (tmux-control-it--available-p) (executable-find "python3")))
+  (let* ((input-file (make-temp-file "tc-probe-input"))
+         (command (format "%s %s --alternate --input-file %s"
+                          (shell-quote-argument (executable-find "python3"))
+                          (shell-quote-argument tmux-control-it--probe-file)
+                          (shell-quote-argument input-file)))
+         controller)
+    (unwind-protect
+        (progn
+          (tmux-control-it--tmux-ok "kill-server")
+          (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-x" "100" "-y" "30" command)
+          (should (tmux-control-it--pump-until 4 (lambda () (string-match-p "PROBE READY" (tmux-control-it--tmux "capture-pane" "-p" "-t" "t")))))
+          (setq controller (tmux-control-connect nil tmux-control-it--socket "t"))
+          (should (tmux-control-it--ready controller))
+          (with-current-buffer controller
+            (should (tmux-control--alt-screen-p))
+            (should (tmux-control--pane-grabs-mouse-p))
+            (should (equal (tmux-control--visible-screen-lines controller)
+                           (mapcar #'ucs-normalize-NFC-string
+                                   (tmux-control-it--capture-lines tmux-control--active-pane))))
+            (eat-term-input-event tmux-control--terminal 1 'up)
+            ;; Synthetic Emacs mouse events exercise real Eat encoding and
+            ;; tmux delivery; physical hit-testing remains a native GUI check.
+            (let ((position (list (selected-window) 1 '(3 . 2) 0)))
+              (eat-term-input-event tmux-control--terminal 1 (list 'down-mouse-1 position))
+              (eat-term-input-event tmux-control--terminal 1 (list 'mouse-1 position)))
+            (tmux-control--send-input nil "世界")
+            (tmux-control--paste-to-pane (concat "FIRST\n" (make-string 5000 ?x) "\nLAST")))
+          (should (tmux-control-it--ready controller))
+          (should (tmux-control-it--pump-until 4 (lambda () (> (file-attribute-size (file-attributes input-file)) 5010))))
+          (let ((bytes (with-temp-buffer (set-buffer-multibyte nil)
+                                        (insert-file-contents-literally input-file)
+                                        (buffer-string))))
+            (let ((expected (concat "\eOA\e[<0;4;3M\e[<0;4;3m"
+                                    (encode-coding-string "世界" 'utf-8-unix)
+                                    "\e[200~FIRST\r" (make-string 5000 ?x) "\rLAST\e[201~")))
+              ;; Compare every byte without dumping a huge paste on failure.
+              (should (= (length expected) (length bytes)))
+              (should (equal (secure-hash 'sha256 expected)
+                             (secure-hash 'sha256 bytes))))))
+      (when (buffer-live-p controller) (kill-buffer controller))
+      (tmux-control-it--tmux-ok "kill-server")
+      (delete-file input-file))))
+
+(ert-deftest tmux-control-it-untiled-cache-cleaned-on-disconnect ()
+  (save-window-excursion
+    (tmux-control-it--with-session
+      (dolist (deliberate '(nil t))
+        (with-current-buffer controller (tmux-control-tile))
+        (should (tmux-control-it--settle-tiles controller 1))
+        (let ((cached (mapcar #'cdr (buffer-local-value 'tmux-control--pane-buffers controller))))
+          (with-current-buffer controller (tmux-control-untile))
+          (should (tmux-control-it--ready controller))
+          (should (cl-every #'buffer-live-p cached))
+          (if deliberate
+              (with-current-buffer controller (tmux-control-disconnect))
+            (delete-process (buffer-local-value 'tmux-control--process controller)))
+          (should (tmux-control-it--pump-until
+                   3 (lambda () (not (buffer-local-value 'tmux-control--process controller)))))
+          (should (cl-every (lambda (buffer) (not (buffer-live-p buffer))) cached))
+          (should-not (buffer-local-value 'tmux-control--pane-buffers controller))
+          (should-not (buffer-local-value 'tmux-control--resume-tiling controller)))
+        (with-current-buffer controller (tmux-control-reconnect))
+        (should (tmux-control-it--ready controller))
+        (should-not (buffer-local-value 'tmux-control--tiled controller))))))
+
+(ert-deftest tmux-control-it-pager-diagnostics-query-live-pane ()
+  (save-window-excursion
+    (tmux-control-it--with-session
+      (with-temp-buffer
+        (tmux-control-scrollback-mode)
+        (setq tmux-control--live-buffer controller)
+        (let ((report (tmux-control-diagnostics)))
+          (unwind-protect
+              (progn
+                (should (tmux-control-it--ready controller))
+                (with-current-buffer report
+                  (should (string-match-p (regexp-quote (concat "Pane: " pane)) (buffer-string)))
+                  (should (string-match-p "Pane state:" (buffer-string)))
+                  (should (string-match-p "Window sizing policy:" (buffer-string)))
+                  (should-not (string-match-p "Query failed" (buffer-string)))))
+            (kill-buffer report)))))))
+
 (provide 'tmux-control-integration)
 ;;; tmux-control-integration.el ends here
