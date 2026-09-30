@@ -77,7 +77,12 @@ attaches, typing a new name creates it.
   `c`). Optionally, scroll the live view's own history in place, iTerm-style,
   rather than opening the pager — enabled by default, and configurable.
 - **Tiled view** (`C-c C-t`, experimental) — every pane of a window at once,
-  split to match tmux's layout.
+  split to match tmux's layout. Visited panes retain their live history across
+  window switches, resizing, and untiling, and keep streaming while hidden.
+- **Named connections** — save host/socket/session with
+  `M-x tmux-control-bookmark-set`, then return using Emacs bookmarks (`C-x r b`).
+- **Diagnostics** — `M-x tmux-control-diagnostics` produces a copyable report
+  of versions, sizing, terminal modes, bindings, and connection health.
 - **Split a pane from Emacs** — `C-c |` (side by side) or `C-c -` (stacked)
   opens a second terminal beside the current one, tiled so both show at once.
 - **Persistent & remote** — the session lives on the server and outlives Emacs;
@@ -110,7 +115,8 @@ over SSH), live render through Eat, input, resize, window tabs, scrollback with
 redraw-compaction, optional flow control.  Mouse handling and broader edge-case
 hardening are still in progress.
 
-The **tiled view** (`C-c C-t`) is **experimental** — whole-frame only, with a
+The **tiled view** (`C-c C-t`) is **experimental** — it preserves neighboring
+code windows and uses the session's own window region, with a
 few [known limits](docs/guide.md#tiling) — but renders every pane cell-for-cell
 with live per-pane I/O and automatic re-tiling.
 

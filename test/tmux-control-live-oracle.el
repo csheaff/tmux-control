@@ -105,7 +105,7 @@ do, so all three now measure the same thing."
   "Compare every tiled pane of the live tmux-control session to tmux on SOCKET.
 Returns one MATCH/DIFF line per pane.  Run in a GUI Emacs that has a tiled
 tmux-control session."
-  (let* ((ctrl (get-buffer "*tmux-control:local:emacs*"))
+  (let* ((ctrl (tmux-control--connection-buffer nil socket "emacs"))
          (panes (and ctrl (buffer-local-value 'tmux-control--panes ctrl))))
     (if (null panes)
         "no tiled panes (is a tmux-control session tiled?)"
@@ -116,7 +116,7 @@ tmux-control session."
 (defun tmux-control-live-geom ()
   "Return per-pane grid/body/window-start geometry for the live tiling.
 Handy for spotting clip/gutter (grid vs body) and scroll (window-start)."
-  (let* ((ctrl (get-buffer "*tmux-control:local:emacs*"))
+  (let* ((ctrl (tmux-control--tiling-controller))
          (panes (and ctrl (buffer-local-value 'tmux-control--panes ctrl))))
     (mapconcat
      (lambda (np)
