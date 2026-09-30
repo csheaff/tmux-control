@@ -4241,7 +4241,7 @@ output), :calls (side-effect invocations in order), :active-pane,
   ;; Char mode exists to send EVERY key to the pane -- C-c above all --
   ;; but the override emulation map outranks char mode's own keymap, so
   ;; C-c stayed a prefix there.  The advices swap the full override map
-  ;; for the wheel-only map on entry and restore it on return.
+  ;; for the raw-input map on entry and restore it on return.
   (with-temp-buffer
     (tmux-control-mode)
     (setq-local tmux-control--keys-active t
@@ -4251,15 +4251,69 @@ output), :calls (side-effect invocations in order), :active-pane,
     (tmux-control--eat-char-mode-advice #'ignore)
     (should-not tmux-control--keys-active)
     (should tmux-control--char-mode-keys)
-    ;; The wheel-only map still handles wheel-up; C-c is NOT bound in it
-    ;; (not even as a prefix), so char mode's own C-c reaches the pane.
+    ;; Raw keys must outrank modal minor-mode bindings as well.
     (should (eq (lookup-key tmux-control--char-mode-map [wheel-up])
                 #'tmux-control-wheel-scroll))
-    (should-not (lookup-key tmux-control--char-mode-map (kbd "C-c")))
+    (should (eq (lookup-key tmux-control--char-mode-map (kbd "C-c"))
+                #'eat-self-input))
     ;; Back to semi-char: full map restored.
     (tmux-control--eat-semi-char-mode-advice #'ignore)
     (should tmux-control--keys-active)
     (should-not tmux-control--char-mode-keys)))
+
+(defvar tmux-control-test--modal-enabled nil)
+
+(ert-deftest tmux-control-test-char-mode-outranks-modal-keys ()
+  (with-temp-buffer
+    (tmux-control--reset-buffer)
+    (let* ((tmux-control-test--modal-enabled t)
+           (map (make-sparse-keymap))
+           (minor-mode-map-alist (list (cons 'tmux-control-test--modal-enabled map))))
+      (define-key map (kbd "<escape>") #'ignore)
+      (define-key map (kbd "C-c") #'ignore)
+      (define-key map (kbd "C-u") #'ignore)
+      (tmux-control--eat-char-mode-advice #'ignore)
+      (dolist (key '("C-c" "C-u" "a"))
+        (should (eq (key-binding (kbd key)) #'eat-self-input)))
+      (should (eq (key-binding (kbd "<escape>")) #'tmux-control-send-escape))
+      (should (eq (key-binding (kbd "C-M-m")) #'eat-semi-char-mode))
+      (should (eq (key-binding [M-return]) #'eat-semi-char-mode))
+      (tmux-control--eat-semi-char-mode-advice #'ignore)
+      (should (eq (key-binding (kbd "<escape>")) #'ignore)))))
+
+(ert-deftest tmux-control-test-alt-screen-sync-preserves-first-row ()
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (tmux-control--reset-buffer)
+      (tmux-control--write-terminal "\e[?1049h\e[HPROBE READY\r\nUnicode: café\r\n\r\nInput recorder")
+      (let* ((window (selected-window))
+             (top (marker-position (eat-term-display-beginning tmux-control--terminal)))
+             (second-row (save-excursion (goto-char top) (forward-line) (point)))
+             (sync (lambda (windows)
+                     (dolist (w windows) (set-window-start w second-row t)))))
+        ;; Reproduce a GUI recenter choosing the second row.  Both input
+        ;; synchronization and output synchronization must show row one.
+        (tmux-control--eat-synchronize-scroll-advice sync (list window))
+        (should (= (window-start window) top))
+        ;; A normal-screen history reader must retain the chosen view.
+        (tmux-control--write-terminal "\e[?1049lone\r\ntwo\r\nthree")
+        (setq second-row (save-excursion (goto-char (point-min)) (forward-line) (point)))
+        (tmux-control--eat-synchronize-scroll-advice sync (list window))
+        (should (= (window-start window) second-row))))))
+
+(ert-deftest tmux-control-test-tile-restores-horizontal-origin ()
+  ;; A reused leaf can inherit horizontal scrolling from a narrower view.
+  ;; Returning to a fitting terminal must reveal the leftmost cell again.
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (insert "LEFT........RIGHT\n")
+      (set-window-hscroll (selected-window) 5)
+      (tmux-control--tile-arrange-node
+       '(:type leaf :pane "%0") (selected-window)
+       (list (cons "%0" (current-buffer))) #'ignore)
+      (should (= (window-hscroll (selected-window)) 0)))))
 (ert-deftest tmux-control-test-live-buffer-rejects-direct-edits ()
   ;; The buffer text is Eat's model of the pane.  An Emacs editing command
   ;; that changed it (field report: a xah-fly-keys command-mode delete on

@@ -10,6 +10,7 @@ import tty
 parser = argparse.ArgumentParser()
 parser.add_argument("--input-file", required=True)
 parser.add_argument("--alternate", action="store_true")
+parser.add_argument("--edge-markers", action="store_true")
 args = parser.parse_args()
 fd = sys.stdin.fileno()
 original = termios.tcgetattr(fd)
@@ -18,6 +19,9 @@ tty.setraw(fd)
 
 def paint(*_):
     sys.stdout.write("\x1b[H\x1b[2JPROBE READY\r\nUnicode: 世界 café e\u0301 😀\r\n")
+    if args.edge_markers:
+        columns = os.get_terminal_size(fd).columns
+        sys.stdout.write("\x1b[6;1HL" + "." * max(0, columns - 2) + "R")
     sys.stdout.write("\x1b[4;1H\x1b[32mInput recorder\x1b[0m\x1b[?25l")
     sys.stdout.flush()
 

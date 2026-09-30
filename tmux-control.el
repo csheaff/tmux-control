@@ -919,6 +919,12 @@ shadowing the pane's own C-c.")
 
 (defvar tmux-control--char-mode-map
   (let ((map (make-sparse-keymap)))
+    ;; Eat's minor-mode map can lose to a modal package's minor/emulation
+    ;; map.  Put its raw bindings at our emulation-map precedence too.
+    (set-keymap-parent map eat-char-mode-map)
+    ;; GUI events have symbolic names, unlike Eat's ASCII ESC / M-RET.
+    (define-key map [escape] #'tmux-control-send-escape)
+    (define-key map [M-return] #'eat-semi-char-mode)
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
     (define-key map [wheel-down] #'tmux-control-wheel-down)
     ;; Coalesced fast flicks, as in `tmux-control--override-map'.
@@ -930,9 +936,8 @@ shadowing the pane's own C-c.")
   "High-precedence keymap for tmux-control buffers in char mode.
 Char mode exists to send EVERY key to the pane -- C-c above all, the
 interrupt reflex -- so the full override map's C-c chords must not be
-consulted there.  Only the wheel stays ours: it is not a key the
-application would see, and wheel-up-into-scrollback should work the
-same in both modes (the handler already forwards the event to a
+consulted there.  Raw keys inherit Eat's char map; wheel-up-into-scrollback
+still works the same in both modes (the handler already forwards the event to a
 mouse-grabbing application).")
 
 (defvar tmux-control--emulation-mode-map-alist
@@ -940,7 +945,7 @@ mouse-grabbing application).")
     (tmux-control--char-mode-keys . ,tmux-control--char-mode-map))
   "Emulation map alist used to override Eat minor-mode bindings.
 Exactly one of the two gate variables is non-nil at a time: the full
-override map in semi-char mode, the wheel-only map in char mode.")
+override map in semi-char mode, the raw-input map in char mode.")
 
 (defvar-local tmux-control--char-mode-keys nil
   "Non-nil while this tmux-control buffer is in Eat char mode.
@@ -4397,7 +4402,7 @@ semi-char mode.  That almost worked here out of the box, except the
 tmux-control override keymap is an EMULATION map, which outranks char
 mode's own keymap: C-c stayed a prefix, breaking precisely the key
 char mode is most reached for (the interrupt).  Swap the override map
-for the wheel-only `tmux-control--char-mode-map' while char mode is on;
+for the raw-input `tmux-control--char-mode-map' while char mode is on;
 `eat-semi-char-mode' restores it.  In a scrollback pager, char mode
 means \"get me back to the live terminal, raw\": return live first,
 then enter char mode there."
@@ -4408,6 +4413,14 @@ then enter char mode there."
           (eat-char-mode)))
     (apply orig-fn args)
     (when (derived-mode-p 'tmux-control-mode)
+      ;; xah-fly-keys command state uses a terminal-wide transient map,
+      ;; which even emulation maps cannot outrank.  Enter its insert state
+      ;; through its public command so that map is cleanly deactivated.
+      ;; Other buffers keep the modal package enabled, and ESC in semi-char
+      ;; mode can return to command state as usual.
+      (when (and (bound-and-true-p xah-fly-keys)
+                 (fboundp 'xah-fly-insert-mode-activate))
+        (funcall #'xah-fly-insert-mode-activate))
       (tmux-control--protect-terminal-text current-input-method)
       (setq tmux-control--keys-active nil)
       (setq tmux-control--char-mode-keys t))))
@@ -4421,8 +4434,8 @@ then enter char mode there."
   "Switch the live buffer to char mode: every key goes to the pane.
 C-c interrupts, C-u kills the shell line, C-x and M-x reach the
 application -- raw terminal feel, exactly like a standalone terminal
-emulator.  `C-M-m' (M-RET) returns to semi-char mode, where C-c is the
-tmux-control/Emacs prefix again.  This is Eat's own char mode, adapted
+emulator.  `C-M-m' (or GUI M-return) returns to semi-char mode, where C-c
+is the tmux-control/Emacs prefix again.  This is Eat's own char mode, adapted
 so the tmux-control keys get out of the way; the mode line shows
 [char] / [semi-char]."
   (interactive)
@@ -6597,6 +6610,25 @@ behavior is preserved."
           (when (window-live-p window)
             (set-window-start window top t)))))))
 
+(defun tmux-control--eat-synchronize-scroll-advice (orig-fn windows)
+  "Keep an alternate-screen TUI's first row visible after Eat syncs WINDOWS.
+Eat's line-counted `recenter' can advance past the screen top in a GUI
+with tall fallback glyphs, even when the cursor and entire screen fit.
+Use the actual screen marker for live-following alternate-screen windows.
+Normal-screen scrollback and ordinary Emacs navigation keep their view."
+  (prog1 (funcall orig-fn windows)
+    (when (and (derived-mode-p 'tmux-control-mode)
+               tmux-control--terminal
+               (eat-term-live-p tmux-control--terminal)
+               (tmux-control--alt-screen-p))
+      (tmux-control--anchor-windows-to-screen-top windows)
+      (tmux-control--keep-cursor-visible windows))))
+
+(advice-remove #'eat--synchronize-scroll
+               #'tmux-control--eat-synchronize-scroll-advice)
+(advice-add #'eat--synchronize-scroll :around
+            #'tmux-control--eat-synchronize-scroll-advice)
+
 (defun tmux-control--write-terminal (output)
   "Process decoded terminal OUTPUT into Eat and redisplay immediately.
 For one-shot writes (screen seed, resize repaint) that are not part of a
@@ -8355,6 +8387,10 @@ takes the remaining window."
          (set-window-margins window 0 0)
          (set-window-fringes window 0 0)
          (set-window-scroll-bars window 0 nil 0 nil)
+         ;; A reused window may have scrolled horizontally while it held
+         ;; a narrower buffer during rearrangement.  The terminal grid fits
+         ;; this leaf; retain every column from its left edge.
+         (set-window-hscroll window 0)
          (funcall collect pane window))))
     ('split
      (let ((dir (plist-get node :dir))
@@ -8363,7 +8399,11 @@ takes the remaining window."
        (while (cdr kids)
          (let* ((child (car kids))
                 (size (if (eq dir 'h)
-                          (max window-min-width (plist-get child :w))
+                          ;; tmux allocates a separator column between
+                          ;; children.  Emacs's fringe-free internal window
+                          ;; needs that column too: otherwise redisplay
+                          ;; replaces the last terminal cell with `$'.
+                          (max window-min-width (1+ (plist-get child :w)))
                         ;; +1 row for the child window's mode line, so its
                         ;; body height ends up near the tmux pane height.
                         (max window-min-height (1+ (plist-get child :h)))))
