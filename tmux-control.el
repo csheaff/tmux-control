@@ -785,6 +785,11 @@ whose size tmux is not letting this client drive.")
 One warning per episode; cleared when a reconciliation matches again or
 the user adopts the window size.  Query callbacks compare the token by
 identity so an old diagnosis cannot resurrect a cleared warning.")
+(defvar-local tmux-control--size-diagnosis-deferred nil
+  "Non-nil when a size mismatch needs diagnosis on this buffer's next arrival.
+Set when the render buffer is hidden, including when an in-flight
+diagnosis completes after the user has switched away.  Arrival requests
+a fresh pane size even if the controller's client-size cache is unchanged.")
 (defvar-local tmux-control--session-display nil
   "On the controller: the render buffer the live view last swapped to.
 What `tmux-control--session-display-buffer' readers (the session
@@ -5727,9 +5732,15 @@ Called from BOTH arrival paths, and self-deduplicating across them (see
 switch commands immediately, while the display hook covers the routes
 that never reach it -- `switch-to-buffer', a window-configuration
 restore -- and would otherwise be the only path, one that waits on
-redisplay."
+redisplay.  A deferred size diagnosis is retried independently of the
+screen check's interval and alternate-screen exemption."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
+      (when tmux-control--size-diagnosis-deferred
+        ;; Both arrival paths may run for one switch.  Consume the flag
+        ;; before querying so that only the first pays a size round trip.
+        (setq tmux-control--size-diagnosis-deferred nil)
+        (tmux-control--refresh-pane-size))
       (let ((now (float-time)))
         (when (and tmux-control--active-pane
                    (not (tmux-control--alt-screen-p))
@@ -6574,10 +6585,11 @@ redraws stay aligned."
     ;; reconciliation query -- only when the requested CLIENT size actually
     ;; changed.  Emacs core invokes the window-size hook on many redisplays
     ;; where the size did not change; each such call otherwise costs ~2 round
-    ;; trips on a remote link.  The first call after connect or a window switch
-    ;; has a nil cache and still fires, and an external pane-size change arrives
+    ;; trips on a remote link.  The first call after connect has a nil cache
+    ;; and still fires, and an external pane-size change arrives
     ;; via %layout-change (which runs `tmux-control--refresh-pane-size' on its
-    ;; own), so this drops only genuine no-ops.
+    ;; own).  Arrival separately rechecks a deferred size diagnosis even
+    ;; when switching buffers keeps the same cached client dimensions.
     (unless (equal (cons width height)
                    (buffer-local-value 'tmux-control--requested-client-size ctrl))
       (tmux-control--send-command (format "refresh-client -C %dx%d" width height))
@@ -6779,7 +6791,8 @@ it for pin detection avoids false warnings on split layouts."
 Only inspect text after the live terminal, so terminal output is never
 removed.  Match the original notices too, allowing adoption to clean up
 duplicates left by an older loaded version of tmux-control."
-  (setq tmux-control--size-pin-warned nil)
+  (setq tmux-control--size-pin-warned nil
+        tmux-control--size-diagnosis-deferred nil)
   (let ((inhibit-read-only t))
     (save-excursion
       (save-match-data
@@ -6791,6 +6804,14 @@ duplicates left by an older loaded version of tmux-control."
                 "\n\\[tmux-control\\] tmux \\(?:kept the window at\\|window size is pinned\\)[^\n]*\n"
                 nil t)
           (delete-region (match-beginning 0) (match-end 0)))))))
+
+(defun tmux-control--size-warning-visible-p ()
+  "Return non-nil when this render buffer can show a size warning.
+The session display pointer covers a pending swap; actual Emacs windows
+also cover buffers displayed by hand while that pointer is stale."
+  (or (not tmux-control-window-buffers)
+      (eq (current-buffer) (tmux-control--session-display-buffer))
+      (get-buffer-window (current-buffer) t)))
 
 (defun tmux-control--maybe-warn-pinned-size (actual)
   "Warn once when tmux keeps the WINDOW at ACTUAL despite our size requests.
@@ -6809,12 +6830,10 @@ Resolving it is one command: `tmux-control-adopt-window-size'."
      ((= (car requested) (car actual))
       ;; tmux followed us; any earlier episode is over.
       (tmux-control--clear-size-warning))
-     ((and tmux-control-window-buffers
-           (not (eq (current-buffer) (tmux-control--session-display-buffer ctrl)))
-           (not (get-buffer-window (current-buffer) t)))
+     ((not (tmux-control--size-warning-visible-p))
       ;; A competing client can resize every visited window at once.
-      ;; Reconcile background grids, but diagnose only the view in use.
-      nil)
+      ;; Reconcile background grids, then diagnose on the next arrival.
+      (setq tmux-control--size-diagnosis-deferred t))
      ((not tmux-control--size-pin-warned)
       (let* ((buffer (current-buffer))
              (episode (list actual requested))
@@ -6826,7 +6845,8 @@ Resolving it is one command: `tmux-control-adopt-window-size'."
                          (with-current-buffer ctrl
                            (tmux-control--window-target
                             tmux-control--session tmux-control--current-window)))))
-        (setq tmux-control--size-pin-warned episode)
+        (setq tmux-control--size-pin-warned episode
+              tmux-control--size-diagnosis-deferred nil)
         (tmux-control--query
          (format "show-options -wqv -t %s window-size" target)
          (lambda (lines)
@@ -6834,18 +6854,23 @@ Resolving it is one command: `tmux-control-adopt-window-size'."
                       (eq episode (buffer-local-value 'tmux-control--size-pin-warned buffer))
                       (equal window-id (buffer-local-value 'tmux-control--window-id buffer)))
              (with-current-buffer buffer
-               (let* ((value (and lines
-                                  (car (cl-remove-if #'string-empty-p
-                                                     (mapcar #'string-trim
-                                                             lines)))))
-                      (text (if (equal value "manual")
-                                (format "tmux window size is pinned (window-size manual), so the view cannot follow this Emacs window (stuck at %dx%d); M-x tmux-control-adopt-window-size to unpin"
-                                        (car actual) (cdr actual))
-                              (format "tmux kept the window at %dx%d (asked %dx%d): window-size is %s -- another attached client may be sizing it; M-x tmux-control-adopt-window-size to take over"
-                                      (car actual) (cdr actual)
-                                      (car requested) (cdr requested)
-                                      (or value "default")))))
-                 (tmux-control--message text)))))))))))
+               (if (not (tmux-control--size-warning-visible-p))
+                   ;; The user switched away while the probe was in flight.
+                   ;; End this pending episode so arrival can diagnose again.
+                   (setq tmux-control--size-pin-warned nil
+                         tmux-control--size-diagnosis-deferred t)
+                 (let* ((value (and lines
+                                    (car (cl-remove-if #'string-empty-p
+                                                       (mapcar #'string-trim
+                                                               lines)))))
+                        (text (if (equal value "manual")
+                                  (format "tmux window size is pinned (window-size manual), so the view cannot follow this Emacs window (stuck at %dx%d); M-x tmux-control-adopt-window-size to unpin"
+                                          (car actual) (cdr actual))
+                                (format "tmux kept the window at %dx%d (asked %dx%d): window-size is %s -- another attached client may be sizing it; M-x tmux-control-adopt-window-size to take over"
+                                        (car actual) (cdr actual)
+                                        (car requested) (cdr requested)
+                                        (or value "default")))))
+                   (tmux-control--message text))))))))))))
 
 (defun tmux-control-adopt-window-size ()
   "Make the current tmux window's size follow this Emacs window.

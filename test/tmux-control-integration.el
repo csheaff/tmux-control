@@ -296,7 +296,23 @@ path, and another control client holds a smaller size in the inherited case."
           ;; Both cases refuse the same previously cached client size.
           (dolist (cause '(manual inherited))
             (if (eq cause 'manual)
-                (tmux-control-it--tmux "resize-window" "-t" "t:1" "-x" "60")
+                (progn
+                  ;; Pin an already-visited window while it is hidden.  It
+                  ;; must stay quiet there, then diagnose on return even
+                  ;; though the controller's requested size is unchanged.
+                  (with-current-buffer ctrl (tmux-control--do-select-window "0"))
+                  (should (tmux-control-it--pump-until
+                           5 (lambda () (eq ctrl (tmux-control--session-display-buffer ctrl)))))
+                  (tmux-control-it--tmux "resize-window" "-t" "t:1" "-x" "60")
+                  (should (tmux-control-it--pump-until
+                           5 (lambda () (buffer-local-value
+                                         'tmux-control--size-diagnosis-deferred render))))
+                  (should-not (string-match-p "window-size manual"
+                                             (tmux-control-it--buffer-text render)))
+                  (let ((requested (buffer-local-value 'tmux-control--requested-client-size ctrl)))
+                    (with-current-buffer ctrl (tmux-control--do-select-window "1"))
+                    (should (eq requested (buffer-local-value
+                                          'tmux-control--requested-client-size ctrl)))))
               (tmux-control-it--tmux "set-option" "-gw" "window-size" "smallest")
               (tmux-control-it--tmux "set-option" "-wu" "-t" "t:1" "window-size")
               (setq other

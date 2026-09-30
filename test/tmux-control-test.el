@@ -3906,9 +3906,11 @@ output), :calls (side-effect invocations in order), :active-pane,
               (tmux-control--message "another notice")
               (tmux-control--message "tmux window size is pinned (window-size manual)")
               (tmux-control--message "tmux kept the window at 80x24 (asked 100x25): window-size is default"))
-            (setq tmux-control--size-pin-warned t)
+            (setq tmux-control--size-pin-warned t
+                  tmux-control--size-diagnosis-deferred t)
             (tmux-control--clear-size-warning)
             (should-not tmux-control--size-pin-warned)
+            (should-not tmux-control--size-diagnosis-deferred)
             (should (equal (buffer-string)
                            (concat screen "\n[tmux-control] another notice\n")))
             (should (equal (buffer-substring (point-min)
@@ -4008,8 +4010,69 @@ output), :calls (side-effect invocations in order), :active-pane,
             ;; must not echo a duplicate diagnostic for that window.
             (tmux-control--maybe-warn-pinned-size '(100 . 20))
             (should-not tmux-control--size-pin-warned)
+            (should tmux-control--size-diagnosis-deferred)
             (should (string-empty-p (buffer-string))))
           (should (= 3 (length queries))))
+      (kill-buffer render)
+      (kill-buffer ctrl))))
+
+(ert-deftest tmux-control-test-pinned-size-defers-hidden-diagnostic-reply ()
+  ;; A visible buffer can become hidden while its diagnosis is in flight.
+  ;; It must stay quiet and retry on return, even within the screen-healing
+  ;; deduplication interval and with an unchanged client-size cache.
+  (let ((tmux-control-window-buffers t)
+        (ctrl (generate-new-buffer " *tc-hidden-size-controller*"))
+        (render (generate-new-buffer " *tc-hidden-size-render*"))
+        queries echoes)
+    (unwind-protect
+        (save-window-excursion
+          (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                    ((symbol-function 'tmux-control--query)
+                     (lambda (cmd cb) (push (cons cmd cb) queries)))
+                    ((symbol-function 'tmux-control--resize-to-window) #'ignore)
+                    ((symbol-function 'tmux-control--apply-eat-size) #'ignore)
+                    ((symbol-function 'tmux-control--heal-if-drifted) #'ignore)
+                    ((symbol-function 'tmux-control--alt-screen-p) (lambda () nil))
+                    ((symbol-function 'message)
+                     (lambda (fmt &rest args) (push (apply #'format fmt args) echoes))))
+            (with-current-buffer ctrl
+              (setq-local tmux-control--window-id "@1"
+                          tmux-control--window-buffers
+                          (list (cons "@1" ctrl) (cons "@2" render))
+                          tmux-control--requested-client-size (cons 124 37)
+                          tmux-control--session-display render))
+            (set-window-buffer (selected-window) render)
+            (with-current-buffer render
+              (setq-local tmux-control--controller ctrl
+                          tmux-control--window-id "@2"
+                          tmux-control--active-pane "%2")
+              (tmux-control--maybe-warn-pinned-size '(100 . 20)))
+            (let ((reply (cdar queries))
+                  (requested (buffer-local-value 'tmux-control--requested-client-size ctrl)))
+              (with-current-buffer ctrl
+                (tmux-control--display-window-buffer "@1")
+                (funcall reply '("manual")))
+              (should-not echoes)
+              (with-current-buffer render
+                (should (string-empty-p (buffer-string)))
+                (should-not tmux-control--size-pin-warned)
+                (should tmux-control--size-diagnosis-deferred)
+                ;; Arrival size checks must run even when the screen check
+                ;; is deduplicated because this buffer was just visited.
+                (setq tmux-control--arrival-verified (float-time)))
+              (with-current-buffer ctrl
+                (tmux-control--display-window-buffer "@2")
+                (should (string-prefix-p "display-message -p -t %2 " (caar queries)))
+                (funcall (cdar queries) '("100x20_100x20"))
+                (should (equal "show-options -wqv -t @2 window-size" (caar queries)))
+                (funcall (cdar queries) '("manual"))
+                (should (eq requested tmux-control--requested-client-size)))
+              (with-current-buffer render
+                (should-not tmux-control--size-diagnosis-deferred)
+                (should (= 1 (how-many "window-size manual" (point-min) (point-max))))
+                (tmux-control--heal-on-arrival render))
+              (should (= 3 (length queries)))
+              (should (= 1 (length echoes))))))
       (kill-buffer render)
       (kill-buffer ctrl))))
 
