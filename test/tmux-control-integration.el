@@ -272,6 +272,71 @@ the full async pipeline (process filter -> batch -> Eat), not just the seed."
         (kill-buffer buf))
       (tmux-control-it--tmux-ok "kill-server"))))
 
+(ert-deftest tmux-control-it-adopt-window-size-clears-warning ()
+  "Adoption clears manual and inherited-size warnings in a sibling buffer.
+The Emacs dimensions stay unchanged throughout, exercising the cached-size
+path, and another control client holds a smaller size in the inherited case."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-n" "w0" "-x" "80" "-y" "24")
+  (tmux-control-it--tmux "new-window" "-d" "-t" "t:" "-n" "w1")
+  (let* ((tmux-control-window-buffers t)
+         (ctrl (tmux-control-connect nil tmux-control-it--socket "t"))
+         render other)
+    (unwind-protect
+        (progn
+          (should (tmux-control-it--pump-until
+                   5 (lambda () (buffer-local-value 'tmux-control--active-pane ctrl))))
+          (with-current-buffer ctrl (tmux-control--do-select-window "1"))
+          (should (tmux-control-it--pump-until
+                   5 (lambda ()
+                       (setq render (tmux-control--session-display-buffer ctrl))
+                       (and (not (eq render ctrl))
+                            (buffer-local-value 'tmux-control--active-pane render)))))
+          ;; Both cases refuse the same previously cached client size.
+          (dolist (cause '(manual inherited))
+            (if (eq cause 'manual)
+                (tmux-control-it--tmux "resize-window" "-t" "t:1" "-x" "60")
+              (tmux-control-it--tmux "set-option" "-gw" "window-size" "smallest")
+              (tmux-control-it--tmux "set-option" "-wu" "-t" "t:1" "window-size")
+              (setq other
+                    (make-process
+                     :name "tc-it-smaller-client" :buffer nil :noquery t
+                     :connection-type 'pipe :filter #'ignore
+                     :command (list "tmux" "-L" tmux-control-it--socket
+                                    "-C" "attach-session" "-t" "t")))
+              (process-send-string other "refresh-client -C 60x20\n"))
+            (let ((warning (if (eq cause 'manual)
+                               "window-size manual"
+                             "window-size is default")))
+              (should (tmux-control-it--pump-until
+                       5 (lambda () (string-match-p warning
+                                                   (tmux-control-it--buffer-text render)))))
+              (with-current-buffer render
+                (should (= 1 (how-many warning (point-min) (point-max))))
+                (tmux-control-adopt-window-size)
+                (should-not (string-match-p warning (buffer-string))))
+              (should (tmux-control-it--pump-until
+                       5 (lambda ()
+                           (and (not (buffer-local-value 'tmux-control--command-queue ctrl))
+                                (not (buffer-local-value 'tmux-control--collecting-command ctrl))
+                                (= (car (buffer-local-value 'tmux-control--requested-client-size ctrl))
+                                   (string-to-number
+                                    (tmux-control-it--tmux "display-message" "-p" "-t" "t:1"
+                                                           "#{window_width}")))))))
+              ;; Further reconciliations must not resurrect the notice.
+              (with-current-buffer render
+                (dotimes (_ 3) (tmux-control--refresh-pane-size)))
+              (should (tmux-control-it--pump-until
+                       5 (lambda () (not (buffer-local-value 'tmux-control--command-queue ctrl)))))
+              (should-not (string-match-p warning (tmux-control-it--buffer-text render)))
+              (should-not (buffer-local-value 'tmux-control--size-pin-warned render)))))
+      (when (process-live-p other) (delete-process other))
+      (when (buffer-live-p ctrl)
+        (with-current-buffer ctrl (ignore-errors (tmux-control-disconnect)))
+        (kill-buffer ctrl))
+      (tmux-control-it--tmux-ok "kill-server"))))
+
 (ert-deftest tmux-control-it-pane-directory-follows-shell-cd ()
   "Pane-directory mode updates `default-directory' after shell output."
   (skip-unless (tmux-control-it--available-p))
