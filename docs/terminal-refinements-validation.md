@@ -3,12 +3,13 @@
 Validated on 2026-09-30 with Emacs 30.2, Eat 0.9.4, and tmux 3.6a on macOS.
 Tests use dedicated local tmux sockets, with raw input recorded by
 [`test/terminal-probe.py`](../test/terminal-probe.py).
+The unit suites were rerun on 2026-10-01 after adding review regressions.
 
 ## Automated results
 
-- Source unit suite: 288/288 passed.
+- Source unit suite: 290/290 passed.
 - Byte compilation: passed with warnings treated as errors.
-- Compiled unit suite: 288/288 passed.
+- Compiled unit suite: 290/290 passed.
 - Live integration suite: 32/32 passed against both source and the compiled package.
 - Scroll trace checks: 8 Elisp and 8 Python tests passed.
 - Python TUI helper compilation and `git diff --check`: passed.
@@ -71,6 +72,12 @@ scrolling from an earlier arrangement. Regressions cover alternate-screen
 anchoring without changing normal-history scrolling, modal key precedence,
 symbolic GUI keys, and resetting a reused tile's horizontal origin. The GUI
 oracle now treats canonically equivalent accents as equal.
+
+Additional ERT review coverage exercises xah's enabled/disabled transition
+with a terminal-wide overriding map and arranges three real Emacs windows
+from a parsed tmux layout. The arrangement test checks each separator budget,
+available body width, and unchanged Eat grid width. Both regressions were
+also verified to fail with their corresponding old behavior restored in memory.
 
 ## Remaining validation
 

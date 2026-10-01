@@ -4281,6 +4281,35 @@ output), :calls (side-effect invocations in order), :active-pane,
       (tmux-control--eat-semi-char-mode-advice #'ignore)
       (should (eq (key-binding (kbd "<escape>")) #'ignore)))))
 
+(ert-deftest tmux-control-test-char-mode-clears-enabled-xah-transient-map ()
+  ;; xah's command map is terminal-wide, above emulation/minor maps.
+  ;; Its public insert command must clear it only when xah is enabled.
+  ;; Do not require an optional package in the normal CI test environment.
+  (dolist (enabled '(t nil))
+    (with-temp-buffer
+      (tmux-control--reset-buffer)
+      (let* ((map (make-sparse-keymap))
+             (overriding-terminal-local-map map)
+             (activations 0))
+        (define-key map (kbd "C-c") #'ignore)
+        (cl-progv '(xah-fly-keys) (list enabled)
+          (cl-letf (((symbol-function 'xah-fly-insert-mode-activate)
+                     (lambda ()
+                       (cl-incf activations)
+                       (setq overriding-terminal-local-map nil))))
+            (should (eq (key-binding (kbd "C-c")) #'ignore))
+            (tmux-control-char-mode)
+            (should eat--char-mode)
+            (should-not eat--semi-char-mode)
+            (if enabled
+                (progn
+                  (should (= activations 1))
+                  (should-not overriding-terminal-local-map)
+                  (should (eq (key-binding (kbd "C-c")) #'eat-self-input)))
+              (should (= activations 0))
+              (should (eq overriding-terminal-local-map map))
+              (should (eq (key-binding (kbd "C-c")) #'ignore)))))))))
+
 (ert-deftest tmux-control-test-alt-screen-sync-preserves-first-row ()
   (save-window-excursion
     (with-temp-buffer
@@ -4314,6 +4343,48 @@ output), :calls (side-effect invocations in order), :active-pane,
        '(:type leaf :pane "%0") (selected-window)
        (list (cons "%0" (current-buffer))) #'ignore)
       (should (= (window-hscroll (selected-window)) 0)))))
+
+(ert-deftest tmux-control-test-horizontal-tiles-reserve-separators ()
+  ;; Arrange real windows from a parsed three-pane tmux layout. Reserve
+  ;; each internal separator without shrinking the terminal's own grid.
+  (save-window-excursion
+    (delete-other-windows)
+    (with-temp-buffer
+      (tmux-control-mode)
+      (let* ((root (selected-window))
+             (columns (window-total-width root))
+             (rows (window-body-height root))
+             (width (/ (- columns 2) 3))
+             (last-width (- columns (* 2 width) 2))
+             (layout (tmux-control--parse-layout
+                      (format "%dx%d,0,0{%dx%d,0,0,1,%dx%d,%d,0,2,%dx%d,%d,0,3}"
+                              columns rows width rows width rows (1+ width)
+                              last-width rows (* 2 (1+ width)))))
+             (leaves (tmux-control--layout-leaves layout))
+             panes placed)
+        (unwind-protect
+            (progn
+              (dolist (leaf leaves)
+                (let ((pane (concat "%" (plist-get leaf :id))))
+                  (plist-put leaf :pane pane)
+                  (push (cons pane (tmux-control--make-pane-buffer
+                                   pane leaf (current-buffer)
+                                   (list :local-directory default-directory))) panes)))
+              (tmux-control--tile-arrange-node
+               layout root panes (lambda (pane window) (push (cons pane window) placed)))
+              (should (= (length placed) 3))
+              (dolist (leaf leaves)
+                (let* ((pane (plist-get leaf :pane))
+                       (window (cdr (assoc pane placed)))
+                       (term (buffer-local-value 'tmux-control--terminal (cdr (assoc pane panes))))
+                       (pane-width (plist-get leaf :w)))
+                  (should (= (car (eat-term-size term)) pane-width))
+                  (should (>= (window-body-width window) pane-width))
+                  ;; Non-last children receive one separator column. The
+                  ;; last takes the remaining region, exactly its pane width.
+                  (should (= (window-total-width window)
+                             (+ pane-width (if (eq leaf (car (last leaves))) 0 1)))))))
+          (dolist (entry panes) (tmux-control--forget-pane-buffer (car entry))))))))
 (ert-deftest tmux-control-test-live-buffer-rejects-direct-edits ()
   ;; The buffer text is Eat's model of the pane.  An Emacs editing command
   ;; that changed it (field report: a xah-fly-keys command-mode delete on

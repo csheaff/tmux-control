@@ -1000,14 +1000,15 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     (define-key map (kbd "C-c |") #'tmux-control-split-pane-right)
     (define-key map (kbd "C-c -") #'tmux-control-split-pane-below)
     ;; A bare ESC press should reach the pane immediately; see
-    ;; `tmux-control-send-escape'.  Bound ONLY here, in the major mode
-    ;; map, on purpose: a modal package (xah-fly-keys, evil, viper) that
+    ;; `tmux-control-send-escape'.  In semi-char mode it is bound only
+    ;; here, in the major mode map: a modal package (xah-fly-keys, evil, viper) that
     ;; binds ESC to leave insert mode installs it in a minor-mode map,
     ;; which outranks the major mode map -- so for those users ESC keeps
     ;; switching modes (the regression this placement fixes), while for
     ;; everyone else, where nothing else claims ESC, it sends to the pane.
     ;; It must NOT go in `tmux-control--override-map' (an emulation map):
     ;; that beats minor-mode maps and would swallow the modal binding.
+    ;; Char mode deliberately binds it in its raw-input emulation map.
     (define-key map [escape] #'tmux-control-send-escape)
     ;; Route every "paste" gesture through tmux's own paste buffer.  Eat's
     ;; map covers C-y, M-y, S-insert and mouse yank, but a GUI/macOS
@@ -6727,12 +6728,13 @@ it is pressed, like any terminal would.  (In a tty Emacs the escape
 key never generates this `escape' event, so terminal Meta sequences
 are unaffected.)
 
-Bound only in `tmux-control-mode-map', the major mode map, so a modal
+In semi-char mode, bound only in `tmux-control-mode-map', so a modal
 package that binds ESC to leave insert mode (xah-fly-keys, evil, viper)
 keeps it: those bindings live in a minor-mode map, which outranks the
 major mode map.  For such users the ESC key switches modes rather than
 reaching the pane; to send ESC to the pane they bind this command to a
-free key, or use char mode (where every key goes to the pane)."
+free key, or use char mode.  Char mode binds ESC in its raw-input
+emulation map so it reaches the pane even with modal editing enabled."
   (interactive)
   (eat-self-input 1 ?\e))
 
