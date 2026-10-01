@@ -4241,7 +4241,7 @@ output), :calls (side-effect invocations in order), :active-pane,
   ;; Char mode exists to send EVERY key to the pane -- C-c above all --
   ;; but the override emulation map outranks char mode's own keymap, so
   ;; C-c stayed a prefix there.  The advices swap the full override map
-  ;; for the wheel-only map on entry and restore it on return.
+  ;; for the raw-input map on entry and restore it on return.
   (with-temp-buffer
     (tmux-control-mode)
     (setq-local tmux-control--keys-active t
@@ -4251,15 +4251,140 @@ output), :calls (side-effect invocations in order), :active-pane,
     (tmux-control--eat-char-mode-advice #'ignore)
     (should-not tmux-control--keys-active)
     (should tmux-control--char-mode-keys)
-    ;; The wheel-only map still handles wheel-up; C-c is NOT bound in it
-    ;; (not even as a prefix), so char mode's own C-c reaches the pane.
+    ;; Raw keys must outrank modal minor-mode bindings as well.
     (should (eq (lookup-key tmux-control--char-mode-map [wheel-up])
                 #'tmux-control-wheel-scroll))
-    (should-not (lookup-key tmux-control--char-mode-map (kbd "C-c")))
+    (should (eq (lookup-key tmux-control--char-mode-map (kbd "C-c"))
+                #'eat-self-input))
     ;; Back to semi-char: full map restored.
     (tmux-control--eat-semi-char-mode-advice #'ignore)
     (should tmux-control--keys-active)
     (should-not tmux-control--char-mode-keys)))
+
+(defvar tmux-control-test--modal-enabled nil)
+
+(ert-deftest tmux-control-test-char-mode-outranks-modal-keys ()
+  (with-temp-buffer
+    (tmux-control--reset-buffer)
+    (let* ((tmux-control-test--modal-enabled t)
+           (map (make-sparse-keymap))
+           (minor-mode-map-alist (list (cons 'tmux-control-test--modal-enabled map))))
+      (define-key map (kbd "<escape>") #'ignore)
+      (define-key map (kbd "C-c") #'ignore)
+      (define-key map (kbd "C-u") #'ignore)
+      (tmux-control--eat-char-mode-advice #'ignore)
+      (dolist (key '("C-c" "C-u" "a"))
+        (should (eq (key-binding (kbd key)) #'eat-self-input)))
+      (should (eq (key-binding (kbd "<escape>")) #'tmux-control-send-escape))
+      (should (eq (key-binding (kbd "C-M-m")) #'eat-semi-char-mode))
+      (should (eq (key-binding [M-return]) #'eat-semi-char-mode))
+      (tmux-control--eat-semi-char-mode-advice #'ignore)
+      (should (eq (key-binding (kbd "<escape>")) #'ignore)))))
+
+(ert-deftest tmux-control-test-char-mode-clears-enabled-xah-transient-map ()
+  ;; xah's command map is terminal-wide, above emulation/minor maps.
+  ;; Its public insert command must clear it only when xah is enabled.
+  ;; Do not require an optional package in the normal CI test environment.
+  (dolist (enabled '(t nil))
+    (with-temp-buffer
+      (tmux-control--reset-buffer)
+      (let* ((map (make-sparse-keymap))
+             (overriding-terminal-local-map map)
+             (activations 0))
+        (define-key map (kbd "C-c") #'ignore)
+        (cl-progv '(xah-fly-keys) (list enabled)
+          (cl-letf (((symbol-function 'xah-fly-insert-mode-activate)
+                     (lambda ()
+                       (cl-incf activations)
+                       (setq overriding-terminal-local-map nil))))
+            (should (eq (key-binding (kbd "C-c")) #'ignore))
+            (tmux-control-char-mode)
+            (should eat--char-mode)
+            (should-not eat--semi-char-mode)
+            (if enabled
+                (progn
+                  (should (= activations 1))
+                  (should-not overriding-terminal-local-map)
+                  (should (eq (key-binding (kbd "C-c")) #'eat-self-input)))
+              (should (= activations 0))
+              (should (eq overriding-terminal-local-map map))
+              (should (eq (key-binding (kbd "C-c")) #'ignore)))))))))
+
+(ert-deftest tmux-control-test-alt-screen-sync-preserves-first-row ()
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (tmux-control--reset-buffer)
+      (tmux-control--write-terminal "\e[?1049h\e[HPROBE READY\r\nUnicode: café\r\n\r\nInput recorder")
+      (let* ((window (selected-window))
+             (top (marker-position (eat-term-display-beginning tmux-control--terminal)))
+             (second-row (save-excursion (goto-char top) (forward-line) (point)))
+             (sync (lambda (windows)
+                     (dolist (w windows) (set-window-start w second-row t)))))
+        ;; Reproduce a GUI recenter choosing the second row.  Both input
+        ;; synchronization and output synchronization must show row one.
+        (tmux-control--eat-synchronize-scroll-advice sync (list window))
+        (should (= (window-start window) top))
+        ;; A normal-screen history reader must retain the chosen view.
+        (tmux-control--write-terminal "\e[?1049lone\r\ntwo\r\nthree")
+        (setq second-row (save-excursion (goto-char (point-min)) (forward-line) (point)))
+        (tmux-control--eat-synchronize-scroll-advice sync (list window))
+        (should (= (window-start window) second-row))))))
+
+(ert-deftest tmux-control-test-tile-restores-horizontal-origin ()
+  ;; A reused leaf can inherit horizontal scrolling from a narrower view.
+  ;; Returning to a fitting terminal must reveal the leftmost cell again.
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (insert "LEFT........RIGHT\n")
+      (set-window-hscroll (selected-window) 5)
+      (tmux-control--tile-arrange-node
+       '(:type leaf :pane "%0") (selected-window)
+       (list (cons "%0" (current-buffer))) #'ignore)
+      (should (= (window-hscroll (selected-window)) 0)))))
+
+(ert-deftest tmux-control-test-horizontal-tiles-reserve-separators ()
+  ;; Arrange real windows from a parsed three-pane tmux layout. Reserve
+  ;; each internal separator without shrinking the terminal's own grid.
+  (save-window-excursion
+    (delete-other-windows)
+    (with-temp-buffer
+      (tmux-control-mode)
+      (let* ((root (selected-window))
+             (columns (window-total-width root))
+             (rows (window-body-height root))
+             (width (/ (- columns 2) 3))
+             (last-width (- columns (* 2 width) 2))
+             (layout (tmux-control--parse-layout
+                      (format "%dx%d,0,0{%dx%d,0,0,1,%dx%d,%d,0,2,%dx%d,%d,0,3}"
+                              columns rows width rows width rows (1+ width)
+                              last-width rows (* 2 (1+ width)))))
+             (leaves (tmux-control--layout-leaves layout))
+             panes placed)
+        (unwind-protect
+            (progn
+              (dolist (leaf leaves)
+                (let ((pane (concat "%" (plist-get leaf :id))))
+                  (plist-put leaf :pane pane)
+                  (push (cons pane (tmux-control--make-pane-buffer
+                                   pane leaf (current-buffer)
+                                   (list :local-directory default-directory))) panes)))
+              (tmux-control--tile-arrange-node
+               layout root panes (lambda (pane window) (push (cons pane window) placed)))
+              (should (= (length placed) 3))
+              (dolist (leaf leaves)
+                (let* ((pane (plist-get leaf :pane))
+                       (window (cdr (assoc pane placed)))
+                       (term (buffer-local-value 'tmux-control--terminal (cdr (assoc pane panes))))
+                       (pane-width (plist-get leaf :w)))
+                  (should (= (car (eat-term-size term)) pane-width))
+                  (should (>= (window-body-width window) pane-width))
+                  ;; Non-last children receive one separator column. The
+                  ;; last takes the remaining region, exactly its pane width.
+                  (should (= (window-total-width window)
+                             (+ pane-width (if (eq leaf (car (last leaves))) 0 1)))))))
+          (dolist (entry panes) (tmux-control--forget-pane-buffer (car entry))))))))
 (ert-deftest tmux-control-test-live-buffer-rejects-direct-edits ()
   ;; The buffer text is Eat's model of the pane.  An Emacs editing command
   ;; that changed it (field report: a xah-fly-keys command-mode delete on
