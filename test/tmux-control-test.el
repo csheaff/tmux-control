@@ -6209,5 +6209,17 @@ output), :calls (side-effect invocations in order), :active-pane,
         (when (buffer-live-p report) (kill-buffer report))
         (kill-buffer live) (kill-buffer owner)))))
 
+(ert-deftest tmux-control-test-evil-starts-panes-in-insert-state ()
+  "Evil users can type into a pane without first leaving normal state."
+  (let (states)
+    (cl-letf (((symbol-function 'evil-set-initial-state)
+               (lambda (mode state) (push (cons mode state) states))))
+      (with-temp-buffer (tmux-control-mode))
+      (should (eq (alist-get 'tmux-control-mode states) 'insert))
+      (setq states nil)
+      (let ((tmux-control-evil-state nil))
+        (with-temp-buffer (tmux-control-mode)))
+      (should-not states))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
