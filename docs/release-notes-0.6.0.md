@@ -17,22 +17,6 @@ collection for tmux-control views.
 - Output decoding copies literal runs together and reuses octal replacement
   strings to reduce temporary allocation.
 
-## Connections and terminal fidelity
-
-- Add named connection bookmarks using native Emacs bookmarks and a copyable
-  `tmux-control-diagnostics` report with asynchronous live server details.
-- Separate connection identity by host, socket, and session; controller renames
-  no longer break reuse or render-buffer cleanup.
-- Retain visited tiled pane history through window switches, resizing,
-  repaints, and untile/retile; cached panes keep streaming while hidden.
-- Restore tiling on reconnect while preserving neighboring code windows/focus.
-- Detect incomplete command replies, refuse additional input on an overdue
-  connection, and report unacknowledged input without replaying it on recovery.
-- Refresh pane cursor and terminal modes during in-band repaint/flow-control
-  recovery; ignore stale seeds from older connections or superseded requests.
-- Preserve canonically composable combining accents that Eat 0.9.4 omits.
-  Complex graphemes without a single-cell composition remain an Eat limitation.
-
 ## Optional idle collection
 
 Enable `M-x tmux-control-idle-gc-mode` to request garbage collection during
