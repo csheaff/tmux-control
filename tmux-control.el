@@ -951,7 +951,7 @@ override map in semi-char mode, the raw-input map in char mode.")
   "Non-nil while this tmux-control buffer is in Eat char mode.
 Gates `tmux-control--char-mode-map' on, while `tmux-control--keys-active'
 gates the full override map off; toggled by the `eat-char-mode' /
-eat-semi-char-mode advices.")
+`eat-semi-char-mode' advices.")
 
 (defvar-local tmux-control--windows nil
   "Cached window list for the tab bar.
