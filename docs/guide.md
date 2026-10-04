@@ -221,7 +221,7 @@ along and the live view repaints on the chosen pane.
 - `C-c |` (`tmux-control-split-pane-right`) — split side by side, the new pane
   on the right.
 - `C-c -` (`tmux-control-split-pane-below`) — split stacked, the new pane below.
-- `C-c x` (`tmux-control-kill-pane`) — close the active pane (with confirmation).
+- `C-c C-x` (`tmux-control-kill-pane`) — close the active pane (with confirmation).
 
 A split runs tmux's own `split-window` over the control connection and, by
 default, enters the tiled view (below) so both panes show at once — otherwise

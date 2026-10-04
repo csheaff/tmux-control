@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026  Clay Sheaff
 
 ;; Author: Clay Sheaff
-;; Version: 0.7.0
+;; Version: 0.7.1
 ;; Package-Requires: ((emacs "29.1") (eat "0.9.4"))
 ;; Keywords: terminals, tmux
 ;; URL: https://github.com/csheaff/tmux-control
@@ -60,7 +60,7 @@
 (require 'ucs-normalize)
 (require 'eat)
 
-(defconst tmux-control-version "0.7.0"
+(defconst tmux-control-version "0.7.1"
   "Version of tmux-control, included in diagnostic reports.")
 
 ;; Optional: `consult' drives the per-candidate preview for the `inline'
@@ -888,7 +888,7 @@ kills, which are deliberate.")
     ;; Window jumps: a chooser, "last window" (alt-tab), and direct C-c N.
     (define-key map (kbd "C-c C-w") #'tmux-control-select-window)
     (define-key map (kbd "C-c TAB") #'tmux-control-last-window)
-    (define-key map (kbd "C-c x") #'tmux-control-kill-pane)
+    (define-key map (kbd "C-c C-x") #'tmux-control-kill-pane)
     (dotimes (i 10)
       (define-key map (kbd (format "C-c %d" i))
         #'tmux-control-select-window-by-key))
@@ -993,7 +993,7 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     ;; Window jumps: a chooser, "last window" (alt-tab), and direct C-c N.
     (define-key map (kbd "C-c C-w") #'tmux-control-select-window)
     (define-key map (kbd "C-c TAB") #'tmux-control-last-window)
-    (define-key map (kbd "C-c x") #'tmux-control-kill-pane)
+    (define-key map (kbd "C-c C-x") #'tmux-control-kill-pane)
     (dotimes (i 10)
       (define-key map (kbd (format "C-c %d" i))
         #'tmux-control-select-window-by-key))

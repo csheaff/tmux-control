@@ -2210,13 +2210,22 @@ each wrapped in an evolving prompt line and a status bar.")
               (tmux-control--quiet-activity 5))))   ; must not error
       (kill-buffer ctrl) (kill-buffer render))))
 
+(ert-deftest tmux-control-test-version-constant-matches-the-header ()
+  ;; Diagnostic reports print the constant; package managers read the header.
+  (require 'lisp-mnt)
+  (with-temp-buffer
+    (insert-file-contents (locate-library "tmux-control.el"))
+    (should (equal tmux-control-version (lm-header "Version")))))
+
 (ert-deftest tmux-control-test-window-jump-keys-bound ()
   ;; The window-jump keys are bound in BOTH the override map (high precedence,
   ;; over Eat) and the major-mode map, and `l' really exits scrollback.
   (dolist (map (list tmux-control--override-map tmux-control-mode-map))
     (should (eq (lookup-key map (kbd "C-c C-w")) 'tmux-control-select-window))
     (should (eq (lookup-key map (kbd "C-c TAB")) 'tmux-control-last-window))
-    (should (eq (lookup-key map (kbd "C-c x")) 'tmux-control-kill-pane))
+    (should (eq (lookup-key map (kbd "C-c C-x")) 'tmux-control-kill-pane))
+    ;; C-c followed by a letter is reserved for users.
+    (should-not (lookup-key map (kbd "C-c x")))
     (should (eq (lookup-key map (kbd "C-c 0")) 'tmux-control-select-window-by-key))
     (should (eq (lookup-key map (kbd "C-c 7")) 'tmux-control-select-window-by-key)))
   (should (eq (lookup-key tmux-control-scrollback-mode-map (kbd "l"))
