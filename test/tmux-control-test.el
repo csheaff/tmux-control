@@ -2247,11 +2247,11 @@ each wrapped in an evolving prompt line and a status bar.")
                (should-not (advice-member-p function symbol)))
               (`(hook ,hook ,function)
                (should-not (memq function (default-value hook)))))))
-      ;; Put everything back for the other tests.
+      ;; Put everything back for the other tests, hooks in production order.
       (dolist (site sites)
         (pcase site
-          (`(advice ,symbol ,how ,function) (advice-add symbol how function))
-          (`(hook ,hook ,function) (add-hook hook function)))))))
+          (`(advice ,symbol ,how ,function) (advice-add symbol how function))))
+      (tmux-control--add-resize-hooks))))
 
 (defun tmux-control-test--all-installed-p (sites)
   "Whether every advice and hook in SITES is currently installed."
