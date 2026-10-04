@@ -6236,5 +6236,216 @@ output), :calls (side-effect invocations in order), :active-pane,
         (with-temp-buffer (tmux-control-mode)))
       (should-not (memq 'tmux-control-mode evil-insert-state-modes)))))
 
+;;; Public API for packages built on tmux-control.
+
+(defmacro tmux-control-test--with-live-connection (sent &rest body)
+  "Run BODY in a reply buffer with a live process, collecting writes in SENT."
+  (declare (indent 1))
+  `(tmux-control-test--with-reply-buffer
+    (let ((proc (make-pipe-process :name "tc-api-test" :buffer (current-buffer)
+                                   :noquery t))
+          (tmux-control-command-timeout nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'process-send-string)
+                     (lambda (_process string) (push string ,sent))))
+            (setq-local tmux-control--process proc)
+            ,@body)
+        (delete-process proc)))))
+
+(ert-deftest tmux-control-test-public-send-command ()
+  ;; The command goes out as one line, and its reply is matched and dropped.
+  (let (sent)
+    (tmux-control-test--with-live-connection sent
+      (tmux-control-send-command "select-window -t @3")
+      (should (equal sent '("select-window -t @3\n")))
+      (should (eq (caar tmux-control--command-queue) :ignore))
+      ;; A pane buffer routes through its controller's single queue.
+      (let ((controller (current-buffer)))
+        (with-temp-buffer
+          (setq-local tmux-control--controller controller)
+          (tmux-control-send-command "select-pane -t %4")))
+      (should (equal (car sent) "select-pane -t %4\n"))
+      (should (= (length tmux-control--command-queue) 2)))))
+
+(ert-deftest tmux-control-test-public-query-delivers-reply ()
+  (let (sent (got :not-called))
+    (tmux-control-test--with-live-connection sent
+      (tmux-control-query "display-message -p '#{window_id}'"
+                          (lambda (lines) (setq got lines)))
+      (should (equal sent '("display-message -p '#{window_id}'\n")))
+      (tmux-control--handle-line "%begin 1 3 0")
+      (tmux-control--handle-line "@2")
+      (tmux-control--handle-line "%end 1 3 0")
+      (should (equal got '("@2")))
+      ;; An error reply still completes the query, with nil.
+      (setq got :not-called)
+      (tmux-control-query "select-window -t @9" (lambda (lines) (setq got lines)))
+      (tmux-control--handle-line "%begin 2 4 0")
+      (tmux-control--handle-line "can't find window: @9")
+      (tmux-control--handle-line "%error 2 4 0")
+      (should (null got)))))
+
+(ert-deftest tmux-control-test-single-command-p ()
+  ;; Replies are matched to commands one for one, so the public API sends
+  ;; only text tmux answers with exactly one reply block.
+  (dolist (command '("list-windows"
+                     "display-message -p '#{window_id}'"
+                     "select-window -t @3"
+                     "select-pane -t %4"
+                     "send-keys -t %1 ';'"            ; quoted separators
+                     "send-keys -t %1 \"a;b{c}\""
+                     "send-keys -t %1 'say \"hi\"; {x}'"
+                     "send-keys -t %1 \\;"           ; escaped separator
+                     "send-keys -t %1 \"\\\";\""      ; escaped quote, then a quoted ;
+                     "send-keys -t %1 a#b"            ; # inside a word is literal
+                     "list-panes # a trailing comment; {}"
+                     "  list-windows  "
+                     "lsw"))
+    (should (tmux-control--single-command-p command)))
+  (dolist (command '(""                               ; tmux detaches the client
+                     "\0list-windows"                 ; so does a leading NUL
+                     "  \0list-windows"               ; no reply at all
+                     "list-windows\0junk"
+                     "   "
+                     "# only a comment"
+                     "FOO=bar"                        ; an assignment: no reply
+                     "'FOO=bar'"
+                     "%hidden FOO=bar"
+                     "\"list-windows\""               ; not a bare command name
+                     "list-panes\nkill-server"        ; two lines
+                     "list-panes\n"
+                     "display-message -p a ; display-message -p b"
+                     "display-message -p a; display-message -p b"
+                     "display-message -p a;display-message -p b"
+                     "if-shell true { display-message a }"
+                     "send-keys -t %1 'unterminated ; quote' ;"))
+    (should-not (tmux-control--single-command-p command))))
+
+(ert-deftest tmux-control-test-public-commands-reject-non-single-commands ()
+  ;; A rejected command sends and queues nothing, so the next query still
+  ;; gets its own reply.
+  (let (sent (got :not-called))
+    (tmux-control-test--with-live-connection sent
+      (dolist (command '("" "  " "# note" "list-panes\nkill-server"
+                         "\0list-windows" "FOO=bar" "%hidden FOO=bar"
+                         "display-message -p a ; display-message -p b"))
+        (should-error (tmux-control-send-command command))
+        (should-error (tmux-control-query command #'ignore)))
+      (should-not sent)
+      (should-not tmux-control--command-queue)
+      (tmux-control-query "display-message -p b" (lambda (lines) (setq got lines)))
+      (tmux-control--handle-line "%begin 1 5 1")
+      (tmux-control--handle-line "b")
+      (tmux-control--handle-line "%end 1 5 1")
+      (should (equal got '("b")))
+      (should-not tmux-control--command-queue))))
+
+(ert-deftest tmux-control-test-public-commands-without-connection ()
+  ;; Outside a live connection nothing is sent and no callback runs.
+  (with-temp-buffer
+    (let (sent called)
+      (cl-letf (((symbol-function 'process-send-string)
+                 (lambda (_process string) (push string sent))))
+        (tmux-control-send-command "list-windows")
+        (tmux-control-query "list-windows" (lambda (_lines) (setq called t))))
+      (should-not sent)
+      (should-not called))))
+
+(ert-deftest tmux-control-test-public-connect-or-switch ()
+  (let (connected shown)
+    (cl-letf (((symbol-function 'tmux-control-connect)
+               (lambda (&rest args) (setq connected args)))
+              ((symbol-function 'pop-to-buffer)
+               (lambda (buffer &rest _) (setq shown buffer))))
+      ;; No live connection: connect.
+      (tmux-control-connect-or-switch "dev" "main" "work")
+      (should (equal connected '("dev" "main" "work")))
+      (should-not shown)
+      ;; A live connection: show it instead of connecting again.
+      (setq connected nil)
+      (with-temp-buffer
+        (let ((live (current-buffer)))
+          (cl-letf (((symbol-function 'tmux-control--session-live-buffer)
+                     (lambda (host session socket)
+                       (and (equal host "dev") (equal session "work")
+                            (equal socket "main") live))))
+            (tmux-control-connect-or-switch "dev" "main" "work"))
+          (should (eq shown live))
+          (should-not connected))))))
+
+(ert-deftest tmux-control-test-public-tiled-p ()
+  (with-temp-buffer
+    (should-not (tmux-control-tiled-p))
+    (setq-local tmux-control--tiled t)
+    (should (tmux-control-tiled-p))
+    ;; A pane buffer is tiled when its controller is.
+    (let ((controller (current-buffer)))
+      (with-temp-buffer
+        (setq-local tmux-control--controller controller)
+        (should (tmux-control-tiled-p))
+        (with-current-buffer controller (setq-local tmux-control--tiled nil))
+        (should-not (tmux-control-tiled-p))))))
+
+(ert-deftest tmux-control-test-public-buffer-accessors ()
+  (with-temp-buffer
+    (should-not (tmux-control-buffer-host))
+    (should-not (tmux-control-buffer-socket-name))
+    (should-not (tmux-control-buffer-session))
+    (should-not (tmux-control-active-pane))
+    (should-not (tmux-control-window-id))
+    (setq-local tmux-control--host "dev"
+                tmux-control--socket-name "main"
+                tmux-control--session "work"
+                tmux-control--active-pane "%3"
+                tmux-control--window-id "@2")
+    (should (equal (tmux-control-buffer-host) "dev"))
+    (should (equal (tmux-control-buffer-socket-name) "main"))
+    (should (equal (tmux-control-buffer-session) "work"))
+    (should (equal (tmux-control-active-pane) "%3"))
+    (should (equal (tmux-control-window-id) "@2"))
+    ;; An empty host, which `tmux-control-connect' also accepts, is local.
+    (setq-local tmux-control--host "")
+    (should-not (tmux-control-buffer-host))))
+
+(ert-deftest tmux-control-test-public-window-id-in-tiled-pane-buffer ()
+  ;; A tiled pane buffer leaves its own window field unset (it selects the
+  ;; pane seeder); the accessor reads the controller's pane map instead.
+  (with-temp-buffer
+    (let ((controller (current-buffer)))
+      (setq-local tmux-control--window-id "@1"
+                  tmux-control--pane-window (make-hash-table :test 'equal))
+      (puthash "%7" '("2" . "@5") tmux-control--pane-window)
+      (with-temp-buffer
+        (setq-local tmux-control--controller controller
+                    tmux-control--active-pane "%7")
+        (should (equal (tmux-control-window-id) "@5"))
+        (should-not tmux-control--window-id)
+        ;; Not yet in the map: unknown, not the controller's own window.
+        (setq-local tmux-control--active-pane "%8")
+        (should-not (tmux-control-window-id))
+        ;; A window render buffer's own id wins.
+        (setq-local tmux-control--window-id "@3")
+        (should (equal (tmux-control-window-id) "@3"))))))
+
+(ert-deftest tmux-control-test-public-window-id-without-window-buffers ()
+  ;; Without `tmux-control-window-buffers' the session buffer never sets its
+  ;; own window field; its pane map knows the active pane's window.
+  (with-temp-buffer
+    (setq-local tmux-control--active-pane "%7"
+                tmux-control--pane-window (make-hash-table :test 'equal))
+    (should-not (tmux-control-window-id))
+    (puthash "%7" '("2" . "@5") tmux-control--pane-window)
+    (should (equal (tmux-control-window-id) "@5"))
+    (should-not tmux-control--window-id)))
+
+(ert-deftest tmux-control-test-private-api-names-remain ()
+  ;; Packages written against 0.6.0 call these directly.
+  (dolist (fn '(tmux-control--connect-or-switch tmux-control--send-command
+                tmux-control--query tmux-control--tiled-mode-p))
+    (should (fboundp fn)))
+  (dolist (var '(tmux-control--host tmux-control--socket-name
+                 tmux-control--active-pane tmux-control--window-id))
+    (should (local-variable-if-set-p var))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
