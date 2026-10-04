@@ -190,18 +190,24 @@ double dash are internal and may change in any release.
 | Function | Purpose |
 | --- | --- |
 | `tmux-control-connect-or-switch` *host socket session* | Show a session in the selected window, reusing a live connection or connecting |
-| `tmux-control-send-command` *command* | Send one tmux command line; the reply is discarded |
-| `tmux-control-query` *command callback* | Send one tmux command line; call *callback* with the reply's lines, or nil on an error |
+| `tmux-control-send-command` *command* | Send one tmux command; the reply is discarded |
+| `tmux-control-query` *command callback* | Send one tmux command; call *callback* with the reply's lines, or nil on an error |
 | `tmux-control-tiled-p` | Whether the current buffer is part of a tiled view |
 | `tmux-control-buffer-host` | The current buffer's SSH host, or nil when local |
 | `tmux-control-buffer-socket-name` | The current buffer's tmux socket name |
 | `tmux-control-buffer-session` | The current buffer's tmux session name |
 | `tmux-control-active-pane` | The tmux pane id (`%3`) the current buffer sends input to |
-| `tmux-control-window-id` | The tmux window id (`@2`) the current buffer renders |
+| `tmux-control-window-id` | The tmux window id (`@2`) the current buffer renders, or holding its tiled pane |
 
 Apart from `tmux-control-connect-or-switch`, these act on the current buffer,
 which may be a session's buffer or any of its window or tiled-pane buffers.
-The accessors return nil in other buffers.  The interactive commands, such as
+The accessors return nil in other buffers.
+
+Replies are matched to commands in order, so each *command* must be exactly
+one tmux command on one line.  Blank and comment-only lines are refused, as
+is an unquoted `;`, `{` or `}`; quote or escape those to pass them as
+arguments.  Avoid commands that run other commands, such as `if-shell`:
+tmux replies to each command it runs.  The interactive commands, such as
 `tmux-control-connect`, `tmux-control-select-pane` and `tmux-control-tile`,
 can also be called from Lisp.
 

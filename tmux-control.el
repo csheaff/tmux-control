@@ -8963,13 +8963,43 @@ ends the session.  Not bound by default."
 ;; buffer, which may be a session's buffer or any of its window or
 ;; tiled-pane buffers.
 
-(defun tmux-control--check-command-line (command)
-  "Signal an error unless COMMAND is a single control-mode command line.
-Control mode reads one command per line, so a newline would send a
-second command whose reply nothing expects, shifting every later reply
-onto the wrong handler."
-  (when (string-search "\n" command)
-    (error "A tmux command must be a single line")))
+(defun tmux-control--single-command-p (command)
+  "Return non-nil when COMMAND is exactly one tmux command.
+Replies are matched to commands in order, one reply per command sent.
+tmux reads a line at a time and answers every command on it, but sends
+no reply for a blank or comment-only line, and an empty line detaches
+the client.  This follows tmux's lexer: outside quotes, a backslash
+escapes the next character, a word starting with `#' begins a comment,
+and `;', `{' and `}' separate or group commands.  Those three are
+rejected rather than parsed, so quote or escape them to pass them to a
+command."
+  (let ((state nil) (word-start t) (words 0) (i 0) (n (length command)))
+    (and (not (string-search "\n" command))
+         (catch 'done
+           (while (< i n)
+             (let ((ch (aref command i)))
+               (pcase state
+                 ('single (when (eq ch ?') (setq state nil)))
+                 ('double (pcase ch (?\\ (cl-incf i)) (?\" (setq state nil))))
+                 (_ (cond
+                     ((memq ch '(?\s ?\t)) (setq word-start t))
+                     ((and word-start (eq ch ?#)) (throw 'done (> words 0)))
+                     ((memq ch '(?\; ?{ ?})) (throw 'done nil))
+                     (t (when word-start
+                          (setq word-start nil)
+                          (cl-incf words))
+                        (pcase ch
+                          (?\\ (cl-incf i))
+                          (?' (setq state 'single))
+                          (?\" (setq state 'double))))))))
+             (cl-incf i))
+           (> words 0)))))
+
+(defun tmux-control--check-single-command (command)
+  "Signal an error unless COMMAND is exactly one tmux command.
+See `tmux-control--single-command-p'."
+  (unless (tmux-control--single-command-p command)
+    (error "Not a single tmux command; quote or escape any ; { or }")))
 
 (defun tmux-control-connect-or-switch (host socket-name session)
   "Show tmux SESSION from HOST and SOCKET-NAME in the selected window.
@@ -8983,22 +9013,26 @@ of splitting the frame."
 
 (defun tmux-control-send-command (command)
   "Send tmux COMMAND over the current buffer's connection.
-COMMAND is one tmux command line, such as \"select-window -t @3\"; it
-is passed to tmux as is, so quote any argument that comes from
-elsewhere.  The reply is discarded; use `tmux-control-query' to read
-it.  Nothing is sent when the connection is not live."
-  (tmux-control--check-command-line command)
+COMMAND is exactly one tmux command, such as \"select-window -t @3\",
+on one line.  It is passed to tmux as is, so quote any argument that
+comes from elsewhere, including any `;', `{' or `}' in it.  A command
+that runs further commands, such as `if-shell', is not supported:
+tmux replies to each command it runs.  Signal an error when COMMAND is
+blank or holds more than one command.  The reply is discarded; use
+`tmux-control-query' to read it.  Nothing is sent when the connection
+is not live."
+  (tmux-control--check-single-command command)
   (tmux-control--send-command command))
 
 (defun tmux-control-query (command callback)
   "Send tmux COMMAND and call CALLBACK with its reply.
-COMMAND is one tmux command line, as for `tmux-control-send-command'.
+COMMAND is exactly one tmux command, as for `tmux-control-send-command'.
 CALLBACK receives the reply's lines as a list of strings, in order, or
 nil when the reply is empty or tmux reports an error.  It runs later,
 from the process filter, with the session's main buffer current, so
 capture any other buffer it needs lexically.  CALLBACK is not called
 when the connection is not live or ends before tmux replies."
-  (tmux-control--check-command-line command)
+  (tmux-control--check-single-command command)
   (tmux-control--query command callback))
 
 (defun tmux-control-tiled-p ()
@@ -9033,9 +9067,18 @@ reported it, or when the current buffer is not a tmux-control buffer."
 
 (defun tmux-control-window-id ()
   "Return the id of the tmux window the current buffer renders.
+In a tiled pane buffer, return the id of the window holding the pane.
 The id is tmux's window id, such as \"@2\".  Return nil before tmux has
 reported it, or when the current buffer is not a tmux-control buffer."
-  tmux-control--window-id)
+  (or tmux-control--window-id
+      ;; A tiled pane buffer leaves its own field unset, since that field
+      ;; selects the window seeder; the session's pane map knows its window.
+      (and tmux-control--active-pane
+           (buffer-live-p tmux-control--controller)
+           (let ((map (buffer-local-value 'tmux-control--pane-window
+                                          tmux-control--controller)))
+             (and (hash-table-p map)
+                  (cdr-safe (gethash tmux-control--active-pane map)))))))
 
 (provide 'tmux-control)
 

@@ -6285,14 +6285,50 @@ output), :calls (side-effect invocations in order), :active-pane,
       (tmux-control--handle-line "%error 2 4 0")
       (should (null got)))))
 
-(ert-deftest tmux-control-test-public-commands-reject-newlines ()
-  ;; A second line would be a second command whose reply nothing expects,
-  ;; shifting every later reply onto the wrong handler.
-  (let (sent)
+(ert-deftest tmux-control-test-single-command-p ()
+  ;; Replies are matched to commands one for one, so the public API sends
+  ;; only text tmux answers with exactly one reply block.
+  (dolist (command '("list-windows"
+                     "display-message -p '#{window_id}'"
+                     "select-window -t @3"
+                     "select-pane -t %4"
+                     "send-keys -t %1 ';'"            ; quoted separators
+                     "send-keys -t %1 \"a;b{c}\""
+                     "send-keys -t %1 'say \"hi\"; {x}'"
+                     "send-keys -t %1 \\;"           ; escaped separator
+                     "send-keys -t %1 \"\\\";\""      ; escaped quote, then a quoted ;
+                     "send-keys -t %1 a#b"            ; # inside a word is literal
+                     "list-panes # a trailing comment; {}"
+                     "  list-windows  "))
+    (should (tmux-control--single-command-p command)))
+  (dolist (command '(""                               ; tmux detaches the client
+                     "   "                            ; no reply at all
+                     "# only a comment"
+                     "list-panes\nkill-server"        ; two lines
+                     "list-panes\n"
+                     "display-message -p a ; display-message -p b"
+                     "display-message -p a; display-message -p b"
+                     "display-message -p a;display-message -p b"
+                     "if-shell true { display-message a }"
+                     "send-keys -t %1 'unterminated ; quote' ;"))
+    (should-not (tmux-control--single-command-p command))))
+
+(ert-deftest tmux-control-test-public-commands-reject-non-single-commands ()
+  ;; A rejected command sends and queues nothing, so the next query still
+  ;; gets its own reply.
+  (let (sent (got :not-called))
     (tmux-control-test--with-live-connection sent
-      (should-error (tmux-control-send-command "list-panes\nkill-server"))
-      (should-error (tmux-control-query "list-panes\n" #'ignore))
+      (dolist (command '("" "  " "# note" "list-panes\nkill-server"
+                         "display-message -p a ; display-message -p b"))
+        (should-error (tmux-control-send-command command))
+        (should-error (tmux-control-query command #'ignore)))
       (should-not sent)
+      (should-not tmux-control--command-queue)
+      (tmux-control-query "display-message -p b" (lambda (lines) (setq got lines)))
+      (tmux-control--handle-line "%begin 1 5 1")
+      (tmux-control--handle-line "b")
+      (tmux-control--handle-line "%end 1 5 1")
+      (should (equal got '("b")))
       (should-not tmux-control--command-queue))))
 
 (ert-deftest tmux-control-test-public-commands-without-connection ()
@@ -6361,6 +6397,26 @@ output), :calls (side-effect invocations in order), :active-pane,
     ;; An empty host, which `tmux-control-connect' also accepts, is local.
     (setq-local tmux-control--host "")
     (should-not (tmux-control-buffer-host))))
+
+(ert-deftest tmux-control-test-public-window-id-in-tiled-pane-buffer ()
+  ;; A tiled pane buffer leaves its own window field unset (it selects the
+  ;; pane seeder); the accessor reads the controller's pane map instead.
+  (with-temp-buffer
+    (let ((controller (current-buffer)))
+      (setq-local tmux-control--window-id "@1"
+                  tmux-control--pane-window (make-hash-table :test 'equal))
+      (puthash "%7" '("2" . "@5") tmux-control--pane-window)
+      (with-temp-buffer
+        (setq-local tmux-control--controller controller
+                    tmux-control--active-pane "%7")
+        (should (equal (tmux-control-window-id) "@5"))
+        (should-not tmux-control--window-id)
+        ;; Not yet in the map: unknown, not the controller's own window.
+        (setq-local tmux-control--active-pane "%8")
+        (should-not (tmux-control-window-id))
+        ;; A window render buffer's own id wins.
+        (setq-local tmux-control--window-id "@3")
+        (should (equal (tmux-control-window-id) "@3"))))))
 
 (ert-deftest tmux-control-test-private-api-names-remain ()
   ;; Packages written against 0.6.0 call these directly.
