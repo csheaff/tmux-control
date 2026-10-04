@@ -2210,6 +2210,13 @@ each wrapped in an evolving prompt line and a status bar.")
               (tmux-control--quiet-activity 5))))   ; must not error
       (kill-buffer ctrl) (kill-buffer render))))
 
+(ert-deftest tmux-control-test-version-constant-matches-the-header ()
+  ;; Diagnostic reports print the constant; package managers read the header.
+  (require 'lisp-mnt)
+  (with-temp-buffer
+    (insert-file-contents (locate-library "tmux-control.el"))
+    (should (equal tmux-control-version (lm-header "Version")))))
+
 (ert-deftest tmux-control-test-window-jump-keys-bound ()
   ;; The window-jump keys are bound in BOTH the override map (high precedence,
   ;; over Eat) and the major-mode map, and `l' really exits scrollback.

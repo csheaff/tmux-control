@@ -60,7 +60,7 @@
 (require 'ucs-normalize)
 (require 'eat)
 
-(defconst tmux-control-version "0.7.0"
+(defconst tmux-control-version "0.7.1"
   "Version of tmux-control, included in diagnostic reports.")
 
 ;; Optional: `consult' drives the per-candidate preview for the `inline'
