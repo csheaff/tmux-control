@@ -2210,6 +2210,65 @@ each wrapped in an evolving prompt line and a status bar.")
               (tmux-control--quiet-activity 5))))   ; must not error
       (kill-buffer ctrl) (kill-buffer render))))
 
+(ert-deftest tmux-control-test-unload-function-undoes-load-time-advice-and-hooks ()
+  ;; Every top-level `advice-add' and `add-hook' in tmux-control.el, and the
+  ;; global hooks its buffers add, must be undone by
+  ;; `tmux-control-unload-function', so `unload-feature' is safe.
+  (let (sites evil-calls)
+    (with-temp-buffer
+      (insert-file-contents (locate-library "tmux-control.el"))
+      (goto-char (point-min))
+      (condition-case nil
+          (while t
+            (let ((form (read (current-buffer))))
+              (pcase form
+                (`(advice-add ,symbol ,how ,function . ,_)
+                 (push (list 'advice (eval symbol t) (eval how t) (eval function t)) sites))
+                (`(add-hook ,hook ,function . ,_)
+                 (push (list 'hook (eval hook t) (eval function t)) sites)))))
+        (end-of-file nil)))
+    (should (= (length sites) 5))
+    ;; The first tmux-control buffer adds the resize hooks.
+    (with-temp-buffer
+      (tmux-control-scrollback-mode))
+    (dolist (function '(tmux-control--scrollback-follow-resize
+                        tmux-control--on-frame-size-change))
+      (push (list 'hook 'window-size-change-functions function) sites))
+    (unwind-protect
+        (progn
+          (tmux-control-idle-gc-mode 1)
+          (should (memq #'tmux-control--idle-gc-note-command (default-value 'post-command-hook)))
+          (should (tmux-control-test--all-installed-p sites))
+          (should-not (cl-letf (((symbol-function 'evil-set-initial-state)
+                                 (lambda (mode state) (push (list mode state) evil-calls))))
+                        (tmux-control-unload-function)))
+          (should (member '(tmux-control-mode nil) evil-calls))
+          ;; The idle-GC mode's hooks and timer go too.
+          (should-not tmux-control-idle-gc-mode)
+          (should-not (timerp tmux-control--idle-gc-timer))
+          (should-not (memq #'tmux-control--idle-gc-note-command (default-value 'post-command-hook)))
+          (should-not (memq #'tmux-control--idle-gc-note-collection (default-value 'post-gc-hook)))
+          (dolist (site sites)
+            (pcase site
+              (`(advice ,symbol ,_ ,function)
+               (should-not (advice-member-p function symbol)))
+              (`(hook ,hook ,function)
+               (should-not (memq function (default-value hook)))))))
+      (when tmux-control-idle-gc-mode (tmux-control-idle-gc-mode -1))
+      ;; Put everything back for the other tests, hooks in production order.
+      (dolist (site sites)
+        (pcase site
+          (`(advice ,symbol ,how ,function) (advice-add symbol how function))))
+      (tmux-control--add-resize-hooks))))
+
+(defun tmux-control-test--all-installed-p (sites)
+  "Whether every advice and hook in SITES is currently installed."
+  (seq-every-p (lambda (site)
+                 (pcase site
+                   (`(advice ,symbol ,_ ,function) (advice-member-p function symbol))
+                   (`(hook ,hook ,function) (memq function (default-value hook)))))
+               sites))
+
 (ert-deftest tmux-control-test-version-constant-matches-the-header ()
   ;; Diagnostic reports print the constant; package managers read the header.
   (require 'lisp-mnt)
