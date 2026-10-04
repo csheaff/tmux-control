@@ -9111,8 +9111,9 @@ is unknown, or when the current buffer is not a tmux-control buffer."
 
 (defun tmux-control-unload-function ()
   "Undo what loading tmux-control set up, for `unload-feature'.
-Remove its advice on Eat and on its own pager command and its global
-window hooks, and turn off `tmux-control-idle-gc-mode'.  Close
+Remove its advice on Eat and on its own pager command, its global
+window hooks and its Evil initial state, and turn off
+`tmux-control-idle-gc-mode'.  Close
 tmux-control buffers first: their connections and buffer-local hooks
 still call tmux-control's functions.  Return nil, so `unload-feature'
 also does its usual cleanup."
@@ -9128,6 +9129,9 @@ also does its usual cleanup."
   (remove-hook 'window-size-change-functions
                #'tmux-control--scrollback-follow-resize)
   (remove-hook 'window-size-change-functions #'tmux-control--on-frame-size-change)
+  ;; A tmux-control buffer registered its initial Evil state process-wide.
+  (when (fboundp 'evil-set-initial-state)
+    (evil-set-initial-state 'tmux-control-mode nil))
   nil)
 
 (provide 'tmux-control)

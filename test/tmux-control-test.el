@@ -2214,7 +2214,7 @@ each wrapped in an evolving prompt line and a status bar.")
   ;; Every top-level `advice-add' and `add-hook' in tmux-control.el, and the
   ;; global hooks its buffers add, must be undone by
   ;; `tmux-control-unload-function', so `unload-feature' is safe.
-  (let (sites)
+  (let (sites evil-calls)
     (with-temp-buffer
       (insert-file-contents (locate-library "tmux-control.el"))
       (goto-char (point-min))
@@ -2222,7 +2222,7 @@ each wrapped in an evolving prompt line and a status bar.")
           (while t
             (let ((form (read (current-buffer))))
               (pcase form
-                (`(advice-add ,symbol ,how ,function)
+                (`(advice-add ,symbol ,how ,function . ,_)
                  (push (list 'advice (eval symbol t) (eval how t) (eval function t)) sites))
                 (`(add-hook ,hook ,function . ,_)
                  (push (list 'hook (eval hook t) (eval function t)) sites)))))
@@ -2237,7 +2237,10 @@ each wrapped in an evolving prompt line and a status bar.")
     (unwind-protect
         (progn
           (should (tmux-control-test--all-installed-p sites))
-          (should-not (tmux-control-unload-function))
+          (should-not (cl-letf (((symbol-function 'evil-set-initial-state)
+                                 (lambda (mode state) (push (list mode state) evil-calls))))
+                        (tmux-control-unload-function)))
+          (should (member '(tmux-control-mode nil) evil-calls))
           (dolist (site sites)
             (pcase site
               (`(advice ,symbol ,_ ,function)
