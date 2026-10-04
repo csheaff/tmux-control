@@ -1130,6 +1130,7 @@ Disable this mode to remove its timer and hooks.  See also
 In Evil's default normal state, keys typed into the pane are taken as
 Evil commands instead of reaching the terminal.  Insert state sends them
 to the pane, and ESC returns to normal state for moving around the buffer.
+nil clears the registration, so Evil's own rules apply again.
 Has no effect without Evil."
   :type '(choice (const insert) (const emacs) (const normal)
                  (const :tag "Evil's default" nil))
@@ -1143,7 +1144,8 @@ Has no effect without Evil."
     (setq-local eat-term-scrollback-size tmux-control-live-scrollback-size))
   (setq-local bookmark-make-record-function #'tmux-control--bookmark-record)
   ;; Registered here, before Evil sets up the buffer, so the pane gets keys.
-  (when (and tmux-control-evil-state (fboundp 'evil-set-initial-state))
+  ;; Evil keeps one process-wide registration per mode; nil removes it.
+  (when (fboundp 'evil-set-initial-state)
     (evil-set-initial-state 'tmux-control-mode tmux-control-evil-state))
   (tmux-control--disable-line-numbers)
   (tmux-control--disable-margins)

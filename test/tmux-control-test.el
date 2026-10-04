@@ -6216,10 +6216,25 @@ output), :calls (side-effect invocations in order), :active-pane,
                (lambda (mode state) (push (cons mode state) states))))
       (with-temp-buffer (tmux-control-mode))
       (should (eq (alist-get 'tmux-control-mode states) 'insert))
+      ;; nil must reach Evil: that call clears the earlier insert registration.
       (setq states nil)
       (let ((tmux-control-evil-state nil))
         (with-temp-buffer (tmux-control-mode)))
-      (should-not states))))
+      (should (equal states '((tmux-control-mode))))))
+  ;; Against Evil's real semantics: nil after insert leaves no registration.
+  (let ((evil-insert-state-modes nil) (evil-emacs-state-modes nil))
+    (cl-letf (((symbol-function 'evil-set-initial-state)
+               (lambda (mode state)
+                 (setq evil-insert-state-modes (delq mode evil-insert-state-modes)
+                       evil-emacs-state-modes (delq mode evil-emacs-state-modes))
+                 (pcase state
+                   ('insert (push mode evil-insert-state-modes))
+                   ('emacs (push mode evil-emacs-state-modes))))))
+      (with-temp-buffer (tmux-control-mode))
+      (should (memq 'tmux-control-mode evil-insert-state-modes))
+      (let ((tmux-control-evil-state nil))
+        (with-temp-buffer (tmux-control-mode)))
+      (should-not (memq 'tmux-control-mode evil-insert-state-modes)))))
 
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
