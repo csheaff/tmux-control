@@ -204,9 +204,10 @@ which may be a session's buffer or any of its window or tiled-pane buffers.
 The accessors return nil in other buffers.
 
 Replies are matched to commands in order, so each *command* must be exactly
-one tmux command on one line.  Blank and comment-only lines are refused, as
-is an unquoted `;`, `{` or `}`; quote or escape those to pass them as
-arguments.  Avoid commands that run other commands, such as `if-shell`:
+one tmux command on one line, starting with the bare command name.  Lines
+tmux would not answer exactly once are refused: blank or comment-only lines,
+variable assignments, NUL bytes, and an unquoted `;`, `{` or `}` (quote or
+escape those to pass them as arguments).  Avoid commands that run other commands, such as `if-shell`:
 tmux replies to each command it runs.  The interactive commands, such as
 `tmux-control-connect`, `tmux-control-select-pane` and `tmux-control-tile`,
 can also be called from Lisp.

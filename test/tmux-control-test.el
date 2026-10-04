@@ -6299,11 +6299,19 @@ output), :calls (side-effect invocations in order), :active-pane,
                      "send-keys -t %1 \"\\\";\""      ; escaped quote, then a quoted ;
                      "send-keys -t %1 a#b"            ; # inside a word is literal
                      "list-panes # a trailing comment; {}"
-                     "  list-windows  "))
+                     "  list-windows  "
+                     "lsw"))
     (should (tmux-control--single-command-p command)))
   (dolist (command '(""                               ; tmux detaches the client
-                     "   "                            ; no reply at all
+                     "\0list-windows"                 ; so does a leading NUL
+                     "  \0list-windows"               ; no reply at all
+                     "list-windows\0junk"
+                     "   "
                      "# only a comment"
+                     "FOO=bar"                        ; an assignment: no reply
+                     "'FOO=bar'"
+                     "%hidden FOO=bar"
+                     "\"list-windows\""               ; not a bare command name
                      "list-panes\nkill-server"        ; two lines
                      "list-panes\n"
                      "display-message -p a ; display-message -p b"
@@ -6319,6 +6327,7 @@ output), :calls (side-effect invocations in order), :active-pane,
   (let (sent (got :not-called))
     (tmux-control-test--with-live-connection sent
       (dolist (command '("" "  " "# note" "list-panes\nkill-server"
+                         "\0list-windows" "FOO=bar" "%hidden FOO=bar"
                          "display-message -p a ; display-message -p b"))
         (should-error (tmux-control-send-command command))
         (should-error (tmux-control-query command #'ignore)))
@@ -6417,6 +6426,17 @@ output), :calls (side-effect invocations in order), :active-pane,
         ;; A window render buffer's own id wins.
         (setq-local tmux-control--window-id "@3")
         (should (equal (tmux-control-window-id) "@3"))))))
+
+(ert-deftest tmux-control-test-public-window-id-without-window-buffers ()
+  ;; Without `tmux-control-window-buffers' the session buffer never sets its
+  ;; own window field; its pane map knows the active pane's window.
+  (with-temp-buffer
+    (setq-local tmux-control--active-pane "%7"
+                tmux-control--pane-window (make-hash-table :test 'equal))
+    (should-not (tmux-control-window-id))
+    (puthash "%7" '("2" . "@5") tmux-control--pane-window)
+    (should (equal (tmux-control-window-id) "@5"))
+    (should-not tmux-control--window-id)))
 
 (ert-deftest tmux-control-test-private-api-names-remain ()
   ;; Packages written against 0.6.0 call these directly.
