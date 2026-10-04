@@ -2210,6 +2210,54 @@ each wrapped in an evolving prompt line and a status bar.")
               (tmux-control--quiet-activity 5))))   ; must not error
       (kill-buffer ctrl) (kill-buffer render))))
 
+(ert-deftest tmux-control-test-unload-function-undoes-load-time-advice-and-hooks ()
+  ;; Every top-level `advice-add' and `add-hook' in tmux-control.el, and the
+  ;; global hooks its buffers add, must be undone by
+  ;; `tmux-control-unload-function', so `unload-feature' is safe.
+  (let (sites)
+    (with-temp-buffer
+      (insert-file-contents (locate-library "tmux-control.el"))
+      (goto-char (point-min))
+      (condition-case nil
+          (while t
+            (let ((form (read (current-buffer))))
+              (pcase form
+                (`(advice-add ,symbol ,how ,function)
+                 (push (list 'advice (eval symbol t) (eval how t) (eval function t)) sites))
+                (`(add-hook ,hook ,function . ,_)
+                 (push (list 'hook (eval hook t) (eval function t)) sites)))))
+        (end-of-file nil)))
+    (should (= (length sites) 5))
+    ;; The first tmux-control buffer adds the resize hooks.
+    (with-temp-buffer
+      (tmux-control-scrollback-mode))
+    (dolist (function '(tmux-control--scrollback-follow-resize
+                        tmux-control--on-frame-size-change))
+      (push (list 'hook 'window-size-change-functions function) sites))
+    (unwind-protect
+        (progn
+          (should (tmux-control-test--all-installed-p sites))
+          (should-not (tmux-control-unload-function))
+          (dolist (site sites)
+            (pcase site
+              (`(advice ,symbol ,_ ,function)
+               (should-not (advice-member-p function symbol)))
+              (`(hook ,hook ,function)
+               (should-not (memq function (default-value hook)))))))
+      ;; Put everything back for the other tests.
+      (dolist (site sites)
+        (pcase site
+          (`(advice ,symbol ,how ,function) (advice-add symbol how function))
+          (`(hook ,hook ,function) (add-hook hook function)))))))
+
+(defun tmux-control-test--all-installed-p (sites)
+  "Whether every advice and hook in SITES is currently installed."
+  (seq-every-p (lambda (site)
+                 (pcase site
+                   (`(advice ,symbol ,_ ,function) (advice-member-p function symbol))
+                   (`(hook ,hook ,function) (memq function (default-value hook)))))
+               sites))
+
 (ert-deftest tmux-control-test-version-constant-matches-the-header ()
   ;; Diagnostic reports print the constant; package managers read the header.
   (require 'lisp-mnt)

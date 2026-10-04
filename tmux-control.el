@@ -1140,6 +1140,14 @@ Has no effect without Evil."
 
 (declare-function evil-set-initial-state "evil-core" (mode state))
 
+(defun tmux-control--add-resize-hooks ()
+  "Follow window size changes for scrollback pagers and tiled views.
+The first tmux-control buffer adds these global hooks, rather than
+loading the package; both act only on tmux-control buffers.
+`tmux-control-unload-function' removes them."
+  (add-hook 'window-size-change-functions #'tmux-control--scrollback-follow-resize)
+  (add-hook 'window-size-change-functions #'tmux-control--on-frame-size-change))
+
 (define-derived-mode tmux-control-mode eat-mode "tmux-control"
   "Major mode for tmux-control buffers."
   (when tmux-control-live-scrollback-size
@@ -1149,6 +1157,7 @@ Has no effect without Evil."
   ;; Evil keeps one process-wide registration per mode; nil removes it.
   (when (fboundp 'evil-set-initial-state)
     (evil-set-initial-state 'tmux-control-mode tmux-control-evil-state))
+  (tmux-control--add-resize-hooks)
   (tmux-control--disable-line-numbers)
   (tmux-control--disable-margins)
   ;; Terminal rows are fixed grid lines and must never be re-wrapped, but the
@@ -1218,6 +1227,7 @@ and above the bottom the handler re-dispatches wheel-down there too.")
                     (delq tmux-control--scrollback-emulation-map-alist
                           emulation-mode-map-alists)))
   (setq tmux-control--scrollback-keys-active t)
+  (tmux-control--add-resize-hooks)
   (tmux-control--disable-line-numbers)
   (tmux-control--disable-margins))
 
@@ -4016,8 +4026,6 @@ static snapshot."
               (tmux-control--resize (car size) (cdr size))))
           (tmux-control-scrollback-refresh))))))
 
-(add-hook 'window-size-change-functions
-          #'tmux-control--scrollback-follow-resize)
 
 (defun tmux-control-scrollback-toggle-compaction ()
   "Toggle redraw-compaction in this scrollback view and re-render.
@@ -8848,7 +8856,6 @@ panes against a now-smaller Emacs window."
                   (buffer-local-value 'tmux-control--panes buf))
          (tmux-control--reassert-tiling-size buf frame))))
 
-(add-hook 'window-size-change-functions #'tmux-control--on-frame-size-change)
 
 (defun tmux-control-untile ()
   "Return from the tiled multi-pane view to the single-pane live view."
@@ -9099,6 +9106,29 @@ is unknown, or when the current buffer is not a tmux-control buffer."
                                             controller)))
                (and (hash-table-p map)
                     (cdr-safe (gethash tmux-control--active-pane map))))))))
+
+;;; Unloading
+
+(defun tmux-control-unload-function ()
+  "Undo what loading tmux-control set up, for `unload-feature'.
+Remove its advice on Eat and on its own pager command and its global
+window hooks, and turn off `tmux-control-idle-gc-mode'.  Close
+tmux-control buffers first: their connections and buffer-local hooks
+still call tmux-control's functions.  Return nil, so `unload-feature'
+also does its usual cleanup."
+  (when (bound-and-true-p tmux-control-idle-gc-mode)
+    (tmux-control-idle-gc-mode -1))
+  (advice-remove #'tmux-control-scrollback-mode
+                 #'tmux-control--guard-scrollback-mode-command)
+  (advice-remove #'eat-semi-char-mode #'tmux-control--eat-semi-char-mode-advice)
+  (advice-remove #'eat-char-mode #'tmux-control--eat-char-mode-advice)
+  (advice-remove 'eat--t-write #'tmux-control--eat-write-composed)
+  (advice-remove #'eat--synchronize-scroll
+                 #'tmux-control--eat-synchronize-scroll-advice)
+  (remove-hook 'window-size-change-functions
+               #'tmux-control--scrollback-follow-resize)
+  (remove-hook 'window-size-change-functions #'tmux-control--on-frame-size-change)
+  nil)
 
 (provide 'tmux-control)
 
