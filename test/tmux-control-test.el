@@ -2236,17 +2236,25 @@ each wrapped in an evolving prompt line and a status bar.")
       (push (list 'hook 'window-size-change-functions function) sites))
     (unwind-protect
         (progn
+          (tmux-control-idle-gc-mode 1)
+          (should (memq #'tmux-control--idle-gc-note-command (default-value 'post-command-hook)))
           (should (tmux-control-test--all-installed-p sites))
           (should-not (cl-letf (((symbol-function 'evil-set-initial-state)
                                  (lambda (mode state) (push (list mode state) evil-calls))))
                         (tmux-control-unload-function)))
           (should (member '(tmux-control-mode nil) evil-calls))
+          ;; The idle-GC mode's hooks and timer go too.
+          (should-not tmux-control-idle-gc-mode)
+          (should-not (timerp tmux-control--idle-gc-timer))
+          (should-not (memq #'tmux-control--idle-gc-note-command (default-value 'post-command-hook)))
+          (should-not (memq #'tmux-control--idle-gc-note-collection (default-value 'post-gc-hook)))
           (dolist (site sites)
             (pcase site
               (`(advice ,symbol ,_ ,function)
                (should-not (advice-member-p function symbol)))
               (`(hook ,hook ,function)
                (should-not (memq function (default-value hook)))))))
+      (when tmux-control-idle-gc-mode (tmux-control-idle-gc-mode -1))
       ;; Put everything back for the other tests, hooks in production order.
       (dolist (site sites)
         (pcase site
