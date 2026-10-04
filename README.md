@@ -35,6 +35,16 @@ restart, or reconnect from another machine and the pane is still there.
 
 ## Install
 
+With Emacs 30's built-in `use-package` (Emacs 29: `M-x package-vc-install`
+with the repository URL):
+
+```elisp
+(use-package tmux-control
+  :vc (:url "https://github.com/csheaff/tmux-control" :rev :newest))
+```
+
+With straight.el:
+
 ```elisp
 (use-package tmux-control
   :straight (tmux-control :type git :host github :repo "csheaff/tmux-control")
@@ -141,6 +151,10 @@ rendered screen to tmux's own and reseeds a drifted pane on its own.  It's off b
 one `capture-pane` round trip per burst of output (taken only when a pane is
 displayed, idle, and on the normal screen) — fine on a fast link, your call on
 a slow one; see the variable's docstring for the exact gating.
+
+**With Evil**, tmux-control buffers start in insert state so typing reaches the
+pane; ESC returns to normal state.  Set `tmux-control-evil-state` to `emacs` to
+send ESC to the pane instead, or to nil for Evil's default.
 
 **If ESC switches your modal package's mode instead of reaching the pane**
 (xah-fly-keys, evil, viper), that's by design: tmux-control lets the modal
