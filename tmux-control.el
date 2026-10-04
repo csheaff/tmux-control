@@ -473,11 +473,11 @@ friends.  Set to nil to hide it."
   :type 'boolean)
 
 (defcustom tmux-control-allow-clipboard-write nil
-  "Non-nil lets a tmux pane drive the Emacs kill-ring / clipboard (OSC 52).
+  "Non-nil lets a tmux pane drive the Emacs `kill-ring' / clipboard (OSC 52).
 A program running in any pane can emit an OSC 52 escape to set (or read) the
 selection.  With tmux-control pointed at remote, possibly shared or
 agent-driven servers, that means untrusted pane output could silently
-overwrite what you next paste (clipboard poisoning) -- or read your kill-ring
+overwrite what you next paste (clipboard poisoning) -- or read your `kill-ring'
 back out.  Off by default: pane-driven clipboard manipulation is ignored.
 Set non-nil to allow it (the underlying Eat behavior), e.g. for a trusted
 local session where copying pane output to the system clipboard is wanted."
@@ -681,7 +681,7 @@ by the command watchdog to spot a connection that has stopped replying.")
   "Command number from the current reply's %begin line, as a string.
 A %end or %error line closes the block only when its number matches;
 a captured pane whose CONTENT contains a line starting with \"%end \"
-(someone viewing a control-mode transcript, say) must not terminate
+\\(someone viewing a control-mode transcript, say) must not terminate
 the block early.")
 (defvar-local tmux-control--command-watchdog-timer nil
   "Pending watchdog timer for the command queue, or nil.")
@@ -693,7 +693,7 @@ one warning rather than one per check interval.")
   "Non-nil in a controller buffer whose own tmux window has closed.
 The buffer keeps owning the process and the session state, but it no
 longer renders any window: its window id and active pane are nil, and
-this flag keeps the window-list refresh from re-claiming the session's
+this flag keeps the window list refresh from re-claiming the session's
 current window for it (that window has -- or will get -- its own render
 buffer; two buffers claiming one window routes output to the hidden one
 and freezes the visible one).  Cleared by a (re)connect.")
@@ -950,8 +950,8 @@ override map in semi-char mode, the raw-input map in char mode.")
 (defvar-local tmux-control--char-mode-keys nil
   "Non-nil while this tmux-control buffer is in Eat char mode.
 Gates `tmux-control--char-mode-map' on, while `tmux-control--keys-active'
-gates the full override map off; toggled by the eat-char-mode /
-eat-semi-char-mode advices.")
+gates the full override map off; toggled by the `eat-char-mode' /
+`eat-semi-char-mode' advices.")
 
 (defvar-local tmux-control--windows nil
   "Cached window list for the tab bar.
@@ -1081,10 +1081,12 @@ Disable this mode to remove its timer and hooks.  See also
        (> tmux-control-idle-gc-cons-threshold 0)))
 
 (defun tmux-control--idle-gc-note-command ()
+  "Note when the last command ran, for idle collection."
   (setq tmux-control--idle-gc-last-command (float-time)))
 
 (defun tmux-control--idle-gc-note-collection ()
-  ;; Reset on any collection, including one requested by another package.
+  "Reset the allocation count after any collection.
+That includes a collection another package requested."
   (setq tmux-control--idle-gc-cons-at-gc (car (memory-use-counts))))
 
 (defun tmux-control--idle-gc-check ()
@@ -1224,7 +1226,8 @@ and above the bottom the handler re-dispatches wheel-down there too.")
 `tmux-control-scrollback-mode' is an internal major-mode initializer.  Calling
 it in a live buffer runs `kill-all-local-variables', discarding the connection
 state.  The public `tmux-control-scrollback' command creates a separate buffer
-before initializing the mode there."
+before initializing the mode there.
+ORIG-FUN is the mode command, called with ARGS."
   (if (derived-mode-p 'tmux-control-mode)
       (user-error "Use M-x tmux-control-scrollback to open the pager")
     (apply orig-fun args)))
@@ -1437,7 +1440,9 @@ even when `tmux-control-connect' would otherwise pop a new window."
   "Choose a session in the minibuffer, previewing connected ones in place.
 Each already-connected session is shown in the live window as you move through
 the candidates; an unconnected one is not previewed.  Cancelling restores the
-session you came from.  Uses `consult'."
+session you came from.  Uses `consult'.
+HOST and SOCKET name the server, SESSIONS are the candidates, and
+CURRENT is the session in view."
   (let* ((window (selected-window))
          (orig-buffer (window-buffer window))
          (choices (mapcar (lambda (s)
@@ -1810,7 +1815,7 @@ The normal `bookmark-set' command (C-x r m) also works in live views."
       "unknown (source unavailable)")))
 
 (defun tmux-control--diagnostics-append (buffer token label lines)
-  "Append labeled reply LINES to BUFFER if TOKEN still owns the report."
+  "Append reply LINES under LABEL to BUFFER if TOKEN still owns the report."
   (when (and (buffer-live-p buffer)
              (eq token (buffer-local-value 'tmux-control--diagnostics-token buffer)))
     (with-current-buffer buffer
@@ -2218,7 +2223,7 @@ tmux runs with `alternate-screen off'."
 (defun tmux-control--maybe-warn-alternate-screen-off ()
   "Warn once if the active window does not honor `alternate-screen'.
 Throttled per connection via `tmux-control--alt-screen-warned-connections'
-(keyed by connection name, so it survives a reconnect); gated on
+\\(keyed by connection name, so it survives a reconnect); gated on
 `tmux-control-warn-on-alternate-screen-off'.  Call after
 `tmux-control--alt-screen-honored' is refreshed."
   (let ((key (tmux-control--connection-name
@@ -3104,8 +3109,7 @@ unchanged header does not repeatedly scan retained history."
                       'keymap tmux-control--scroll-position-map))))))
 
 (defun tmux-control--header-line ()
-  "Compose the live buffer's header line as \"here\" on the left, \"elsewhere\"
-in the right corner.
+  "Compose the live buffer's header line: \"here\" left, \"elsewhere\" right.
 LEFT: the current connection (host:session) and its window tabs, bound by a
 dim connector -- everything about the session you are looking at.  RIGHT
 CORNER (right-aligned): other connected sessions that have unseen output,
@@ -4144,7 +4148,7 @@ Eat's state alone is unreliable.  Read locally, with no tmux query."
 `tmux-control--alt-screen-honored' is resolved (via the two-stage
 `show-options' query) only in the controller buffer.  Render buffers --
 the per-window buffers and tiled pane buffers that are the default
-display path -- keep the conservative `t' they were created with and are
+display path -- keep the conservative t they were created with and are
 never updated, so reading their own local would defeat the
 phantom-alternate-screen correction (wheel-up would forward to the pane
 instead of opening scrollback under `alternate-screen off').  When this
@@ -4156,7 +4160,7 @@ it is used in practice (a server/global `.tmux.conf' setting).  It assumes
 that uniformity: a sibling render buffer showing a different window that
 *overrode* `alternate-screen' would read the active window's value instead
 of its own.  That is a deliberate trade -- still strictly better than the
-conservative `t' these buffers used to freeze (wrong under a global
+conservative t these buffers used to freeze (wrong under a global
 `alternate-screen off'), and it avoids an extra two-stage `show-options'
 round trip per render buffer for a per-window override that essentially
 never occurs.  The strictly-correct alternative, if it ever matters, is to
@@ -4224,7 +4228,7 @@ With `tmux-control-wheel-scrolls-live-history', wheel-up scrolls the live
 buffer's own retained history (the output Eat has kept since you connected)
 in place, stopping at the top -- it never flings back to the live tail.  It
 opens the pager only when that whole retained history already fits on screen
-(a fresh or quiet pane, where you are still at the live screen, so the pager
+\\(a fresh or quiet pane, where you are still at the live screen, so the pager
 opens at the same tail); the deeper pre-session history is otherwise an
 explicit `tmux-control-scrollback' (\\[tmux-control-scrollback]) away.  With
 the option off, wheel-up opens the pager immediately.
@@ -4395,7 +4399,8 @@ cleared, so it cannot be consulted here."
   "Make `eat-semi-char-mode' return tmux-control scrollback buffers live.
 In a live tmux-control buffer, also restore the full override keymap
 that char mode swapped out (see `tmux-control--char-mode-keys'), and
-keep the buffer read-only (see `tmux-control--protect-terminal-text')."
+keep the buffer read-only (see `tmux-control--protect-terminal-text').
+ORIG-FN is `eat-semi-char-mode', called with ARGS."
   (if (derived-mode-p 'tmux-control-scrollback-mode)
       (progn
         (tmux-control-live)
@@ -4423,7 +4428,8 @@ char mode is most reached for (the interrupt).  Swap the override map
 for the raw-input `tmux-control--char-mode-map' while char mode is on;
 `eat-semi-char-mode' restores it.  In a scrollback pager, char mode
 means \"get me back to the live terminal, raw\": return live first,
-then enter char mode there."
+then enter char mode there.
+ORIG-FN is `eat-char-mode', called with ARGS."
   (if (derived-mode-p 'tmux-control-scrollback-mode)
       (progn
         (tmux-control-live)
@@ -4551,7 +4557,7 @@ so the tmux-control keys get out of the way; the mode line shows
   "Return the Eat `manipulate-selection-function' for a pane terminal.
 Ignores pane-driven OSC 52 clipboard manipulation unless the user opts in
 via `tmux-control-allow-clipboard-write' -- so untrusted pane output cannot
-silently poison or read the Emacs kill-ring by default."
+silently poison or read the Emacs `kill-ring' by default."
   (if (and tmux-control-allow-clipboard-write
            (fboundp 'eat--manipulate-kill-ring))
       #'eat--manipulate-kill-ring
@@ -4603,7 +4609,8 @@ link surfaces as a process exit instead of hanging, and validates HOST via
   "Return plain text from tmux pane on HOST using SOCKET-NAME and TARGET.
 With PRESERVE-TRAILING non-nil add `capture-pane -N' so trailing background
 cells (full-width fills such as a TUI tool panel or status bar) are kept;
-the caller must only set it when the server supports -N (tmux 3.1+)."
+the caller must only set it when the server supports -N (tmux 3.1+).
+LINES is how many lines of history to include above the screen."
   (let ((args (append (when socket-name
                         (list "-L" socket-name))
                       (list "capture-pane" "-p" "-e")
@@ -4675,7 +4682,7 @@ Bound dynamically during compaction when no
 
 (defconst tmux-control--auto-frame-scan-lines 4000
   "Auto frame-top detection scans only the last this-many captured lines.
-A repainting TUI's frames are recent and recur every frame-height, so a bounded
+A repainting TUI's frames are recent and recur every screenful, so a bounded
 tail is enough to find the marker -- and it caps the cost of deciding \"no
 repeating frame\" on a long (up to `tmux-control-scrollback-lines') history.")
 
@@ -4853,7 +4860,9 @@ background fills survive in the preview."
 
 (defun tmux-control--render-window-preview (host socket-name session index
                                                  &optional preserve-trailing)
-  "Return colored preview text for SESSION:INDEX, or an error placeholder."
+  "Return colored preview text for SESSION:INDEX, or an error placeholder.
+HOST and SOCKET-NAME name the server; PRESERVE-TRAILING is as for
+`tmux-control--capture-pane'."
   (condition-case err
       (tmux-control--colorize-scrollback
        (tmux-control--capture-window-screen host socket-name session index
@@ -5056,10 +5065,10 @@ whole (up to several-thousand-line) scrollback each time."
     (nreverse chunks)))
 
 (defun tmux-control--regexp-matches-p (regexp string)
-  "Like `string-match-p' but nil, not an error, on an invalid REGEXP.
+  "Like `string-match-p' on STRING, but nil, not an error, on an invalid REGEXP.
 `tmux-control-scrollback-frame-start-regexp' and the elements of
 `tmux-control-scrollback-chrome-regexps' are user `defcustom's tested
-here from inside the capture's process-filter callback; a malformed
+here from inside the capture's process filter; a malformed
 pattern (or a non-string element) must degrade to \"no match\" rather
 than throw out of the filter and abort every scrollback open.
 The `stringp' guard short-circuits a non-string element without paying the
@@ -5088,8 +5097,8 @@ marker."
   "A line must recur at least this many times to anchor auto-detected frames.")
 
 (defconst tmux-control--auto-frame-min-gap 4
-  "Auto-detected frame-top occurrences must be at least this many lines apart,
-so a run of identical filler lines is not taken for frame boundaries.")
+  "Fewest lines between auto-detected frame tops.
+A run of identical filler lines is then not taken for frame boundaries.")
 
 (defun tmux-control--auto-frame-evenly-spread-p (indices)
   "Return non-nil when sorted INDICES are each at least the min frame gap apart."
@@ -5100,9 +5109,9 @@ so a run of identical filler lines is not taken for frame boundaries.")
       (setq prev i))))
 
 (defun tmux-control--frames-share-redraw-body-p (lines marker)
-  "Return non-nil when splitting LINES at MARKER yields adjacent frames that
-share a distinctive redraw run -- evidence of a genuine repainting TUI rather
-than a coincidentally repeated line.  Mirrors what the merge step actually
+  "Return non-nil when splitting LINES at MARKER shows a repainting TUI.
+That is, the adjacent frames share a distinctive redraw run, rather than a
+coincidentally repeated line.  Mirrors what the merge step actually
 collapses: a shared run anywhere in the later frame, not only one starting at
 its top.  That matters when the capture begins mid-frame, leaving the marker
 just above a volatile line (a token counter, a clock) -- the shared body then
@@ -6442,7 +6451,7 @@ exactly as much output as arrived in the meantime.  Returning to a
 window after an agent filled its buffer then landed the view thousands
 of lines above the live screen, on ancient scrollback.  tmux's own rule
 is the right one: arriving at a window always shows the live screen
-(history stays one wheel-up away).  Re-anchoring point onto the cursor
+\\(history stays one wheel-up away).  Re-anchoring point onto the cursor
 also re-arms Eat's scroll-follow, which identifies a following window by
 its point sitting on the cursor.
 
@@ -6451,7 +6460,7 @@ a live buffer reaches a window -- the window-switch swap, returning from
 the scrollback pager, `switch-to-buffer', a window-configuration
 restore -- self-heals, with no per-call-site bookkeeping.  Tiled pane
 buffers are skipped: the tiling layer anchors its own windows
-(`tmux-control--anchor-windows-to-screen-top')."
+\\(`tmux-control--anchor-windows-to-screen-top')."
   (let ((buffer (window-buffer window)))
     (when (and (buffer-live-p buffer)
                ;; The buffer-local hook also fires for windows whose buffer
@@ -6503,13 +6512,14 @@ Eat 0.9.4 skips zero-width characters.  Normalize its printable runs (after
 escape parsing) to composed characters, including an accent arriving in a
 later output chunk.  Replacement uses one existing cell, so Eat's cursor and
 column bookkeeping remain intact.  Ordinary Eat buffers are unaffected.
-Sequences without a single-cell canonical composition still depend on Eat."
+Sequences without a single-cell canonical composition still depend on Eat.
+ORIGINAL is `eat--t-write', which writes STRING from BEGIN to END."
   (if (or (not (derived-mode-p 'tmux-control-mode))
           (let ((match (tmux-control--next-combining-accent string (or begin 0))))
             (or (null match) (>= match (or end (length string))))))
       (funcall original string begin end)
     (let* ((text (ucs-normalize-NFC-string (substring string (or begin 0) end)))
-           (previous (and (> (point) (line-beginning-position)) (char-before))))
+           (previous (and (not (bolp)) (char-before))))
       ;; An accent may be the first character in this parser run because a
       ;; process chunk or SGR sequence separated it from its base character.
       (while (and previous (> (length text) 0)
@@ -6539,7 +6549,7 @@ Sequences without a single-cell canonical composition still depend on Eat."
   "Process decoded terminal OUTPUT into Eat without redisplaying.
 
 Marks the display dirty so a later `tmux-control--flush-display' repaints
-once.  Batching the repaint -- one flush per process-filter chunk rather
+once.  Batching the repaint -- one flush per process filter chunk rather
 than one per %output notification -- keeps high-volume output (a flood
 such as `yes' or `seq 1 100000') from paying the full redisplay and
 cursor-visibility cost on every message while draining.
@@ -6633,7 +6643,8 @@ behavior is preserved."
 Eat's line-counted `recenter' can advance past the screen top in a GUI
 with tall fallback glyphs, even when the cursor and entire screen fit.
 Use the actual screen marker for live-following alternate-screen windows.
-Normal-screen scrollback and ordinary Emacs navigation keep their view."
+Normal-screen scrollback and ordinary Emacs navigation keep their view.
+ORIG-FN is Eat's scroll synchronization."
   (prog1 (funcall orig-fn windows)
     (when (and (derived-mode-p 'tmux-control-mode)
                tmux-control--terminal
@@ -7039,7 +7050,7 @@ cons of positive integers, or nil when no well-formed positive size is found."
 OUTPUT is the raw (reverse-order) reply line list.  Return a (X . Y) cons
 of tmux's 0-indexed cursor column and row, or nil when no well-formed pair
 is found.  The reply may include a third cursor visibility field
-(\"X,Y,FLAG\"), which is ignored here.  Pure: no side effects, for unit
+\\(\"X,Y,FLAG\"), which is ignored here.  Pure: no side effects, for unit
 testing the seed cursor query."
   (let ((val (car (cl-remove-if #'string-empty-p
                                 (mapcar #'string-trim output)))))
@@ -7509,7 +7520,8 @@ Must run in the controller buffer."
   "Kill dependent render buffers, even if their registry or name has changed.
 Ownership metadata finds orphaned pane/window buffers after a controller
 rename.  The legacy name prefix also handles buffers from an older live
-installation; it must never match a different controller's owned buffer."
+installation; it must never match a different controller's owned buffer.
+CONTROLLER is the session's control buffer."
   (let* ((name (buffer-name controller))
          (prefix (and (string-prefix-p "*tmux-control:" name)
                       (string-suffix-p "*" name)
@@ -7946,12 +7958,13 @@ controller or pane render buffer where those locals are bound."
          "#{cursor_x}" "#{cursor_y}" "#{cursor_flag}" "#{pane_current_command}"
          tmux-control--pane-modes-format "#{pane_title}")
    tmux-control--field-separator)
-  "`list-panes -F' format folding the layout and every pane's geometry,
-cursor, command, terminal modes, and title into one query, so a (re)tile
-costs a single round trip rather than a `display-message' for the layout
-plus one per pane for the cursor.  `pane_title' stays LAST: an app-set
-title can contain a literal TAB, and the parser rejoins trailing
-fragments (see `tmux-control--parse-window-state').")
+  "`list-panes -F' format that describes a whole window in one query.
+It folds the layout and every pane's geometry, cursor, command, terminal
+modes, and title together, so a (re)tile costs a single round trip rather
+than a `display-message' for the layout plus one per pane for the cursor.
+`pane_title' stays LAST: an app-set title can contain a literal TAB, and
+the parser rejoins trailing fragments (see
+`tmux-control--parse-window-state').")
 
 (defun tmux-control--window-state-command ()
   "Return the in-band `list-panes' command for the active window's state.
@@ -8019,9 +8032,9 @@ unit-testable without a live tmux."
   "Plist of a tiled render buffer's tmux pane metadata, for its mode line.")
 
 (defvar-local tmux-control--pane-fed-live nil
-  "Non-nil in a tiled render buffer that was created the moment its pane
-appeared (a split), so its `%output' has streamed in from the pane's very
-first byte.  Set by `tmux-control--eager-register-new-panes' and honored by
+  "Non-nil in a tiled render buffer created the moment its pane appeared.
+That happens on a split, so its `%output' has streamed in from the pane's
+very first byte.  Set by `tmux-control--eager-register-new-panes' and honored by
 `tmux-control--build-tiling' to skip seeding such a pane from `capture-pane'
 on its INITIAL placement: the live stream already holds its whole content, so
 a capture seed would paint a second copy of the screenful a freshly-split
@@ -8156,7 +8169,8 @@ debounced `tmux-control--build-tiling' that follows does NOT also seed it from
 seed would paint a second copy of the screenful a freshly-split pane often
 dumps at once.  A window SWITCH sends `%session-window-changed', not
 `%layout-change', so its pre-existing panes are not registered here and are
-still seeded normally."
+still seeded normally.
+CONTROLLER is the session's control buffer."
   (when (buffer-live-p controller)
     (with-current-buffer controller
       (when tmux-control--tiled
@@ -8478,7 +8492,8 @@ the windows could not be built."
        nil))))
 
 (defun tmux-control--selected-pane-id (panes)
-  "Return the pane id whose render buffer is in the selected window, or nil."
+  "Return the pane id whose render buffer is in the selected window, or nil.
+PANES maps pane ids to their render buffers."
   (car (rassq (window-buffer (selected-window)) panes)))
 
 (defun tmux-control--tiling-controller ()
