@@ -34,11 +34,8 @@
 (require 'tmux-control)
 
 (defun tmux-control-live--rtrim (lines)
-  "Right-trim LINES and drop trailing blank lines."
-  (let ((ls (mapcar #'string-trim-right lines)))
-    (while (and ls (string-empty-p (car (last ls))))
-      (setq ls (butlast ls)))
-    ls))
+  "Normalize canonical accents, trim LINES, and drop trailing blanks."
+  (tmux-control--rtrim-screen-lines lines))
 
 (defun tmux-control-live--visible-text (beg end)
   "Return buffer text BEG..END with Eat's invisible padding cells removed.

@@ -468,10 +468,14 @@ you want the real thing, switch to **char mode**:
   `[semi-char]` in the mode line): **every** key goes to the pane — `C-c`
   interrupts instantly, `C-u` kills the shell line, `C-r` searches history,
   exactly like a standalone terminal.
-- `C-M-m` (that's `M-RET`) comes back to semi-char mode.  The mode line
-  shows `[char]` / `[semi-char]`, and the `C-c` command keys (window
-  switching, scrollback, …) apply only in semi-char mode.  The mouse wheel
+- `C-M-m` (or GUI `M-return`, Option-Return on macOS) comes back to semi-char
+  mode. The mode line shows `[char]` / `[semi-char]`, and the `C-c` command keys
+  (window switching, scrollback, …) apply only in semi-char mode. The mouse wheel
   still opens scrollback in both.
+
+Entering char mode with xah-fly-keys enabled also enters its insert state,
+clearing its command-state transient map. Raw keys then reach the pane;
+after returning to semi-char mode, ESC can enter modal command state again.
 
 **Paste rides tmux's own paste buffer.**  Every paste gesture — `C-y`,
 `M-y`, `Cmd-V`, the Edit menu, middle-click — loads the text into a tmux
