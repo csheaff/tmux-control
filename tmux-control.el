@@ -933,6 +933,7 @@ shadowing the pane's own C-c.")
     (set-keymap-parent map eat-char-mode-map)
     ;; GUI events have symbolic names, unlike Eat's ASCII ESC / M-RET.
     (define-key map [escape] #'tmux-control-send-escape)
+    (define-key map [S-return] #'tmux-control-send-shift-return)
     (define-key map [M-return] #'eat-semi-char-mode)
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
     (define-key map [wheel-down] #'tmux-control-wheel-down)
@@ -1019,6 +1020,7 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     ;; that beats minor-mode maps and would swallow the modal binding.
     ;; Char mode deliberately binds it in its raw-input emulation map.
     (define-key map [escape] #'tmux-control-send-escape)
+    (define-key map [S-return] #'tmux-control-send-shift-return)
     ;; Route every "paste" gesture through tmux's own paste buffer.  Eat's
     ;; map covers C-y, M-y, S-insert and mouse yank, but a GUI/macOS
     ;; paste -- `s-v' (Cmd-V), the `[paste]' event, the Edit > Paste
@@ -6754,6 +6756,17 @@ this many bytes, each its own command.  The pane receives the bytes in
 order, so a split -- even in the middle of a multibyte character -- is
 invisible to the application.")
 
+(defun tmux-control--input-target ()
+  "The pane that typed input goes to, or nil if none is known yet."
+  ;; The session-target fallback exists for connect time, before the
+  ;; active pane is known.  A HOMELESS controller (own window closed)
+  ;; must NOT fall back: it would silently drive the session's current
+  ;; pane -- which the user is watching through a DIFFERENT buffer --
+  ;; from a frozen view (Copilot review).
+  (or tmux-control--active-pane
+      (and (not tmux-control--homeless)
+           (tmux-control--fallback-control-target))))
+
 (defun tmux-control--send-input (_terminal string)
   "Send STRING as input to the active tmux pane.
 Sends are dropped while `tmux-control--suppress-responses' is bound, so
@@ -6781,14 +6794,7 @@ terminal, so make them the recovery path instead of a silent no-op."
              (> (length string) 0)
              (not tmux-control--suppress-responses))
     (tmux-control--ensure-input-ready)
-    ;; The session-target fallback exists for connect time, before the
-    ;; active pane is known.  A HOMELESS controller (own window closed)
-    ;; must NOT fall back: it would silently drive the session's current
-    ;; pane -- which the user is watching through a DIFFERENT buffer --
-    ;; from a frozen view (Copilot review).
-    (let ((target (or tmux-control--active-pane
-                      (and (not tmux-control--homeless)
-                           (tmux-control--fallback-control-target)))))
+    (let ((target (tmux-control--input-target)))
       (if target
           (let* ((bytes (encode-coding-string string 'utf-8-unix))
                  (n (length bytes))
@@ -6840,6 +6846,29 @@ free key, or use char mode.  Char mode binds ESC in its raw-input
 emulation map so it reaches the pane even with modal editing enabled."
   (interactive)
   (eat-self-input 1 ?\e))
+
+(defun tmux-control--send-key (key)
+  "Send KEY, a tmux key name such as \"S-Enter\", to the input pane.
+Unlike the bytes typed keys become, a key name lets tmux encode the key
+the way the pane's program asked the terminal to."
+  (if (not (process-live-p tmux-control--process))
+      ;; The byte path offers to reconnect, then drops the key.
+      (tmux-control--send-input nil "\r")
+    (unless tmux-control--suppress-responses
+      (tmux-control--ensure-input-ready)
+      (if-let* ((target (tmux-control--input-target)))
+          (tmux-control--send-command (format "send-keys -t %s %s" target key) :input)
+        (tmux-control--message "No active tmux pane yet")))))
+
+(defun tmux-control-send-shift-return ()
+  "Send Shift+Return to the pane as tmux's own S-Enter key.
+A program that asked the terminal for extended keys tells it apart from
+Return: Claude Code starts a new line in its prompt.  Any other program
+gets a plain Return, as from a terminal without them.  Encoded here like
+other keys, Shift+Return could only be Return, which submitted a
+half-written prompt."
+  (interactive)
+  (tmux-control--send-key "S-Enter"))
 
 (defconst tmux-control--paste-buffer-chunk-bytes 1024
   "Maximum UTF-8 bytes per `set-buffer' control command when pasting.

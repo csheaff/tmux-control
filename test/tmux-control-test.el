@@ -4346,6 +4346,25 @@ output), :calls (side-effect invocations in order), :active-pane,
       (tmux-control-send-escape)
       (should (equal sent '(?\e))))))
 
+(ert-deftest tmux-control-test-shift-return-sends-a-named-key ()
+  ;; As bytes, Shift+Return could only be Return, which submitted a
+  ;; half-written prompt in Claude Code.  tmux encodes its own S-Enter
+  ;; key the way the pane's program asked: a new line in Claude's prompt,
+  ;; Return in a shell.
+  (should (eq (lookup-key tmux-control-mode-map [S-return])
+              #'tmux-control-send-shift-return))
+  (should (eq (lookup-key tmux-control--char-mode-map [S-return])
+              #'tmux-control-send-shift-return))
+  (let ((sent '()))
+    (with-temp-buffer
+      (setq-local tmux-control--active-pane "%7")
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'tmux-control--ensure-input-ready) #'ignore)
+                ((symbol-function 'tmux-control--send-command)
+                 (lambda (command &rest _) (push command sent))))
+        (tmux-control-send-shift-return)))
+    (should (equal sent '("send-keys -t %7 S-Enter")))))
+
 (defvar tmux-control-test--fake-modal nil
   "Stands in for a modal minor mode in the ESC precedence test.")
 
