@@ -911,11 +911,11 @@ kills, which are deliberate.")
     ;; one (the popular tmux `.conf' rebinding).
     (define-key map (kbd "C-c |") #'tmux-control-split-pane-right)
     (define-key map (kbd "C-c -") #'tmux-control-split-pane-below)
-    ;; Terminal Emacs reads Option+Return as M-RET, which Eat's semi-char map
-    ;; would send as bytes; it outranks the major mode map, hence here.  The
-    ;; GUI event, `M-return', is in `tmux-control-mode-map'.
-    (define-key map (kbd "M-RET") #'tmux-control-send-meta-return)
-    ;; NB: ESC is deliberately NOT bound here.  It belongs in the major
+    ;; NB: ESC is deliberately NOT bound here, not even as the prefix of a
+    ;; Meta key such as M-RET: in terminal Emacs, and for C-[ in the GUI, a
+    ;; lone ESC would then wait for another key instead of reaching a modal
+    ;; package's ESC binding.  So terminal Emacs sends Option+Return as Eat's
+    ;; bytes; only the GUI event, `M-return', is a named key.  It belongs in the major
     ;; mode map (low precedence) so a modal package's own ESC binding
     ;; wins -- see `tmux-control-mode-map'.
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
