@@ -6002,6 +6002,7 @@ output), :calls (side-effect invocations in order), :active-pane,
   (declare (indent 0) (debug t))
   `(let ((tmux-control-idle-gc-mode nil)
          (tmux-control--idle-gc-timer nil)
+         (tmux-control--idle-gc-recheck-timer nil)
          (tmux-control--idle-gc-last-command 0)
          (tmux-control--idle-gc-cons-at-gc 0)
          (tmux-control--idle-gc-collections 0)
@@ -6018,12 +6019,14 @@ output), :calls (side-effect invocations in order), :active-pane,
     (let ((threshold gc-cons-threshold) (percentage gc-cons-percentage))
       (tmux-control-idle-gc-mode 1)
       (let ((timer tmux-control--idle-gc-timer))
-        (should (memq timer timer-list))
+        ;; An idle timer: nothing runs while you work.
+        (should (memq timer timer-idle-list))
+        (should-not (memq timer timer-list))
         (tmux-control-idle-gc-mode 1)
         (should (eq timer tmux-control--idle-gc-timer))
         (should (= 1 (cl-count #'tmux-control--idle-gc-note-command post-command-hook)))
         (tmux-control-idle-gc-mode -1)
-        (should-not (memq timer timer-list)))
+        (should-not (memq timer timer-idle-list)))
       (should-not tmux-control--idle-gc-timer)
       (should (equal post-command-hook '(ignore)))
       (should (equal post-gc-hook '(ignore)))
@@ -6043,11 +6046,38 @@ output), :calls (side-effect invocations in order), :active-pane,
 
 (ert-deftest tmux-control-test-idle-gc-startup-error-cleans-hooks ()
   (tmux-control-test--with-idle-gc
-    (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) (error "timer failed"))))
+    (cl-letf (((symbol-function 'run-with-idle-timer) (lambda (&rest _) (error "timer failed"))))
       (should-error (tmux-control-idle-gc-mode 1)))
     (should-not tmux-control-idle-gc-mode)
     (should (equal post-command-hook '(ignore)))
     (should (equal post-gc-hook '(ignore)))))
+
+(ert-deftest tmux-control-test-idle-gc-rechecks-only-while-idle-in-a-view ()
+  ;; Output allocates while you are away, so an idle period in a view is
+  ;; checked again each second; elsewhere, or once you type, nothing runs.
+  (tmux-control-test--with-idle-gc
+    (save-window-excursion
+      (with-temp-buffer
+        (set-window-buffer (selected-window) (current-buffer))
+        (let ((tmux-control-idle-gc-mode t) (idle '(0 2 0 0)) (checks 0) (scheduled '()))
+          (cl-letf (((symbol-function 'current-idle-time) (lambda () idle))
+                    ((symbol-function 'tmux-control--idle-gc-check) (lambda () (cl-incf checks)))
+                    ((symbol-function 'run-with-idle-timer)
+                     (lambda (time repeat function &rest _)
+                       (push (list (float-time time) repeat function) scheduled)
+                       (timer-create))))
+            (tmux-control--idle-gc-idle)
+            (should (= checks 1))
+            (should-not scheduled)
+            (setq major-mode 'tmux-control-mode)
+            (tmux-control--idle-gc-idle)
+            (should (equal scheduled '((3.0 nil tmux-control--idle-gc-idle))))
+            (should (timerp tmux-control--idle-gc-recheck-timer))
+            (setq idle nil scheduled nil)
+            (tmux-control--idle-gc-idle)
+            (should-not scheduled))))
+      (tmux-control-idle-gc-mode -1)
+      (should-not tmux-control--idle-gc-recheck-timer))))
 
 (ert-deftest tmux-control-test-idle-gc-gates-on-selected-view-and-input ()
   (tmux-control-test--with-idle-gc

@@ -1045,7 +1045,12 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     map)
   "Keymap for `tmux-control-mode'.")
 
-(defvar tmux-control--idle-gc-timer nil)
+(defvar tmux-control--idle-gc-timer nil
+  "Idle timer that starts the checks of each idle period.")
+(defvar tmux-control--idle-gc-recheck-timer nil
+  "One-shot idle timer for the next check in the same idle period.")
+(defconst tmux-control--idle-gc-recheck-seconds 1.0
+  "Seconds between checks while Emacs stays idle in a view.")
 (defvar tmux-control--idle-gc-last-command 0)
 (defvar tmux-control--idle-gc-cons-at-gc 0)
 (defvar tmux-control--idle-gc-collections 0)
@@ -1076,8 +1081,11 @@ Disable this mode to remove its timer and hooks.  See also
             (tmux-control--idle-gc-note-collection)
             (add-hook 'post-command-hook #'tmux-control--idle-gc-note-command)
             (add-hook 'post-gc-hook #'tmux-control--idle-gc-note-collection)
+            ;; Idle timers cost nothing while you work.  A repeating
+            ;; timer here ran, and redisplayed, many times a second all day.
             (setq tmux-control--idle-gc-timer
-                  (run-at-time .05 .05 #'tmux-control--idle-gc-check))))
+                  (run-with-idle-timer tmux-control-idle-gc-delay t
+                                       #'tmux-control--idle-gc-idle))))
       (error
        (setq tmux-control-idle-gc-mode nil)
        (tmux-control--idle-gc-stop)
@@ -1098,6 +1106,22 @@ Disable this mode to remove its timer and hooks.  See also
 That includes a collection another package requested."
   (setq tmux-control--idle-gc-cons-at-gc (car (memory-use-counts))))
 
+(defun tmux-control--idle-gc-idle ()
+  "Check now, and again shortly while Emacs stays idle in a view.
+Output from a pane allocates while you are away, so one check per idle
+period could come before there is anything to collect."
+  (tmux-control--idle-gc-check)
+  (when (and tmux-control-idle-gc-mode
+             (current-idle-time)
+             (with-current-buffer (window-buffer (selected-window))
+               (derived-mode-p 'tmux-control-mode 'tmux-control-scrollback-mode)))
+    (when (timerp tmux-control--idle-gc-recheck-timer)
+      (cancel-timer tmux-control--idle-gc-recheck-timer))
+    (setq tmux-control--idle-gc-recheck-timer
+          (run-with-idle-timer
+           (time-add (current-idle-time) tmux-control--idle-gc-recheck-seconds)
+           nil #'tmux-control--idle-gc-idle))))
+
 (defun tmux-control--idle-gc-check ()
   "Request collection when the selected tmux-control view is quiet."
   (when (and tmux-control-idle-gc-mode
@@ -1117,9 +1141,11 @@ That includes a collection another package requested."
 
 (defun tmux-control--idle-gc-stop ()
   "Remove only this mode's timer and hooks, retaining its last counters."
-  (when (timerp tmux-control--idle-gc-timer)
-    (cancel-timer tmux-control--idle-gc-timer))
-  (setq tmux-control--idle-gc-timer nil)
+  (dolist (timer (list tmux-control--idle-gc-timer tmux-control--idle-gc-recheck-timer))
+    (when (timerp timer)
+      (cancel-timer timer)))
+  (setq tmux-control--idle-gc-timer nil
+        tmux-control--idle-gc-recheck-timer nil)
   (remove-hook 'post-command-hook #'tmux-control--idle-gc-note-command)
   (remove-hook 'post-gc-hook #'tmux-control--idle-gc-note-collection))
 
