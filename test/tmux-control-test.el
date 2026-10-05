@@ -4361,6 +4361,18 @@ output), :calls (side-effect invocations in order), :active-pane,
               #'tmux-control-send-shift-return))
   (should (eq (lookup-key tmux-control-mode-map [M-return])
               #'tmux-control-send-meta-return))
+  ;; Terminal Emacs reads it as M-RET, which Eat's semi-char map also binds:
+  ;; resolve through a live buffer's whole keymap stack.
+  (with-temp-buffer
+    (tmux-control-mode)
+    (setq-local emulation-mode-map-alists
+                (cons tmux-control--emulation-mode-map-alist emulation-mode-map-alists))
+    (setq tmux-control--keys-active t)
+    ;; Eat's semi-char map, without a process to switch modes on.
+    (setq-local eat--semi-char-mode t)
+    (should (eq (lookup-key eat-semi-char-mode-map (kbd "M-RET")) #'eat-self-input))
+    (should (eq (key-binding (kbd "M-RET")) #'tmux-control-send-meta-return))
+    (should (eq (key-binding [M-return]) #'tmux-control-send-meta-return)))
   (dolist (case '(("3.6a" "send-keys -t %7 S-Enter")
                   ;; Before 3.5 tmux typed the unknown key name out.
                   ("3.4" "send-keys -t %7 -H 0d")
