@@ -2119,6 +2119,41 @@ each wrapped in an evolving prompt line and a status bar.")
     (should (string-match-p "●3" (substring-no-properties c)))
     (should (get-text-property (1- (length c)) 'keymap c))))
 
+(ert-deftest tmux-control-test-window-buffer-sizes-follow-their-windows ()
+  ;; A window render buffer has no process, so Emacs never reports its
+  ;; window's new size; tmux must still be resized to it.
+  (let ((ctrl (generate-new-buffer " *tmux-control-test-ctrl*"))
+        (render (generate-new-buffer " *tmux-control-test-render*"))
+        resizes tiled)
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (with-current-buffer render
+            (setq-local tmux-control--controller ctrl)
+            (setq-local tmux-control--window-id "@2"))
+          (set-window-buffer (selected-window) render)
+          (cl-letf (((symbol-function 'tmux-control--resize)
+                     (lambda (w h) (push (cons w h) resizes)))
+                    ((symbol-function 'tmux-control--quiet-activity) #'ignore)
+                    ((symbol-function 'tmux-control-tiled-p) (lambda () tiled)))
+            (let ((size (tmux-control--window-size (selected-window))))
+              (tmux-control--follow-window-buffer-sizes (selected-frame))
+              (should (equal resizes (list size)))
+              ;; Already at that size: nothing to send.
+              (setq resizes nil)
+              (with-current-buffer ctrl
+                (setq-local tmux-control--requested-client-size size))
+              (tmux-control--follow-window-buffer-sizes (selected-frame))
+              (should-not resizes)
+              ;; Tiled views size themselves.
+              (with-current-buffer ctrl
+                (setq-local tmux-control--requested-client-size nil))
+              (setq tiled t)
+              (tmux-control--follow-window-buffer-sizes (selected-frame))
+              (should-not resizes))))
+      (kill-buffer render)
+      (kill-buffer ctrl))))
+
 (ert-deftest tmux-control-test-buffer-names-are-short ()
   ;; "*tmux HOST:SESSION*", with the socket only when it isn't the default,
   ;; and window, pane and scrollback buffers named after their session buffer.
