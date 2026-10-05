@@ -514,6 +514,15 @@ for a remote connection, just SESSION for the local server.  Set to nil to
 hide it."
   :type 'boolean)
 
+(defcustom tmux-control-mode-line-window-name t
+  "Non-nil names the host and tmux window in the mode line.
+In place of the buffer name, such as \"*tmux-control:dev:main:work*:@2\",
+the mode line reads \"dev › build\", the window's tmux name, so it names
+what you are looking at in the space it has.  The buffer name shows on
+hover.  Set to nil to keep the buffer name."
+  :type 'boolean
+  :package-version '(tmux-control . "0.7.3"))
+
 (defface tmux-control-tab-session
   '((t))
   "Face for the current session NAME in the header line.
@@ -1378,6 +1387,7 @@ session (tmux attaches if it exists, otherwise creates it)."
         (setq-local header-line-format '(:eval (tmux-control--header-line)))
         ;; The connect seed repaints every pane; don't let that flag everything.
         (tmux-control--quiet-activity 1.5))
+      (tmux-control--use-mode-line-window-name)
       (when tmux-control-window-tab-bar
         (setq tmux-control--activity (make-hash-table :test 'equal)))
       ;; The window list and pane->window map feed the tab bar AND the
@@ -3048,6 +3058,29 @@ server is always named (see `tmux-control--connection-name')."
     (propertize s 'help-echo
                 (format "tmux session %s"
                         (tmux-control--connection-name host tmux-control--session)))))
+
+(defun tmux-control--mode-line-identification ()
+  "Return the mode line's \"HOST › WINDOW\" name for the current buffer.
+Before the window list arrives, or in a tiled pane, the session stands in
+for the window."
+  (let* ((controller (or tmux-control--controller (current-buffer)))
+         (id (tmux-control-window-id))
+         (window (and id (buffer-live-p controller)
+                      (seq-find (lambda (w) (equal (plist-get w :id) id))
+                                (buffer-local-value 'tmux-control--windows controller)))))
+    (propertize (format "%s › %s"
+                        (tmux-control--mode-line-safe (or (tmux-control-buffer-host) "local"))
+                        (tmux-control--mode-line-safe
+                         (or (plist-get window :name) tmux-control--session "")))
+                'face 'mode-line-buffer-id
+                'help-echo (buffer-name))))
+
+(defun tmux-control--use-mode-line-window-name ()
+  "Show the host and window in the current buffer's mode line, if enabled.
+See `tmux-control-mode-line-window-name'."
+  (when tmux-control-mode-line-window-name
+    (setq-local mode-line-buffer-identification
+                '((:eval (tmux-control--mode-line-identification))))))
 
 (defvar-local tmux-control--scroll-position-cache nil
   "Cached (KEY . COUNT) for the visible scroll position.
@@ -7649,6 +7682,7 @@ it asynchronously over the control connection."
                 tmux-control-session-label)
           (setq-local header-line-format
                       '(:eval (tmux-control--header-line))))
+        (tmux-control--use-mode-line-window-name)
         (add-hook 'kill-buffer-hook
                   #'tmux-control--window-buffer-killed nil t)
         (tmux-control--disable-line-numbers))

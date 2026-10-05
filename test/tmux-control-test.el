@@ -2119,6 +2119,43 @@ each wrapped in an evolving prompt line and a status bar.")
     (should (string-match-p "●3" (substring-no-properties c)))
     (should (get-text-property (1- (length c)) 'keymap c))))
 
+(ert-deftest tmux-control-test-mode-line-names-host-and-window ()
+  ;; The mode line names the host and the tmux window rather than the long
+  ;; buffer name, which shows on hover instead.
+  (let ((controller (generate-new-buffer " *tmux-control-test-controller*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer controller
+            (setq-local tmux-control--windows
+                        (list (list :index 0 :name "shell" :id "@1")
+                              (list :index 1 :name "build" :id "@2"))))
+          (with-temp-buffer
+            (rename-buffer "*tmux-control:dev:main:work*:@2" t)
+            (setq-local tmux-control--controller controller)
+            (setq-local tmux-control--window-id "@2")
+            (setq-local tmux-control--host "dev")
+            (setq-local tmux-control--session "work")
+            (let ((tmux-control-mode-line-window-name t))
+              (tmux-control--use-mode-line-window-name))
+            ;; Batch Emacs formats no mode lines, so check the construct and
+            ;; call what it evaluates.
+            (should (equal mode-line-buffer-identification
+                           '((:eval (tmux-control--mode-line-identification)))))
+            (let ((label (tmux-control--mode-line-identification)))
+              (should (equal (substring-no-properties label) "dev › build"))
+              (should (equal (get-text-property 0 'help-echo label) (buffer-name))))
+            ;; Before its window is known, the session stands in; no host is local.
+            (setq-local tmux-control--window-id "@9")
+            (setq-local tmux-control--host nil)
+            (should (equal (substring-no-properties (tmux-control--mode-line-identification))
+                           "local › work"))))
+      (kill-buffer controller)))
+  ;; Turned off, the buffer name stays.
+  (with-temp-buffer
+    (let ((tmux-control-mode-line-window-name nil))
+      (tmux-control--use-mode-line-window-name))
+    (should-not (local-variable-p 'mode-line-buffer-identification))))
+
 (ert-deftest tmux-control-test-session-label-names-host-and-session ()
   ;; The persistent header label names the current connection: HOST:SESSION
   ;; for a remote, local:SESSION for the local server (nil or empty host),
