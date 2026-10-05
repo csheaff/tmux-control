@@ -514,6 +514,15 @@ for a remote connection, just SESSION for the local server.  Set to nil to
 hide it."
   :type 'boolean)
 
+(defcustom tmux-control-mode-line-window-name t
+  "Non-nil names the host and tmux window in the mode line.
+In place of the buffer name, such as \"*tmux-control:dev:main:work*:@2\",
+the mode line reads \"dev › build\", the window's tmux name, so it names
+what you are looking at in the space it has.  The buffer name shows on
+hover.  Set to nil to keep the buffer name."
+  :type 'boolean
+  :package-version '(tmux-control . "0.7.3"))
+
 (defface tmux-control-tab-session
   '((t))
   "Face for the current session NAME in the header line.
@@ -1378,12 +1387,13 @@ session (tmux attaches if it exists, otherwise creates it)."
         (setq-local header-line-format '(:eval (tmux-control--header-line)))
         ;; The connect seed repaints every pane; don't let that flag everything.
         (tmux-control--quiet-activity 1.5))
+      (tmux-control--use-mode-line-window-name)
       (when tmux-control-window-tab-bar
         (setq tmux-control--activity (make-hash-table :test 'equal)))
-      ;; The window list and pane->window map feed the tab bar AND the
-      ;; per-window buffer routing; request them when either is on, so
-      ;; output routing works with the tab bar disabled too.
-      (when (or tmux-control-window-tab-bar tmux-control-window-buffers)
+      ;; The window list and pane->window map feed the tab bar, the
+      ;; per-window buffer routing and the mode line's window name; request
+      ;; them when any is on, so each works with the others disabled.
+      (when (tmux-control--track-windows-p)
         (tmux-control--refresh-windows)
         (tmux-control--refresh-pane-window-map))
       (when (and (integerp tmux-control-pause-after)
@@ -2643,9 +2653,15 @@ underscore-normalized replies."
       (tmux-control--window-state-fields-with-separator line "\t")
       (tmux-control--window-state-fields-with-separator line "_")))
 
+(defun tmux-control--track-windows-p ()
+  "Whether some feature needs the session's window list and pane map.
+Those are the tab bar, per-window buffers and the mode line's window name."
+  (or tmux-control-window-tab-bar tmux-control-window-buffers
+      tmux-control-mode-line-window-name))
+
 (defun tmux-control--refresh-windows ()
   "Asynchronously refresh the cached window list that feeds the tab bar."
-  (when (and (or tmux-control-window-tab-bar tmux-control-window-buffers)
+  (when (and (tmux-control--track-windows-p)
              (process-live-p tmux-control--process))
     (tmux-control--send-command
      (format "list-windows -t %s -F '%s'"
@@ -2659,8 +2675,7 @@ underscore-normalized replies."
 
 (defun tmux-control--refresh-pane-window-map ()
   "Asynchronously refresh the pane-id -> window map for output routing."
-  (when (and (or tmux-control-window-tab-bar tmux-control-window-buffers
-                 tmux-control--pane-buffers)
+  (when (and (or (tmux-control--track-windows-p) tmux-control--pane-buffers)
              (process-live-p tmux-control--process))
     (let ((candidates tmux-control--pane-buffers)
           (process tmux-control--process))
@@ -3048,6 +3063,29 @@ server is always named (see `tmux-control--connection-name')."
     (propertize s 'help-echo
                 (format "tmux session %s"
                         (tmux-control--connection-name host tmux-control--session)))))
+
+(defun tmux-control--mode-line-identification ()
+  "Return the mode line's \"HOST › WINDOW\" name for the current buffer.
+Before the window list arrives, or in a tiled pane, the session stands in
+for the window."
+  (let* ((controller (or tmux-control--controller (current-buffer)))
+         (id (tmux-control-window-id))
+         (window (and id (buffer-live-p controller)
+                      (seq-find (lambda (w) (equal (plist-get w :id) id))
+                                (buffer-local-value 'tmux-control--windows controller)))))
+    (propertize (format "%s › %s"
+                        (tmux-control--mode-line-safe (or (tmux-control-buffer-host) "local"))
+                        (tmux-control--mode-line-safe
+                         (or (plist-get window :name) tmux-control--session "")))
+                'face 'mode-line-buffer-id
+                'help-echo (buffer-name))))
+
+(defun tmux-control--use-mode-line-window-name ()
+  "Show the host and window in the current buffer's mode line, if enabled.
+See `tmux-control-mode-line-window-name'."
+  (when tmux-control-mode-line-window-name
+    (setq-local mode-line-buffer-identification
+                '((:eval (tmux-control--mode-line-identification))))))
 
 (defvar-local tmux-control--scroll-position-cache nil
   "Cached (KEY . COUNT) for the visible scroll position.
@@ -7649,6 +7687,7 @@ it asynchronously over the control connection."
                 tmux-control-session-label)
           (setq-local header-line-format
                       '(:eval (tmux-control--header-line))))
+        (tmux-control--use-mode-line-window-name)
         (add-hook 'kill-buffer-hook
                   #'tmux-control--window-buffer-killed nil t)
         (tmux-control--disable-line-numbers))
@@ -8913,9 +8952,10 @@ panes against a now-smaller Emacs window."
                  (tmux-control--resize-to-window)
                  (tmux-control--seed-screen)))
              ;; The tab bar's window/activity state -- and the pane->window
-             ;; map per-window output routing depends on -- were not tracked
-             ;; while tiled; refresh them for the returning single-pane view.
-             (when (or tmux-control-window-tab-bar tmux-control-window-buffers)
+             ;; map per-window output routing and the mode line depend on --
+             ;; were not tracked while tiled; refresh them for the returning
+             ;; single-pane view.
+             (when (tmux-control--track-windows-p)
                (tmux-control--quiet-activity)
                (tmux-control--refresh-windows)
                (tmux-control--refresh-pane-window-map)))))))))
