@@ -4373,18 +4373,9 @@ output), :calls (side-effect invocations in order), :active-pane,
               #'tmux-control-send-shift-return))
   (should (eq (lookup-key tmux-control-mode-map [M-return])
               #'tmux-control-send-meta-return))
-  ;; Terminal Emacs reads it as M-RET, which Eat's semi-char map also binds:
-  ;; resolve through a live buffer's whole keymap stack.
-  (with-temp-buffer
-    (tmux-control-mode)
-    (setq-local emulation-mode-map-alists
-                (cons tmux-control--emulation-mode-map-alist emulation-mode-map-alists))
-    (setq tmux-control--keys-active t)
-    ;; Eat's semi-char map, without a process to switch modes on.
-    (setq-local eat--semi-char-mode t)
-    (should (eq (lookup-key eat-semi-char-mode-map (kbd "M-RET")) #'eat-self-input))
-    (should (eq (key-binding (kbd "M-RET")) #'tmux-control-send-meta-return))
-    (should (eq (key-binding [M-return]) #'tmux-control-send-meta-return)))
+  ;; Only the GUI event: binding M-RET (ESC RET) in the override map made a
+  ;; lone ESC wait for another key; see the next test.
+  (should-not (lookup-key tmux-control--override-map (kbd "M-RET")))
   (dolist (case '(("3.6a" "send-keys -t %7 S-Enter")
                   ;; Before 3.5 tmux typed the unknown key name out.
                   ("3.4" "send-keys -t %7 -H 0d")
@@ -4446,6 +4437,24 @@ output), :calls (side-effect invocations in order), :active-pane,
         ;; No modal package: ESC falls through to the pane.
         (setq tmux-control-test--fake-modal nil)
         (should (eq (key-binding [escape]) #'tmux-control-send-escape))))))
+
+(ert-deftest tmux-control-test-a-lone-esc-reaches-a-modal-binding ()
+  ;; In terminal Emacs the Escape key is the ESC character, as C-[ is in
+  ;; the GUI.  If the override map binds any ESC-prefixed key, ESC becomes a
+  ;; prefix there and a modal package's ESC (xah-fly-keys, evil) never runs.
+  (let ((modal (make-sparse-keymap)))
+    (define-key modal (kbd "ESC") #'ignore)
+    (with-temp-buffer
+      (tmux-control-mode)
+      (setq-local emulation-mode-map-alists
+                  (cons tmux-control--emulation-mode-map-alist emulation-mode-map-alists))
+      (setq tmux-control--keys-active t)
+      (setq-local eat--semi-char-mode t)
+      (let ((minor-mode-map-alist
+             (cons (cons 'tmux-control-test--fake-modal modal) minor-mode-map-alist))
+            (tmux-control-test--fake-modal t))
+        (should-not (keymapp (lookup-key tmux-control--override-map (kbd "ESC"))))
+        (should (eq (key-binding (kbd "ESC")) #'ignore))))))
 
 (ert-deftest tmux-control-test-quote-tmux-data-octal-escapes ()
   ;; Newlines (and every non-alphanumeric byte) ride control commands as
