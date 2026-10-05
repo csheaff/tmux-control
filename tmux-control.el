@@ -1116,7 +1116,8 @@ That includes a collection another package requested."
   "Restart the idle timer with the current `tmux-control-idle-gc-delay'.
 An invalid delay keeps the running timer; the check rejects it anyway."
   (when (and (timerp tmux-control--idle-gc-timer)
-             (tmux-control--idle-gc-options-valid-p))
+             (numberp tmux-control-idle-gc-delay)
+             (> tmux-control-idle-gc-delay 0))
     (cancel-timer tmux-control--idle-gc-timer)
     ;; A pending recheck belongs to the old schedule.
     (when (timerp tmux-control--idle-gc-recheck-timer)

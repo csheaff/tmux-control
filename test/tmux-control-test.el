@@ -6052,7 +6052,11 @@ output), :calls (side-effect invocations in order), :active-pane,
       ;; An invalid delay leaves the running timer alone.
       (let ((current tmux-control--idle-gc-timer))
         (customize-set-variable 'tmux-control-idle-gc-delay 0)
-        (should (eq current tmux-control--idle-gc-timer))))))
+        (should (eq current tmux-control--idle-gc-timer)))
+      ;; The allocation threshold is a separate setting.
+      (setq tmux-control-idle-gc-cons-threshold 0)
+      (customize-set-variable 'tmux-control-idle-gc-delay 3)
+      (should (= 3 (float-time (timer--time tmux-control--idle-gc-timer)))))))
 
 (ert-deftest tmux-control-test-idle-gc-rejects-invalid-settings-cleanly ()
   (dolist (settings '((0 100) (-1 100) ("bad" 100) (1 0) (1 1.5)))
