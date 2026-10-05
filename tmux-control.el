@@ -1150,10 +1150,11 @@ Has no effect without Evil."
 (declare-function evil-set-initial-state "evil-core" (mode state))
 
 (defun tmux-control--add-resize-hooks ()
-  "Follow window size changes for scrollback pagers and tiled views.
-The first tmux-control buffer adds these global hooks, rather than
-loading the package; both act only on tmux-control buffers.
-`tmux-control-unload-function' removes them."
+  "Follow window size changes for scrollback pagers, tiled views and windows.
+The last covers windows showing window render buffers, whose size Emacs
+reports to no process.  The first tmux-control buffer adds these global
+hooks, rather than loading the package; each acts only on tmux-control
+buffers.  `tmux-control-unload-function' removes them."
   (add-hook 'window-size-change-functions #'tmux-control--scrollback-follow-resize)
   (add-hook 'window-size-change-functions #'tmux-control--on-frame-size-change)
   (add-hook 'window-size-change-functions #'tmux-control--follow-window-buffer-sizes))

@@ -2365,7 +2365,8 @@ each wrapped in an evolving prompt line and a status bar.")
     (with-temp-buffer
       (tmux-control-scrollback-mode))
     (dolist (function '(tmux-control--scrollback-follow-resize
-                        tmux-control--on-frame-size-change))
+                        tmux-control--on-frame-size-change
+                        tmux-control--follow-window-buffer-sizes))
       (push (list 'hook 'window-size-change-functions function) sites))
     (unwind-protect
         (progn
