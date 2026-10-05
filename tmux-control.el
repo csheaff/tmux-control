@@ -1214,9 +1214,6 @@ buffers.  `tmux-control-unload-function' removes them."
   (when tmux-control-live-scrollback-size
     (setq-local eat-term-scrollback-size tmux-control-live-scrollback-size))
   (setq-local bookmark-make-record-function #'tmux-control--bookmark-record)
-  ;; A terminal shows a no-break space as a space.  Emacs highlights it,
-  ;; which put underscores in Claude Code's prompt and status lines.
-  (setq-local nobreak-char-display nil)
   ;; Registered here, before Evil sets up the buffer, so the pane gets keys.
   ;; Evil keeps one process-wide registration per mode; nil removes it.
   (when (fboundp 'evil-set-initial-state)
@@ -1224,6 +1221,7 @@ buffers.  `tmux-control-unload-function' removes them."
   (tmux-control--add-resize-hooks)
   (tmux-control--disable-line-numbers)
   (tmux-control--disable-margins)
+  (tmux-control--show-no-break-spaces-as-spaces)
   ;; Terminal rows are fixed grid lines and must never be re-wrapped, but the
   ;; setting that ensures it (`tmux-control--no-line-wrap') cannot live here:
   ;; it must run AFTER the mode, once `after-change-major-mode-hook' has fired
@@ -1286,8 +1284,6 @@ and above the bottom the handler re-dispatches wheel-down there too.")
   "tmux scrollback"
   "Major mode for tmux-control scrollback buffers."
   (setq-local truncate-lines nil)
-  ;; As in the live view: a no-break space is a space.
-  (setq-local nobreak-char-display nil)
   (setq-local emulation-mode-map-alists
               (cons tmux-control--scrollback-emulation-map-alist
                     (delq tmux-control--scrollback-emulation-map-alist
@@ -1295,7 +1291,8 @@ and above the bottom the handler re-dispatches wheel-down there too.")
   (setq tmux-control--scrollback-keys-active t)
   (tmux-control--add-resize-hooks)
   (tmux-control--disable-line-numbers)
-  (tmux-control--disable-margins))
+  (tmux-control--disable-margins)
+  (tmux-control--show-no-break-spaces-as-spaces))
 
 (defun tmux-control--guard-scrollback-mode-command (orig-fun &rest args)
   "Prevent replacing a live tmux-control buffer with pager mode.
@@ -4473,6 +4470,12 @@ clip the leftmost terminal column (e.g. a prompt glyph)."
   (setq-local right-margin-width 0)
   (dolist (window (get-buffer-window-list (current-buffer) nil t))
     (set-window-margins window 0 0)))
+
+(defun tmux-control--show-no-break-spaces-as-spaces ()
+  "Show no-break spaces as plain spaces, as a terminal does.
+Emacs highlights them by default, which puts underscores in Claude Code's
+prompt and status lines."
+  (setq-local nobreak-char-display nil))
 
 (defun tmux-control--no-line-wrap ()
   "Make the current buffer truncate terminal rows instead of wrapping them.
