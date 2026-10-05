@@ -2144,7 +2144,8 @@ each wrapped in an evolving prompt line and a status bar.")
             (let ((label (tmux-control--mode-line-identification)))
               (should (equal (substring-no-properties label) "dev › build"))
               (should (equal (get-text-property 0 'help-echo label) (buffer-name))))
-            ;; Before its window is known, the session stands in; no host is local.
+            ;; Before its window is known, the session stands in, and a
+            ;; connection without a host is to the local server.
             (setq-local tmux-control--window-id "@9")
             (setq-local tmux-control--host nil)
             (should (equal (substring-no-properties (tmux-control--mode-line-identification))
@@ -2155,6 +2156,30 @@ each wrapped in an evolving prompt line and a status bar.")
     (let ((tmux-control-mode-line-window-name nil))
       (tmux-control--use-mode-line-window-name))
     (should-not (local-variable-p 'mode-line-buffer-identification))))
+
+(ert-deftest tmux-control-test-mode-line-window-name-tracks-windows-alone ()
+  ;; With the tab bar and per-window buffers both off, the window list and
+  ;; pane map are still requested for the mode line's window name.
+  (let ((tmux-control-window-tab-bar nil)
+        (tmux-control-window-buffers nil)
+        sent)
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'tmux-control--send-command)
+                 (lambda (command &rest _) (push command sent))))
+        (let ((tmux-control-mode-line-window-name t))
+          (should (tmux-control--track-windows-p))
+          (setq-local tmux-control--session "work")
+          (tmux-control--refresh-windows)
+          (tmux-control--refresh-pane-window-map))
+        (should (seq-some (lambda (c) (string-prefix-p "list-windows" c)) sent))
+        (should (seq-some (lambda (c) (string-prefix-p "list-panes" c)) sent))
+        (setq sent nil)
+        (let ((tmux-control-mode-line-window-name nil))
+          (should-not (tmux-control--track-windows-p))
+          (tmux-control--refresh-windows)
+          (tmux-control--refresh-pane-window-map))
+        (should-not sent)))))
 
 (ert-deftest tmux-control-test-session-label-names-host-and-session ()
   ;; The persistent header label names the current connection: HOST:SESSION

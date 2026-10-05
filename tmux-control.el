@@ -1390,10 +1390,10 @@ session (tmux attaches if it exists, otherwise creates it)."
       (tmux-control--use-mode-line-window-name)
       (when tmux-control-window-tab-bar
         (setq tmux-control--activity (make-hash-table :test 'equal)))
-      ;; The window list and pane->window map feed the tab bar AND the
-      ;; per-window buffer routing; request them when either is on, so
-      ;; output routing works with the tab bar disabled too.
-      (when (or tmux-control-window-tab-bar tmux-control-window-buffers)
+      ;; The window list and pane->window map feed the tab bar, the
+      ;; per-window buffer routing and the mode line's window name; request
+      ;; them when any is on, so each works with the others disabled.
+      (when (tmux-control--track-windows-p)
         (tmux-control--refresh-windows)
         (tmux-control--refresh-pane-window-map))
       (when (and (integerp tmux-control-pause-after)
@@ -2653,9 +2653,15 @@ underscore-normalized replies."
       (tmux-control--window-state-fields-with-separator line "\t")
       (tmux-control--window-state-fields-with-separator line "_")))
 
+(defun tmux-control--track-windows-p ()
+  "Whether some feature needs the session's window list and pane map.
+Those are the tab bar, per-window buffers and the mode line's window name."
+  (or tmux-control-window-tab-bar tmux-control-window-buffers
+      tmux-control-mode-line-window-name))
+
 (defun tmux-control--refresh-windows ()
   "Asynchronously refresh the cached window list that feeds the tab bar."
-  (when (and (or tmux-control-window-tab-bar tmux-control-window-buffers)
+  (when (and (tmux-control--track-windows-p)
              (process-live-p tmux-control--process))
     (tmux-control--send-command
      (format "list-windows -t %s -F '%s'"
@@ -2669,8 +2675,7 @@ underscore-normalized replies."
 
 (defun tmux-control--refresh-pane-window-map ()
   "Asynchronously refresh the pane-id -> window map for output routing."
-  (when (and (or tmux-control-window-tab-bar tmux-control-window-buffers
-                 tmux-control--pane-buffers)
+  (when (and (or (tmux-control--track-windows-p) tmux-control--pane-buffers)
              (process-live-p tmux-control--process))
     (let ((candidates tmux-control--pane-buffers)
           (process tmux-control--process))
@@ -8947,9 +8952,10 @@ panes against a now-smaller Emacs window."
                  (tmux-control--resize-to-window)
                  (tmux-control--seed-screen)))
              ;; The tab bar's window/activity state -- and the pane->window
-             ;; map per-window output routing depends on -- were not tracked
-             ;; while tiled; refresh them for the returning single-pane view.
-             (when (or tmux-control-window-tab-bar tmux-control-window-buffers)
+             ;; map per-window output routing and the mode line depend on --
+             ;; were not tracked while tiled; refresh them for the returning
+             ;; single-pane view.
+             (when (tmux-control--track-windows-p)
                (tmux-control--quiet-activity)
                (tmux-control--refresh-windows)
                (tmux-control--refresh-pane-window-map)))))))))
