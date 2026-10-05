@@ -4332,6 +4332,18 @@ output), :calls (side-effect invocations in order), :active-pane,
           (should (equal applied '((124 . 36))))
           (should (= 2 (length callbacks))))))))
 
+(ert-deftest tmux-control-test-no-break-spaces-look-like-spaces ()
+  ;; Claude Code draws no-break spaces in its prompt and status lines,
+  ;; which Emacs otherwise highlights as underscores.
+  (let ((nobreak-char-display t))
+    (dolist (mode '(tmux-control-mode tmux-control-scrollback-mode))
+      (with-temp-buffer
+        (funcall mode)
+        (should (local-variable-p 'nobreak-char-display))
+        (should-not nobreak-char-display)))
+    ;; Other buffers keep the default.
+    (should (eq nobreak-char-display t))))
+
 (ert-deftest tmux-control-test-escape-sends-escape-immediately ()
   ;; A bare ESC press should reach the pane the moment it is pressed.  In
   ;; GUI Emacs the unbound `escape' event decays into the meta prefix and
