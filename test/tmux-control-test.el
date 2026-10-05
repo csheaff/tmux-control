@@ -4359,6 +4359,8 @@ output), :calls (side-effect invocations in order), :active-pane,
               #'tmux-control-send-shift-return))
   (should (eq (lookup-key tmux-control--char-mode-map [S-return])
               #'tmux-control-send-shift-return))
+  (should (eq (lookup-key tmux-control-mode-map [M-return])
+              #'tmux-control-send-meta-return))
   (dolist (case '(("3.6a" "send-keys -t %7 S-Enter")
                   ;; Before 3.5 tmux typed the unknown key name out.
                   ("3.4" "send-keys -t %7 -H 0d")
@@ -4372,6 +4374,20 @@ output), :calls (side-effect invocations in order), :active-pane,
                   ((symbol-function 'tmux-control--send-command)
                    (lambda (command &rest _) (push command sent))))
           (tmux-control-send-shift-return)))
+      (should (equal sent (cdr case)))))
+  ;; Option+Return: once Claude Code has extended keys it ignores ESC
+  ;; Return, which used to start a new line.
+  (dolist (case '(("3.6a" "send-keys -t %7 M-Enter")
+                  ("3.4" "send-keys -t %7 -H 1b 0d")))
+    (let ((sent '()))
+      (with-temp-buffer
+        (setq-local tmux-control--active-pane "%7"
+                    tmux-control--server-version (car case))
+        (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                  ((symbol-function 'tmux-control--ensure-input-ready) #'ignore)
+                  ((symbol-function 'tmux-control--send-command)
+                   (lambda (command &rest _) (push command sent))))
+          (tmux-control-send-meta-return)))
       (should (equal sent (cdr case))))))
 
 (defvar tmux-control-test--fake-modal nil

@@ -1027,6 +1027,8 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     ;; Char mode deliberately binds it in its raw-input emulation map.
     (define-key map [escape] #'tmux-control-send-escape)
     (define-key map [S-return] #'tmux-control-send-shift-return)
+    ;; Bound as the GUI event, which would otherwise become M-RET for Eat.
+    (define-key map [M-return] #'tmux-control-send-meta-return)
     ;; Route every "paste" gesture through tmux's own paste buffer.  Eat's
     ;; map covers C-y, M-y, S-insert and mouse yank, but a GUI/macOS
     ;; paste -- `s-v' (Cmd-V), the `[paste]' event, the Edit > Paste
@@ -6908,22 +6910,35 @@ the way the pane's program asked the terminal to."
           (tmux-control--send-command (format "send-keys -t %s %s" target key) :input)
         (tmux-control--message "No active tmux pane yet")))))
 
-(defun tmux-control-send-shift-return ()
-  "Send Shift+Return to the pane as tmux's own S-Enter key.
-A program that asked the terminal for extended keys tells it apart from
-Return: Claude Code starts a new line in its prompt.  Any other program
-gets a plain Return, as from a terminal without them.  Encoded here like
-other keys, Shift+Return could only be Return, which submitted a
-half-written prompt.
-
-Servers older than tmux 3.5 do not know the key name and would type it
-out, so they still get Return."
-  (interactive)
+(defun tmux-control--send-modified-return (key bytes)
+  "Send KEY, tmux's name for a modified Return, or BYTES to older servers.
+A program that asked the terminal for extended keys tells a modified
+Return from Return: Claude Code starts a new line in its prompt.  Any
+other program gets what a terminal without them sends.  tmux knows which
+the pane asked for; the bytes sent for other keys could not say.
+Servers older than tmux 3.5 do not know names such as S-Enter and would
+type them out, so they get BYTES.  tmux grants extended keys only while
+its `extended-keys' option is on."
   (if (tmux-control--version-at-least-p
        (buffer-local-value 'tmux-control--server-version (tmux-control--wb-controller))
        3 5)
-      (tmux-control--send-key "S-Enter")
-    (tmux-control--send-input nil "\r")))
+      (tmux-control--send-key key)
+    (tmux-control--send-input nil bytes)))
+
+(defun tmux-control-send-shift-return ()
+  "Send Shift+Return to the pane as tmux's own S-Enter key.
+Programs that did not ask for extended keys get Return.
+See `tmux-control--send-modified-return'."
+  (interactive)
+  (tmux-control--send-modified-return "S-Enter" "\r"))
+
+(defun tmux-control-send-meta-return ()
+  "Send Meta+Return (Option+Return) to the pane as tmux's own M-Enter key.
+Programs that did not ask for extended keys get ESC Return, as before;
+Claude Code, once it has them, ignores ESC Return instead of starting a
+new line.  See `tmux-control--send-modified-return'."
+  (interactive)
+  (tmux-control--send-modified-return "M-Enter" "\e\r"))
 
 (defconst tmux-control--paste-buffer-chunk-bytes 1024
   "Maximum UTF-8 bytes per `set-buffer' control command when pasting.
