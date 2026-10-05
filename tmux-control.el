@@ -1150,12 +1150,14 @@ Has no effect without Evil."
 (declare-function evil-set-initial-state "evil-core" (mode state))
 
 (defun tmux-control--add-resize-hooks ()
-  "Follow window size changes for scrollback pagers and tiled views.
-The first tmux-control buffer adds these global hooks, rather than
-loading the package; both act only on tmux-control buffers.
-`tmux-control-unload-function' removes them."
+  "Follow window size changes for scrollback pagers, tiled views and windows.
+The last covers windows showing window render buffers, whose size Emacs
+reports to no process.  The first tmux-control buffer adds these global
+hooks, rather than loading the package; each acts only on tmux-control
+buffers.  `tmux-control-unload-function' removes them."
   (add-hook 'window-size-change-functions #'tmux-control--scrollback-follow-resize)
-  (add-hook 'window-size-change-functions #'tmux-control--on-frame-size-change))
+  (add-hook 'window-size-change-functions #'tmux-control--on-frame-size-change)
+  (add-hook 'window-size-change-functions #'tmux-control--follow-window-buffer-sizes))
 
 (define-derived-mode tmux-control-mode eat-mode "tmux-control"
   "Major mode for tmux-control buffers."
@@ -7039,6 +7041,45 @@ flag reset."
           (tmux-control--resize width height)
           (cons width height))))))
 
+(defun tmux-control--window-size (window)
+  "Return the (WIDTH . HEIGHT) of the terminal grid WINDOW can show."
+  (cons (max 1 (window-max-chars-per-line window))
+        (max 1 (with-selected-window window
+                 (floor (window-screen-lines))))))
+
+(defun tmux-control--follow-window-buffer-sizes (frame)
+  "Resize tmux to the windows on FRAME showing window render buffers.
+Emacs resizes a process for the windows showing its own buffer, the
+session's (see `tmux-control--adjust-window-size').  A window render buffer
+has no process, so without this, growing, shrinking or splitting its
+window left tmux at the old size until the next window switch.  When
+several windows show one session's render buffers, the selected window
+decides, as it does on a switch.  Installed on
+`window-size-change-functions'."
+  (let (sized)
+    (dolist (window (cons (frame-selected-window frame) (window-list frame 'never)))
+      (let ((buffer (window-buffer window)))
+        (cond
+         ;; The session's own buffer is sized through its process, but a
+         ;; selected one still decides over its window buffers elsewhere.
+         ((and (eq (buffer-local-value 'major-mode buffer) 'tmux-control-mode)
+               (null (buffer-local-value 'tmux-control--controller buffer))
+               (buffer-local-value 'tmux-control--process buffer))
+          (push buffer sized))
+         ((and (buffer-local-value 'tmux-control--window-id buffer)
+               (buffer-live-p (buffer-local-value 'tmux-control--controller buffer))
+               (not (memq (buffer-local-value 'tmux-control--controller buffer) sized)))
+          (with-current-buffer buffer
+            (unless (tmux-control-tiled-p)
+              (push tmux-control--controller sized)
+              (let ((size (tmux-control--window-size window)))
+                (unless (equal size (buffer-local-value 'tmux-control--requested-client-size
+                                                        tmux-control--controller))
+                  ;; tmux repaints every pane at the new size; that is not
+                  ;; activity.
+                  (tmux-control--quiet-activity)
+                  (tmux-control--resize (car size) (cdr size))))))))))))
+
 (defun tmux-control--resize-to-window ()
   "Resize tmux and Eat to the selected window."
   (tmux-control--quiet-activity)
@@ -9196,6 +9237,7 @@ also does its usual cleanup."
   (remove-hook 'window-size-change-functions
                #'tmux-control--scrollback-follow-resize)
   (remove-hook 'window-size-change-functions #'tmux-control--on-frame-size-change)
+  (remove-hook 'window-size-change-functions #'tmux-control--follow-window-buffer-sizes)
   ;; A tmux-control buffer registered its initial Evil state process-wide.
   (when (fboundp 'evil-set-initial-state)
     (evil-set-initial-state 'tmux-control-mode nil))
