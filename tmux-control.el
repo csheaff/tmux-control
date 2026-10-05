@@ -516,7 +516,7 @@ hide it."
 
 (defcustom tmux-control-mode-line-window-name t
   "Non-nil names the host and tmux window in the mode line.
-In place of the buffer name, such as \"*tmux-control:dev:main:work*:@2\",
+In place of the buffer name, such as \"*tmux dev:work @2*\",
 the mode line reads \"dev › build\", the window's tmux name, so it names
 what you are looking at in the space it has.  The buffer name shows on
 hover.  Set to nil to keep the buffer name."
@@ -1323,10 +1323,7 @@ session (tmux attaches if it exists, otherwise creates it)."
   (setq session (or session tmux-control-default-session))
   (let* ((buffer (or (tmux-control--connection-buffer host socket-name session)
                      (generate-new-buffer
-                      (format "*tmux-control:%s:%s:%s*"
-                              (if (or (null host) (string-empty-p host))
-                                  "local" host)
-                              socket-name session))))
+                      (tmux-control--buffer-name host socket-name session))))
          (name (buffer-name buffer))
          (command (tmux-control--command host socket-name session)))
     (with-current-buffer buffer
@@ -2848,6 +2845,23 @@ session names are per-server, so a bare \"0\" is ambiguous across hosts."
           (if (and host (not (string-empty-p host))) host "local")
           session))
 
+(defun tmux-control--buffer-name (host socket session)
+  "Return the name for HOST's SESSION's buffer on SOCKET.
+That is \"*tmux HOST:SESSION*\", with \"local\" for the local server,
+and the socket added when it is not `tmux-control-default-socket-name':
+\"*tmux dev:work (build)*\".  Connections are found by their host,
+socket and session, never by name."
+  (format "*tmux %s%s*" (tmux-control--connection-name host session)
+          (if (equal socket tmux-control-default-socket-name) ""
+            (format " (%s)" socket))))
+
+(defun tmux-control--derived-buffer-name (name suffix)
+  "Return the name of a buffer derived from buffer NAME, marked by SUFFIX.
+SUFFIX goes inside NAME's closing asterisk: \"*tmux dev:work @2*\"."
+  (if (string-suffix-p "*" name)
+      (concat (substring name 0 -1) " " suffix "*")
+    (concat name " " suffix)))
+
 (defun tmux-control--mode-line-safe (string)
   "Return STRING safe to place in a mode-line/header-line `:eval' result.
 Doubles `%' so an attacker- or program-supplied tmux name, title, or command
@@ -3886,7 +3900,7 @@ the live interactive pane."
          (target (or tmux-control--active-pane tmux-control--fallback-target))
          (trailing tmux-control--capture-trailing-p)
          (live-buffer (current-buffer))
-         (scrollback-buffer-name (format "*%s-scrollback*" (buffer-name)))
+         (scrollback-buffer-name (tmux-control--derived-buffer-name (buffer-name) "scrollback"))
          (scrollback-buffer (get-buffer-create scrollback-buffer-name)))
     ;; Size the pane to the window the pager is about to use BEFORE
     ;; capturing, so the capture is wrapped to the width it will be read
@@ -7608,7 +7622,7 @@ CTRL.  The buffer starts empty; `tmux-control--seed-window-buffer' fills
 it asynchronously over the control connection."
   (with-current-buffer ctrl
     (let* ((host tmux-control--host)
-           (name (format "%s:%s" (buffer-name ctrl) window-id))
+           (name (tmux-control--derived-buffer-name (buffer-name ctrl) window-id))
            (process tmux-control--process)
            (socket tmux-control--socket-name)
            (session tmux-control--session)
@@ -8119,7 +8133,7 @@ its own and routes commands through CONTROLLER."
   (let* ((w (max 1 (plist-get leaf :w)))
          (h (max 1 (plist-get leaf :h)))
          (host (plist-get meta :host))
-         (name (format "%s:%s" (buffer-name controller) pane-id))
+         (name (tmux-control--derived-buffer-name (buffer-name controller) pane-id))
          (process (plist-get meta :process))
          (buffer (generate-new-buffer name)))
     (with-current-buffer buffer

@@ -713,7 +713,7 @@ view and stranded the display on the previous window."
           (should (tmux-control-it--pump-until
                    8 (lambda ()
                        (let ((shown (window-buffer (selected-window))))
-                         (and (string-match-p ":@" (buffer-name shown))
+                         (and (string-match-p " @[0-9]+\\*\\'" (buffer-name shown))
                               (with-current-buffer shown
                                 (and (equal tmux-control--window-id
                                             (with-current-buffer buf
@@ -872,7 +872,7 @@ runs fast without raising the server's history-limit."
             (progn
               (tmux-control-it--pump-until
                5 (lambda () (with-current-buffer live tmux-control--active-pane)))
-              (let* ((sb-name (format "*%s-scrollback*" (buffer-name live)))
+              (let* ((sb-name (tmux-control--derived-buffer-name (buffer-name live) "scrollback"))
                      (sb nil))
                 (with-current-buffer live (tmux-control-scrollback))
                 (setq sb (get-buffer sb-name))
@@ -943,7 +943,7 @@ requested depth instead of the received depth would risk a seam error."
               (progn
                 (tmux-control-it--pump-until
                  5 (lambda () (with-current-buffer live tmux-control--active-pane)))
-                (let* ((sb-name (format "*%s-scrollback*" (buffer-name live)))
+                (let* ((sb-name (tmux-control--derived-buffer-name (buffer-name live) "scrollback"))
                        (sb nil))
                   (with-current-buffer live (tmux-control-scrollback))
                   (setq sb (get-buffer sb-name))
@@ -1005,7 +1005,7 @@ initial+extend instead of initial)."
             (progn
               (tmux-control-it--pump-until
                5 (lambda () (with-current-buffer live tmux-control--active-pane)))
-              (let* ((sbname (format "*%s-scrollback*" (buffer-name live)))
+              (let* ((sbname (tmux-control--derived-buffer-name (buffer-name live) "scrollback"))
                      (sb nil))
                 (with-current-buffer live (tmux-control-scrollback))
                 (setq sb (get-buffer sbname))

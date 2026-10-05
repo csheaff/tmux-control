@@ -2119,6 +2119,18 @@ each wrapped in an evolving prompt line and a status bar.")
     (should (string-match-p "●3" (substring-no-properties c)))
     (should (get-text-property (1- (length c)) 'keymap c))))
 
+(ert-deftest tmux-control-test-buffer-names-are-short ()
+  ;; "*tmux HOST:SESSION*", with the socket only when it isn't the default,
+  ;; and window, pane and scrollback buffers named after their session's.
+  (let ((tmux-control-default-socket-name "main"))
+    (should (equal (tmux-control--buffer-name nil "main" "work") "*tmux local:work*"))
+    (should (equal (tmux-control--buffer-name "" "main" "work") "*tmux local:work*"))
+    (should (equal (tmux-control--buffer-name "dev" "build" "work") "*tmux dev:work (build)*")))
+  (should (equal (tmux-control--derived-buffer-name "*tmux dev:work*" "@2") "*tmux dev:work @2*"))
+  (should (equal (tmux-control--derived-buffer-name "*tmux dev:work @2*" "scrollback")
+                 "*tmux dev:work @2 scrollback*"))
+  (should (equal (tmux-control--derived-buffer-name "renamed" "%3") "renamed %3")))
+
 (ert-deftest tmux-control-test-mode-line-names-host-and-window ()
   ;; The mode line names the host and the tmux window rather than the long
   ;; buffer name, which shows on hover instead.
@@ -2130,7 +2142,7 @@ each wrapped in an evolving prompt line and a status bar.")
                         (list (list :index 0 :name "shell" :id "@1")
                               (list :index 1 :name "build" :id "@2"))))
           (with-temp-buffer
-            (rename-buffer "*tmux-control:dev:main:work*:@2" t)
+            (rename-buffer "*tmux dev:work @2*" t)
             (setq-local tmux-control--controller controller)
             (setq-local tmux-control--window-id "@2")
             (setq-local tmux-control--host "dev")
