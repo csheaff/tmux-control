@@ -159,7 +159,13 @@ created or reconnected buffers; mode hooks can override it locally."
   "Seconds without a completed command before optional idle collection.
 Must be positive.  Used by `tmux-control-idle-gc-mode'.  A collection can
 still delay input that arrives after it starts."
-  :type 'number)
+  :type 'number
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         ;; Re-arm a running mode's idle timer with the new delay.
+         (when (and (bound-and-true-p tmux-control-idle-gc-mode)
+                    (fboundp 'tmux-control--idle-gc-rearm))
+           (tmux-control--idle-gc-rearm))))
 
 (defcustom tmux-control-idle-gc-cons-threshold 10000000
   "Cons cells allocated since the last GC before optional idle collection.
@@ -1105,6 +1111,16 @@ Disable this mode to remove its timer and hooks.  See also
   "Reset the allocation count after any collection.
 That includes a collection another package requested."
   (setq tmux-control--idle-gc-cons-at-gc (car (memory-use-counts))))
+
+(defun tmux-control--idle-gc-rearm ()
+  "Restart the idle timer with the current `tmux-control-idle-gc-delay'.
+An invalid delay keeps the running timer; the check rejects it anyway."
+  (when (and (timerp tmux-control--idle-gc-timer)
+             (tmux-control--idle-gc-options-valid-p))
+    (cancel-timer tmux-control--idle-gc-timer)
+    (setq tmux-control--idle-gc-timer
+          (run-with-idle-timer tmux-control-idle-gc-delay t
+                               #'tmux-control--idle-gc-idle))))
 
 (defun tmux-control--idle-gc-idle ()
   "Check now, and again shortly while Emacs stays idle in a view.

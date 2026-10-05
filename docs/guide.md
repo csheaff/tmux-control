@@ -380,8 +380,10 @@ view is selected and no input is pending. Customize
 `tmux-control-idle-gc-delay` and `tmux-control-idle-gc-cons-threshold` to
 adjust these positive values. The allocation count covers all of Emacs;
 collection itself also affects the whole process. Emacs's automatic GC
-settings remain unchanged. The mode keeps a small polling timer while
-enabled and removes its timer and hooks when disabled.
+settings remain unchanged. The mode waits on Emacs's idle timers: it
+checks once you have been idle for the delay, then each second while you
+stay idle in a view, and runs nothing while you work. Disabling it removes
+its timers and hooks.
 
 In a controlled five-minute comparison, idle scheduling reduced the worst
 software response from 242 ms to 12 ms. It also increased total collection

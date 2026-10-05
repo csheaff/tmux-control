@@ -6033,6 +6033,22 @@ output), :calls (side-effect invocations in order), :active-pane,
       (should (= gc-cons-threshold threshold))
       (should (= gc-cons-percentage percentage)))))
 
+(ert-deftest tmux-control-test-idle-gc-delay-change-rearms-the-timer ()
+  ;; The delay is read when the timer is made; customizing it while the
+  ;; mode runs must take effect, as for `tmux-control-auto-heal-interval'.
+  (tmux-control-test--with-idle-gc
+    (tmux-control-idle-gc-mode 1)
+    (let ((old tmux-control--idle-gc-timer))
+      (customize-set-variable 'tmux-control-idle-gc-delay 2.5)
+      (should-not (eq old tmux-control--idle-gc-timer))
+      (should-not (memq old timer-idle-list))
+      (should (memq tmux-control--idle-gc-timer timer-idle-list))
+      (should (= 2.5 (float-time (timer--time tmux-control--idle-gc-timer))))
+      ;; An invalid delay leaves the running timer alone.
+      (let ((current tmux-control--idle-gc-timer))
+        (customize-set-variable 'tmux-control-idle-gc-delay 0)
+        (should (eq current tmux-control--idle-gc-timer))))))
+
 (ert-deftest tmux-control-test-idle-gc-rejects-invalid-settings-cleanly ()
   (dolist (settings '((0 100) (-1 100) ("bad" 100) (1 0) (1 1.5)))
     (tmux-control-test--with-idle-gc
