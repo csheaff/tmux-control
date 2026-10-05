@@ -203,8 +203,8 @@ tiled view, where each pane already carries its own label.  Turn it off with:
 ```
 
 The **mode line** names the host and the window you are looking at,
-`dev › build`, rather than the buffer's full name
-(`*tmux-control:dev:main:work*:@2`), which shows when you hover over it.  Set
+`dev › build`, rather than the buffer's name (`*tmux dev:work @2*`), which
+shows when you hover over it.  Set
 `tmux-control-mode-line-window-name` to nil to keep the buffer name.
 
 ## Panes
