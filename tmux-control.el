@@ -1118,6 +1118,10 @@ An invalid delay keeps the running timer; the check rejects it anyway."
   (when (and (timerp tmux-control--idle-gc-timer)
              (tmux-control--idle-gc-options-valid-p))
     (cancel-timer tmux-control--idle-gc-timer)
+    ;; A pending recheck belongs to the old schedule.
+    (when (timerp tmux-control--idle-gc-recheck-timer)
+      (cancel-timer tmux-control--idle-gc-recheck-timer))
+    (setq tmux-control--idle-gc-recheck-timer nil)
     (setq tmux-control--idle-gc-timer
           (run-with-idle-timer tmux-control-idle-gc-delay t
                                #'tmux-control--idle-gc-idle))))

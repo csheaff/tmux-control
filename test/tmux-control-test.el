@@ -6038,8 +6038,13 @@ output), :calls (side-effect invocations in order), :active-pane,
   ;; mode runs must take effect, as for `tmux-control-auto-heal-interval'.
   (tmux-control-test--with-idle-gc
     (tmux-control-idle-gc-mode 1)
-    (let ((old tmux-control--idle-gc-timer))
+    (let ((old tmux-control--idle-gc-timer)
+          (recheck (run-with-idle-timer 60 nil #'ignore)))
+      (setq tmux-control--idle-gc-recheck-timer recheck)
       (customize-set-variable 'tmux-control-idle-gc-delay 2.5)
+      ;; A pending recheck belongs to the old schedule.
+      (should-not (memq recheck timer-idle-list))
+      (should-not tmux-control--idle-gc-recheck-timer)
       (should-not (eq old tmux-control--idle-gc-timer))
       (should-not (memq old timer-idle-list))
       (should (memq tmux-control--idle-gc-timer timer-idle-list))
