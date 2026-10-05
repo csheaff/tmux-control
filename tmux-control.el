@@ -1159,7 +1159,7 @@ buffers.  `tmux-control-unload-function' removes them."
   (add-hook 'window-size-change-functions #'tmux-control--on-frame-size-change)
   (add-hook 'window-size-change-functions #'tmux-control--follow-window-buffer-sizes))
 
-(define-derived-mode tmux-control-mode eat-mode "tmux-control"
+(define-derived-mode tmux-control-mode eat-mode "tmux"
   "Major mode for tmux-control buffers."
   (when tmux-control-live-scrollback-size
     (setq-local eat-term-scrollback-size tmux-control-live-scrollback-size))
@@ -1230,7 +1230,7 @@ and above the bottom the handler re-dispatches wheel-down there too.")
   "Emulation map alist for scrollback pager buffers.")
 
 (define-derived-mode tmux-control-scrollback-mode special-mode
-  "tmux-control-scrollback"
+  "tmux scrollback"
   "Major mode for tmux-control scrollback buffers."
   (setq-local truncate-lines nil)
   (setq-local emulation-mode-map-alists
