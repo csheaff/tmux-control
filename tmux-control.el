@@ -6866,9 +6866,16 @@ A program that asked the terminal for extended keys tells it apart from
 Return: Claude Code starts a new line in its prompt.  Any other program
 gets a plain Return, as from a terminal without them.  Encoded here like
 other keys, Shift+Return could only be Return, which submitted a
-half-written prompt."
+half-written prompt.
+
+Servers older than tmux 3.5 do not know the key name and would type it
+out, so they still get Return."
   (interactive)
-  (tmux-control--send-key "S-Enter"))
+  (if (tmux-control--version-at-least-p
+       (buffer-local-value 'tmux-control--server-version (tmux-control--wb-controller))
+       3 5)
+      (tmux-control--send-key "S-Enter")
+    (tmux-control--send-input nil "\r")))
 
 (defconst tmux-control--paste-buffer-chunk-bytes 1024
   "Maximum UTF-8 bytes per `set-buffer' control command when pasting.
@@ -7280,14 +7287,20 @@ Pure, for unit testing."
        (:on "\e[?7h")
        (:off "\e[?7l")))))
 
+(defun tmux-control--version-at-least-p (version major minor)
+  "Return non-nil when tmux VERSION is MAJOR.MINOR or later.
+VERSION is a `#{version}' string such as \"3.6a\" or \"next-3.5\"; the first
+MAJOR.MINOR it contains is compared.  Nil for an unknown VERSION.  Pure,
+for unit testing."
+  (when (and version (string-match "\\([0-9]+\\)\\.\\([0-9]+\\)" version))
+    (let ((have-major (string-to-number (match-string 1 version)))
+          (have-minor (string-to-number (match-string 2 version))))
+      (or (> have-major major) (and (= have-major major) (>= have-minor minor))))))
+
 (defun tmux-control--capture-n-supported-p (version)
   "Return non-nil when tmux VERSION supports `capture-pane -N' (3.1 or later).
-VERSION is a `#{version}' string such as \"3.6a\" or \"next-3.5\"; the first
-MAJOR.MINOR it contains is compared against 3.1.  Pure, for unit testing."
-  (when (and version (string-match "\\([0-9]+\\)\\.\\([0-9]+\\)" version))
-    (let ((major (string-to-number (match-string 1 version)))
-          (minor (string-to-number (match-string 2 version))))
-      (or (> major 3) (and (= major 3) (>= minor 1))))))
+See `tmux-control--version-at-least-p' for VERSION."
+  (tmux-control--version-at-least-p version 3 1))
 
 (defun tmux-control--refresh-pane-size ()
   "Query the active pane's real size and sync the Eat grid to it.

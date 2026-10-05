@@ -1167,6 +1167,10 @@ each wrapped in an evolving prompt line and a status bar.")
   ;; capture-pane -N landed in tmux 3.1.
   (should (tmux-control--capture-n-supported-p "3.1"))
   (should (tmux-control--capture-n-supported-p "3.6a"))
+  (should (tmux-control--version-at-least-p "next-3.5" 3 5))
+  (should-not (tmux-control--version-at-least-p "3.4" 3 5))
+  (should (tmux-control--version-at-least-p "4.0" 3 5))
+  (should-not (tmux-control--version-at-least-p nil 3 5))
   (should (tmux-control--capture-n-supported-p "next-3.5"))
   (should (tmux-control--capture-n-supported-p "4.0"))
   (should-not (tmux-control--capture-n-supported-p "3.0a"))
@@ -4355,15 +4359,20 @@ output), :calls (side-effect invocations in order), :active-pane,
               #'tmux-control-send-shift-return))
   (should (eq (lookup-key tmux-control--char-mode-map [S-return])
               #'tmux-control-send-shift-return))
-  (let ((sent '()))
-    (with-temp-buffer
-      (setq-local tmux-control--active-pane "%7")
-      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-                ((symbol-function 'tmux-control--ensure-input-ready) #'ignore)
-                ((symbol-function 'tmux-control--send-command)
-                 (lambda (command &rest _) (push command sent))))
-        (tmux-control-send-shift-return)))
-    (should (equal sent '("send-keys -t %7 S-Enter")))))
+  (dolist (case '(("3.6a" "send-keys -t %7 S-Enter")
+                  ;; Before 3.5 tmux typed the unknown key name out.
+                  ("3.4" "send-keys -t %7 -H 0d")
+                  (nil "send-keys -t %7 -H 0d")))
+    (let ((sent '()))
+      (with-temp-buffer
+        (setq-local tmux-control--active-pane "%7"
+                    tmux-control--server-version (car case))
+        (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                  ((symbol-function 'tmux-control--ensure-input-ready) #'ignore)
+                  ((symbol-function 'tmux-control--send-command)
+                   (lambda (command &rest _) (push command sent))))
+          (tmux-control-send-shift-return)))
+      (should (equal sent (cdr case))))))
 
 (defvar tmux-control-test--fake-modal nil
   "Stands in for a modal minor mode in the ESC precedence test.")
