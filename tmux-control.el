@@ -1214,6 +1214,9 @@ buffers.  `tmux-control-unload-function' removes them."
   (when tmux-control-live-scrollback-size
     (setq-local eat-term-scrollback-size tmux-control-live-scrollback-size))
   (setq-local bookmark-make-record-function #'tmux-control--bookmark-record)
+  ;; A terminal shows a no-break space as a space.  Emacs highlights it,
+  ;; which put underscores in Claude Code's prompt and status lines.
+  (setq-local nobreak-char-display nil)
   ;; Registered here, before Evil sets up the buffer, so the pane gets keys.
   ;; Evil keeps one process-wide registration per mode; nil removes it.
   (when (fboundp 'evil-set-initial-state)
@@ -1283,6 +1286,8 @@ and above the bottom the handler re-dispatches wheel-down there too.")
   "tmux scrollback"
   "Major mode for tmux-control scrollback buffers."
   (setq-local truncate-lines nil)
+  ;; As in the live view: a no-break space is a space.
+  (setq-local nobreak-char-display nil)
   (setq-local emulation-mode-map-alists
               (cons tmux-control--scrollback-emulation-map-alist
                     (delq tmux-control--scrollback-emulation-map-alist
