@@ -1118,14 +1118,15 @@ An invalid delay keeps the running timer; the check rejects it anyway."
   (when (and (timerp tmux-control--idle-gc-timer)
              (numberp tmux-control-idle-gc-delay)
              (> tmux-control-idle-gc-delay 0))
-    (cancel-timer tmux-control--idle-gc-timer)
-    ;; A pending recheck belongs to the old schedule.
-    (when (timerp tmux-control--idle-gc-recheck-timer)
-      (cancel-timer tmux-control--idle-gc-recheck-timer))
-    (setq tmux-control--idle-gc-recheck-timer nil)
-    (setq tmux-control--idle-gc-timer
-          (run-with-idle-timer tmux-control-idle-gc-delay t
-                               #'tmux-control--idle-gc-idle))))
+    ;; Make the new timer first, so a failure keeps the old schedule.
+    (let ((timer (run-with-idle-timer tmux-control-idle-gc-delay t
+                                      #'tmux-control--idle-gc-idle)))
+      (cancel-timer tmux-control--idle-gc-timer)
+      ;; A pending recheck belongs to the old schedule.
+      (when (timerp tmux-control--idle-gc-recheck-timer)
+        (cancel-timer tmux-control--idle-gc-recheck-timer))
+      (setq tmux-control--idle-gc-recheck-timer nil
+            tmux-control--idle-gc-timer timer))))
 
 (defun tmux-control--idle-gc-idle ()
   "Check now, and again shortly while Emacs stays idle in a view.

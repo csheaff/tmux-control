@@ -6056,7 +6056,13 @@ output), :calls (side-effect invocations in order), :active-pane,
       ;; The allocation threshold is a separate setting.
       (setq tmux-control-idle-gc-cons-threshold 0)
       (customize-set-variable 'tmux-control-idle-gc-delay 3)
-      (should (= 3 (float-time (timer--time tmux-control--idle-gc-timer)))))))
+      (should (= 3 (float-time (timer--time tmux-control--idle-gc-timer))))
+      ;; A timer that cannot be made leaves the running one in place.
+      (let ((current tmux-control--idle-gc-timer))
+        (cl-letf (((symbol-function 'run-with-idle-timer) (lambda (&rest _) (error "No timer"))))
+          (should-error (customize-set-variable 'tmux-control-idle-gc-delay 4)))
+        (should (eq current tmux-control--idle-gc-timer))
+        (should (memq current timer-idle-list))))))
 
 (ert-deftest tmux-control-test-idle-gc-rejects-invalid-settings-cleanly ()
   (dolist (settings '((0 100) (-1 100) ("bad" 100) (1 0) (1 1.5)))
