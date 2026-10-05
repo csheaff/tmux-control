@@ -7059,9 +7059,16 @@ decides, as it does on a switch.  Installed on
   (let (sized)
     (dolist (window (cons (frame-selected-window frame) (window-list frame 'never)))
       (let ((buffer (window-buffer window)))
-        (when (and (buffer-local-value 'tmux-control--window-id buffer)
-                   (buffer-live-p (buffer-local-value 'tmux-control--controller buffer))
-                   (not (memq (buffer-local-value 'tmux-control--controller buffer) sized)))
+        (cond
+         ;; The session's own buffer is sized through its process, but a
+         ;; selected one still decides over its window buffers elsewhere.
+         ((and (eq (buffer-local-value 'major-mode buffer) 'tmux-control-mode)
+               (null (buffer-local-value 'tmux-control--controller buffer))
+               (buffer-local-value 'tmux-control--process buffer))
+          (push buffer sized))
+         ((and (buffer-local-value 'tmux-control--window-id buffer)
+               (buffer-live-p (buffer-local-value 'tmux-control--controller buffer))
+               (not (memq (buffer-local-value 'tmux-control--controller buffer) sized)))
           (with-current-buffer buffer
             (unless (tmux-control-tiled-p)
               (push tmux-control--controller sized)
@@ -7071,7 +7078,7 @@ decides, as it does on a switch.  Installed on
                   ;; tmux repaints every pane at the new size; that is not
                   ;; activity.
                   (tmux-control--quiet-activity)
-                  (tmux-control--resize (car size) (cdr size)))))))))))
+                  (tmux-control--resize (car size) (cdr size))))))))))))
 
 (defun tmux-control--resize-to-window ()
   "Resize tmux and Eat to the selected window."

@@ -2150,7 +2150,18 @@ each wrapped in an evolving prompt line and a status bar.")
                 (setq-local tmux-control--requested-client-size nil))
               (setq tiled t)
               (tmux-control--follow-window-buffer-sizes (selected-frame))
-              (should-not resizes))))
+              (should-not resizes)
+              ;; A selected window showing the session's own buffer decides,
+              ;; not a window buffer of the same session elsewhere.
+              (setq tiled nil)
+              (with-current-buffer ctrl
+                (tmux-control-mode)
+                (setq-local tmux-control--process t))
+              (let ((other (split-window-right)))
+                (set-window-buffer other render)
+                (set-window-buffer (selected-window) ctrl)
+                (tmux-control--follow-window-buffer-sizes (selected-frame))
+                (should-not resizes)))))
       (kill-buffer render)
       (kill-buffer ctrl))))
 
