@@ -2862,6 +2862,20 @@ SUFFIX goes inside NAME's closing asterisk: \"*tmux dev:work @2*\"."
       (concat (substring name 0 -1) " " suffix "*")
     (concat name " " suffix)))
 
+(defun tmux-control--scrollback-buffer-for (live)
+  "Return the scrollback buffer for the LIVE buffer, creating it if needed.
+An existing one is found by the buffer it belongs to, not by name: a tmux
+session may be named like another's scrollback, such as \"work @2
+scrollback\", and its buffer must never be taken over."
+  (or (seq-find (lambda (buffer)
+                  ;; Window buffers name themselves as their live buffer.
+                  (and (eq (buffer-local-value 'tmux-control--live-buffer buffer) live)
+                       (eq (buffer-local-value 'major-mode buffer)
+                           'tmux-control-scrollback-mode)))
+                (buffer-list))
+      (generate-new-buffer (tmux-control--derived-buffer-name (buffer-name live)
+                                                              "scrollback"))))
+
 (defun tmux-control--mode-line-safe (string)
   "Return STRING safe to place in a mode-line/header-line `:eval' result.
 Doubles `%' so an attacker- or program-supplied tmux name, title, or command
@@ -3900,8 +3914,7 @@ the live interactive pane."
          (target (or tmux-control--active-pane tmux-control--fallback-target))
          (trailing tmux-control--capture-trailing-p)
          (live-buffer (current-buffer))
-         (scrollback-buffer-name (tmux-control--derived-buffer-name (buffer-name) "scrollback"))
-         (scrollback-buffer (get-buffer-create scrollback-buffer-name)))
+         (scrollback-buffer (tmux-control--scrollback-buffer-for live-buffer)))
     ;; Size the pane to the window the pager is about to use BEFORE
     ;; capturing, so the capture is wrapped to the width it will be read
     ;; at.  Normally a no-op -- the live view keeps the pane sized to this
