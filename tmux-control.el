@@ -1559,6 +1559,12 @@ CURRENT is the session in view."
                       (set-window-buffer window orig-buffer)))
                   'tmux-control-session)))
     (when (and choice (not (string-empty-p choice)))
+      ;; Choosing leaves the previewed session in WINDOW.  Put back what it
+      ;; showed, so a `tmux-control-switch-session-functions' hook showing
+      ;; the session elsewhere, say in another workspace, leaves this view
+      ;; as it was; switching here shows the session again.
+      (when (and (window-live-p window) (buffer-live-p orig-buffer))
+        (set-window-buffer window orig-buffer))
       (tmux-control--switch-session host socket choice))))
 
 ;;;###autoload

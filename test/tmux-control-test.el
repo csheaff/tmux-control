@@ -2621,6 +2621,31 @@ each wrapped in an evolving prompt line and a status bar.")
           (should (equal committed "b")))       ; committed b
       (kill-buffer bbuf))))
 
+(ert-deftest tmux-control-test-session-preview-is-undone-before-a-takeover ()
+  ;; Choosing in Consult leaves the previewed session in the window.  A hook
+  ;; that shows it elsewhere, such as in another workspace, must find this
+  ;; window as it was, or that workspace keeps showing the other session.
+  (let ((orig (generate-new-buffer " tc-test-orig"))
+        (bbuf (generate-new-buffer " tc-test-b"))
+        seen)
+    (unwind-protect
+        (save-window-excursion
+          (set-window-buffer (selected-window) orig)
+          (cl-letf (((symbol-function 'tmux-control--session-live-buffer)
+                     (lambda (_host s &optional _socket) (when (equal s "b") bbuf)))
+                    ((symbol-function 'tmux-control--connect-or-switch) #'ignore)
+                    ((symbol-function 'consult--read)
+                     (lambda (_cands &rest opts)
+                       (funcall (plist-get opts :state) 'preview "b")
+                       "b")))
+            (let ((tmux-control-switch-session-functions
+                   (list (lambda (&rest _) (setq seen (window-buffer (selected-window))) t))))
+              (tmux-control--select-session-inline nil "sock" '("a" "b") "a"))
+            (should (eq seen orig))
+            (should (eq (window-buffer (selected-window)) orig))))
+      (kill-buffer orig)
+      (kill-buffer bbuf))))
+
 (ert-deftest tmux-control-test-untile-resolves-pane-in-band ()
   ;; Untile must re-resolve the active pane and seed over the live control
   ;; connection (in-band, async) -- NOT via a blocking out-of-band ssh
