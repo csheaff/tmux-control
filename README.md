@@ -203,6 +203,13 @@ Apart from `tmux-control-connect-or-switch`, these act on the current buffer,
 which may be a session's buffer or any of its window or tiled-pane buffers.
 The accessors return nil in other buffers.
 
+A package that keeps its own workspace per session can take over when you
+switch sessions from a view (`C-c C-s`, the next and previous session, or the
+corner naming sessions with new output): add a function of *host socket
+session* to `tmux-control-switch-session-functions` that shows the session
+its own way and returns non-nil.  `tmux-control-connect-or-switch` doesn't run
+them.
+
 Replies are matched to commands in order, so each *command* must be exactly
 one tmux command on one line, starting with the bare command name.  Lines
 tmux would not answer exactly once are refused: blank or comment-only lines,

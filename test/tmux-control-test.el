@@ -3215,7 +3215,52 @@ before the toggle kept a local directory while later ones went remote."
        (tmux-control--handle-line "%end 2 7 0")
        (should-not tmux-control--collecting-command)
        (should (null paused))
+       (should-not tmux-control--exit-reason)
        (should (equal got '("%pause %0" "%exit" "%continue %0")))))))
+
+(ert-deftest tmux-control-test-exit-is-one-line ()
+  ;; tmux's %exit printed "tmux session ended", then the sentinel printed
+  ;; "connection lost (finished)": two lines for one event.  %exit can't
+  ;; tell a session that ended from a client that was detached, so the one
+  ;; line keeps the conditional way back.
+  (let ((fake-proc (make-symbol "proc")))
+    (cl-letf (((symbol-function 'process-buffer) (lambda (_p) (current-buffer))))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (setq-local tmux-control--disconnecting nil
+                    tmux-control--process fake-proc)
+        (tmux-control--handle-line "%exit")
+        (should (equal (buffer-string) ""))
+        (tmux-control--sentinel fake-proc "finished\n")
+        (should (string-match-p "tmux ended the connection -- if the tmux session is still running, C-c C-r reconnects"
+                                (buffer-string)))
+        (should-not (string-match-p "connection lost" (buffer-string)))))))
+
+(ert-deftest tmux-control-test-switch-session-functions-take-over-a-switch ()
+  ;; A package keeping a workspace per session can show it its own way.
+  (with-temp-buffer
+    (setq-local tmux-control--host "")
+    (setq-local tmux-control--socket-name "s")
+    (setq-local tmux-control--session "a")
+    (let (asked switched (handle t))
+      (cl-letf (((symbol-function 'tmux-control--list-sessions) (lambda (&rest _) '("a" "b")))
+                ((symbol-function 'tmux-control--connect-or-switch)
+                 (lambda (_host _socket session) (push session switched))))
+        (let ((tmux-control-switch-session-functions
+               (list (lambda (&rest args) (push args asked) handle))))
+          (tmux-control-next-session)
+          (should (equal asked '((nil "s" "b"))))
+          (should-not switched)
+          ;; Declined: tmux-control switches as before.
+          (setq handle nil)
+          (tmux-control-next-session)
+          (should (equal switched '("b")))
+          ;; The corner's switch asks too.
+          (setq asked nil handle t)
+          (let ((flagged (current-buffer)))
+            (with-temp-buffer
+              (tmux-control--switch-to-flagged-buffer flagged)))
+          (should (equal asked '((nil "s" "a")))))))))
 
 (ert-deftest tmux-control-test-scrollback-capture-command ()
   ;; The DEFAULT is raw rows, no -J: tmux re-wraps pane history to the

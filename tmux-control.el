@@ -713,6 +713,11 @@ current window for it (that window has -- or will get -- its own render
 buffer; two buffers claiming one window routes output to the hidden one
 and freezes the visible one).  Cleared by a (re)connect.")
 
+(defvar-local tmux-control--exit-reason nil
+  "What tmux said when it closed the connection with %exit, or nil.
+An empty string when it gave no reason, as it doesn't when the session
+ends, the server exits or the client is detached.")
+
 (defvar-local tmux-control--disconnecting nil
   "Non-nil while this session's control process is being shut down on purpose.
 Set by `tmux-control-disconnect' right before deleting the process and
@@ -1391,6 +1396,7 @@ session (tmux attaches if it exists, otherwise creates it)."
       (setq tmux-control--host host)
       (setq tmux-control--socket-name socket-name)
       (setq tmux-control--session session)
+      (setq tmux-control--exit-reason nil)
       (setq tmux-control--fallback-target (concat session ":"))
       (setq tmux-control--process
             ;; `make-process' honors remote `default-directory' file handlers.
@@ -1495,6 +1501,24 @@ SOCKET defaults to `tmux-control-default-socket-name'."
                (process-live-p (buffer-local-value 'tmux-control--process buffer)))
       buffer)))
 
+(defvar tmux-control-switch-session-functions nil
+  "Functions that may take over a switch to another session.
+When you switch sessions from a view -- `tmux-control-select-session',
+`tmux-control-next-session', `tmux-control-previous-session', or the
+corner naming sessions with new output -- each function is called with
+the target's HOST (nil for this machine), SOCKET-NAME and SESSION until
+one returns non-nil, meaning it has shown the session itself.  A package
+that keeps a workspace per session can switch to that instead.
+`tmux-control-connect-or-switch' does not run them.")
+
+(defun tmux-control--switch-session (host socket-name session)
+  "Switch the view to SESSION on HOST/SOCKET-NAME, as you asked.
+`tmux-control-switch-session-functions' may take it over."
+  (unless (run-hook-with-args-until-success
+           'tmux-control-switch-session-functions
+           (and host (not (string-empty-p host)) host) socket-name session)
+    (tmux-control--connect-or-switch host socket-name session)))
+
 (defun tmux-control--connect-or-switch (host socket-name session)
   "Show SESSION on HOST/SOCKET-NAME, reusing a live connection if there is one.
 Each tmux session is its own tmux-control buffer with its own control
@@ -1535,7 +1559,7 @@ CURRENT is the session in view."
                       (set-window-buffer window orig-buffer)))
                   'tmux-control-session)))
     (when (and choice (not (string-empty-p choice)))
-      (tmux-control--connect-or-switch host socket choice))))
+      (tmux-control--switch-session host socket choice))))
 
 ;;;###autoload
 (defun tmux-control-select-session ()
@@ -1559,7 +1583,7 @@ previewed in place as you choose.  See also `tmux-control-next-session'."
                      (format "Session (current: %s): " current)
                      sessions nil t)))
         (when (and choice (not (string-empty-p choice)))
-          (tmux-control--connect-or-switch host socket choice))))))
+          (tmux-control--switch-session host socket choice))))))
 
 (defun tmux-control--cycle-session (delta)
   "Switch to the session DELTA steps from the current one (wrapping).
@@ -1576,7 +1600,7 @@ tmux's own list order, connecting the target on demand."
      (t (let* ((n (length sessions))
                (cur (or (cl-position tmux-control--session sessions :test #'equal) 0))
                (next (nth (mod (+ cur delta) n) sessions)))
-          (tmux-control--connect-or-switch host socket next))))))
+          (tmux-control--switch-session host socket next))))))
 
 ;;;###autoload
 (defun tmux-control-next-session ()
@@ -2998,10 +3022,22 @@ The corner and the switcher capture a controller buffer that the user may
 act on moments later; the session can be killed in between (server died,
 manual kill), so guard liveness rather than signalling \"Selecting deleted
 buffer\"."
-  (if (buffer-live-p buffer)
-      (let ((display-buffer-overriding-action '((display-buffer-same-window))))
-        (pop-to-buffer (tmux-control--session-display-buffer buffer)))
-    (message "tmux-control: that session is gone")))
+  (cond
+   ((not (buffer-live-p buffer))
+    (message "tmux-control: that session is gone"))
+   ((run-hook-with-args-until-success
+     'tmux-control-switch-session-functions
+     (tmux-control--buffer-host-value buffer)
+     (buffer-local-value 'tmux-control--socket-name buffer)
+     (buffer-local-value 'tmux-control--session buffer)))
+   (t
+    (let ((display-buffer-overriding-action '((display-buffer-same-window))))
+      (pop-to-buffer (tmux-control--session-display-buffer buffer))))))
+
+(defun tmux-control--buffer-host-value (buffer)
+  "BUFFER's SSH host, or nil for this machine."
+  (let ((host (buffer-local-value 'tmux-control--host buffer)))
+    (and host (not (string-empty-p host)) host)))
 
 (defun tmux-control--corner-session (buffer)
   "Return a clickable corner token for the flagged session in BUFFER.
@@ -5766,19 +5802,16 @@ backing off to the cap."
      ;; control-mode transcript can hold %exit/%pause/%continue).  This sits
      ;; ABOVE those clauses so a captured token is collected verbatim instead
      ;; of acted on: a stray %pause would reseed and enqueue a bogus continue,
-     ;; a stray %exit would print a false "tmux session ended".
+     ;; a stray %exit would make a later disconnect blame tmux.
      (tmux-control--collecting-command
       (push line tmux-control--command-output))
      ((or (string= line "%exit") (string-prefix-p "%exit " line))
       ;; tmux is closing the control connection (the session was killed,
       ;; the server exited, or the client was detached).  The process
-      ;; sentinel will tear the buffer down; surface tmux's reason, if any,
-      ;; so the disconnect is not silent.
-      (let ((reason (string-trim (substring line (length "%exit")))))
-        (tmux-control--message
-         (if (string-empty-p reason)
-             "tmux session ended"
-           (format "tmux session ended: %s" reason)))))
+      ;; sentinel, which tears the buffer down, says so in one line,
+      ;; with tmux's reason if it gave one.
+      (setq tmux-control--exit-reason
+            (string-trim (substring line (length "%exit")))))
      ((string-match "\\`%pause \\(%[0-9]+\\)\\'" line)
       (tmux-control--handle-pause (match-string 1 line)))
      ((string-prefix-p "%continue " line)
@@ -7648,8 +7681,15 @@ never steals the window the user is looking at."
             (unless deliberate
               (setq tmux-control--auto-reconnect-attempts 0)
               (tmux-control--message
-               (format "connection lost (%s) -- if the tmux session is still running, C-c C-r reconnects"
-                       (string-trim-right message)))
+               (if tmux-control--exit-reason
+                   ;; tmux closed it: the session or server ended, or
+                   ;; something detached this client.  Its %exit can't
+                   ;; say which.
+                   (format "tmux ended the connection%s -- if the tmux session is still running, C-c C-r reconnects"
+                           (if (string-empty-p tmux-control--exit-reason) ""
+                             (format " (%s)" tmux-control--exit-reason)))
+                 (format "connection lost (%s) -- if the tmux session is still running, C-c C-r reconnects"
+                         (string-trim-right message))))
               (force-mode-line-update t))
             ;; The session is gone for now -- drop its frozen cell from any
             ;; flock so the dashboard reflects what is actually live.
