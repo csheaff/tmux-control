@@ -385,6 +385,20 @@ or when the application requests mouse events itself, the wheel event
 is forwarded to the terminal unchanged."
   :type 'boolean)
 
+(defcustom tmux-control-correct-emulation t
+  "Non-nil corrects Eat where its terminal emulation departs from tmux's.
+
+A pane is tmux's screen, so where Eat interprets a control sequence
+differently, the view drifts from the pane until the next repaint.  With
+this on, tmux-control fixes, while rendering its own output: scroll-region
+margins for cursor up/down, line insertion and deletion inside a region,
+partial-region scrolling, the edges of index and reverse index, CNL and
+CPL (Eat swaps them), erasing the display without moving the cursor (and
+ED 3 erasing only scrollback), and a bare line feed keeping the column.
+Other Eat buffers are unaffected.  Turn it off only to compare against
+Eat's own behavior."
+  :type 'boolean)
+
 (defcustom tmux-control-wheel-scrolls-live-history t
   "Non-nil means wheel-up first scrolls the live view's own retained history.
 
@@ -6723,6 +6737,397 @@ ORIGINAL is `eat--t-write', which writes STRING from BEGIN to END."
 
 (advice-add 'eat--t-write :around #'tmux-control--eat-write-composed)
 
+;;;; Terminal emulation fixes
+
+;; Eat departs from xterm and tmux in a few control functions that
+;; full-screen programs rely on: scroll regions (ncurses scrolls with them),
+;; line insertion and deletion, erasing the display, and line feeds.  A pane
+;; is tmux's screen, so a departure shows as a view that drifts from the pane
+;; until the next repaint.  The advice below corrects them while tmux-control
+;; renders its own output (`tmux-control--feed-terminal'); other Eat buffers
+;; keep Eat's behavior.  test/vt-corpus.jsonl holds a minimal stream for each,
+;; checked against tmux by `make test-vt-oracle'.
+
+(defvar tmux-control--vt-fixes nil
+  "Non-nil while tmux-control renders output with emulation fixes on.
+Bound by `tmux-control--feed-terminal' from
+`tmux-control-correct-emulation'.")
+
+(defvar tmux-control--vt-absolute nil
+  "Non-nil while Eat moves the cursor to an absolute row.
+Absolute positioning ignores the scroll region's margins.")
+
+(defvar tmux-control--vt-internal nil
+  "Non-nil while an Eat primitive moves to a next or previous line.
+Tells those calls apart from Eat's dispatch of CNL and CPL, which has the
+two the wrong way round.")
+
+(defun tmux-control--vt-cursor ()
+  "Return the cursor of the Eat terminal being rendered."
+  (eat--t-disp-cursor (eat--t-term-display eat--t-term)))
+
+(defun tmux-control--vt-height ()
+  "Return the height of the Eat terminal being rendered."
+  (eat--t-disp-height (eat--t-term-display eat--t-term)))
+
+(defun tmux-control--vt-goto-row (row)
+  "Move point to the start of screen ROW, creating rows up to it."
+  (goto-char (eat--t-disp-begin (eat--t-term-display eat--t-term)))
+  (let ((short (forward-line (1- row))))
+    ;; `forward-line' counts a last row without a newline as passed.
+    (unless (bolp)
+      (setq short (1+ short)))
+    (when (> short 0)
+      (insert (make-string short ?\n)))))
+
+(defun tmux-control--vt-place-cursor (y x)
+  "Put point on row Y, column X, and record that as the terminal cursor.
+Like `eat--t-goto' after text moved around the cursor, but without
+walking the screen row by row."
+  (let* ((cursor (tmux-control--vt-cursor))
+         (x (min (max x 1)
+                 (eat--t-disp-width (eat--t-term-display eat--t-term)))))
+    (tmux-control--vt-goto-row y)
+    (let ((room (- (pos-eol) (point))))
+      (if (>= room (1- x))
+          (forward-char (1- x))
+        (goto-char (pos-eol))
+        (insert (make-string (- (1- x) room) ?\s))))
+    (setf (eat--t-cur-y cursor) y
+          (eat--t-cur-x cursor) x)))
+
+(defun tmux-control--vt-blank-row ()
+  "Return the text of a blank row: empty, or spaces in the background color."
+  (let ((face (eat--t-term-face eat--t-term)))
+    (if (not (eat--t-face-bg face))
+        ""
+      (let ((row (make-string (eat--t-disp-width (eat--t-term-display eat--t-term))
+                              ?\s))
+            (attrs (eat--t-face-face face)))
+        (put-text-property 0 (length row) 'face attrs row)
+        (put-text-property 0 (length row) 'font-lock-face attrs row)
+        row))))
+
+(defun tmux-control--vt-scroll-rows (top bottom n down &optional cursor-row)
+  "Scroll screen rows TOP to BOTTOM by N lines, down when DOWN is non-nil.
+Rows that leave the range are dropped and blank rows enter at the other
+end; rows outside the range stay where they are.  The cursor keeps its
+column and ends on CURSOR-ROW, by default the row it was on."
+  (let* ((cursor (tmux-control--vt-cursor))
+         (y (or cursor-row (eat--t-cur-y cursor)))
+         (x (eat--t-cur-x cursor))
+         (count (1+ (- bottom top)))
+         (blank (tmux-control--vt-blank-row)))
+    (when (> n 0)
+      (tmux-control--vt-goto-row bottom)
+      (cond
+       ((>= n count)
+        (dotimes (i count)
+          (tmux-control--vt-goto-row (+ top i))
+          (delete-region (point) (pos-eol))
+          (insert blank)))
+       (down
+        ;; Drop the last N rows of the range, then open N at its top.
+        (let ((to (pos-eol)))
+          (forward-line (- n))
+          (delete-region (pos-eol) to))
+        (tmux-control--vt-goto-row top)
+        (dotimes (_ n) (insert blank ?\n)))
+       (t
+        ;; Open N rows after the range, then drop its first N.
+        (goto-char (pos-eol))
+        (dotimes (_ n) (insert ?\n blank))
+        (tmux-control--vt-goto-row top)
+        (delete-region (point) (progn (forward-line n) (point))))))
+    (tmux-control--vt-place-cursor y x)))
+
+(defun tmux-control--vt-partial-region-p ()
+  "Return non-nil when the scroll region is not the whole screen."
+  (or (> (eat--t-term-scroll-begin eat--t-term) 1)
+      (< (eat--t-term-scroll-end eat--t-term) (tmux-control--vt-height))))
+
+(defun tmux-control--eat-cur-down-advice (orig-fn &optional n)
+  "Stop CUD at the scroll region's bottom margin, as xterm and tmux do.
+From inside or above the region the cursor stops at its bottom margin;
+from below it, at the bottom of the screen.  ORIG-FN is `eat--t-cur-down',
+called with N."
+  (let ((tmux-control--vt-internal t))
+    (if (or (not tmux-control--vt-fixes) tmux-control--vt-absolute)
+        (funcall orig-fn n)
+      (let* ((y (eat--t-cur-y (tmux-control--vt-cursor)))
+             (end (eat--t-term-scroll-end eat--t-term))
+             (limit (if (<= y end) end (tmux-control--vt-height)))
+             (n (min (max (or n 1) 1) (- limit y))))
+        (when (> n 0)
+          (funcall orig-fn n))))))
+
+(defun tmux-control--eat-cur-up-advice (orig-fn &optional n)
+  "Stop CUU at the scroll region's top margin, as xterm and tmux do.
+From inside or below the region the cursor stops at its top margin; from
+above it, at the top of the screen.  ORIG-FN is `eat--t-cur-up', called
+with N."
+  (let ((tmux-control--vt-internal t))
+    (if (or (not tmux-control--vt-fixes) tmux-control--vt-absolute)
+        (funcall orig-fn n)
+      (let* ((y (eat--t-cur-y (tmux-control--vt-cursor)))
+             (begin (eat--t-term-scroll-begin eat--t-term))
+             (limit (if (>= y begin) begin 1))
+             (n (min (max (or n 1) 1) (- y limit))))
+        (when (> n 0)
+          (funcall orig-fn n))))))
+
+(defun tmux-control--eat-absolute-row-advice (orig-fn &rest args)
+  "Let absolute row positioning ignore the scroll region's margins.
+ORIG-FN is `eat--t-cur-vertical-abs', called with ARGS."
+  (let ((tmux-control--vt-absolute t))
+    (apply orig-fn args)))
+
+(defun tmux-control--eat-next-line-advice (orig-fn &optional n)
+  "Make Eat's CPL (CSI F) move up, to column one.
+Eat dispatches CPL to `eat--t-beg-of-next-line' and CNL to its opposite.
+Its own primitives call this too; those calls keep its behavior.
+ORIG-FN is `eat--t-beg-of-next-line', called with N."
+  (if (or tmux-control--vt-internal (not tmux-control--vt-fixes))
+      (funcall orig-fn n)
+    (eat--t-cur-up n)
+    (eat--t-carriage-return)))
+
+(defun tmux-control--eat-prev-line-advice (orig-fn &optional n)
+  "Make Eat's CNL (CSI E) move down, to column one.
+See `tmux-control--eat-next-line-advice'.  ORIG-FN is
+`eat--t-beg-of-prev-line', called with N."
+  (if (or tmux-control--vt-internal (not tmux-control--vt-fixes))
+      (funcall orig-fn n)
+    (eat--t-cur-down n)
+    (eat--t-carriage-return)))
+
+(defun tmux-control--vt-below-region-at-bottom-p ()
+  "Return non-nil when the cursor is on the last row, below the region."
+  (let ((y (eat--t-cur-y (tmux-control--vt-cursor))))
+    (and (> y (eat--t-term-scroll-end eat--t-term))
+         (= y (tmux-control--vt-height)))))
+
+(defun tmux-control--eat-index-advice (orig-fn)
+  "Make IND on the last row, below the scroll region, do nothing.
+Eat scrolls the region there.  ORIG-FN is `eat--t-index'."
+  (unless (and tmux-control--vt-fixes
+               (tmux-control--vt-below-region-at-bottom-p))
+    (funcall orig-fn)))
+
+(defun tmux-control--eat-line-feed-advice (orig-fn)
+  "Make a line feed on the last row, below the region, only return.
+Eat scrolls the region there.  ORIG-FN is `eat--t-line-feed'."
+  (let ((tmux-control--vt-internal t))
+    (if (and tmux-control--vt-fixes
+             (tmux-control--vt-below-region-at-bottom-p))
+        (eat--t-carriage-return)
+      (funcall orig-fn))))
+
+(defun tmux-control--eat-reverse-index-advice (orig-fn)
+  "Make RI on the first row, above the scroll region, do nothing.
+Eat scrolls the region there.  ORIG-FN is `eat--t-reverse-index'."
+  (unless (and tmux-control--vt-fixes
+               (let ((y (eat--t-cur-y (tmux-control--vt-cursor))))
+                 (and (< y (eat--t-term-scroll-begin eat--t-term)) (= y 1))))
+    (funcall orig-fn)))
+
+(defun tmux-control--eat-scroll-up-advice (orig-fn &optional n as-side-effect)
+  "Scroll a partial scroll region up without moving the cursor or the rest.
+Eat checks the region against the screen's width, not its height, and
+moves the cursor.  A region covering the whole screen keeps Eat's
+scrolling, which moves the top rows into scrollback.  When
+AS-SIDE-EFFECT, the cursor moves up with its text, as Eat's callers
+expect.  ORIG-FN is `eat--t-scroll-up', called with N."
+  (if (not (and tmux-control--vt-fixes (tmux-control--vt-partial-region-p)))
+      (funcall orig-fn n as-side-effect)
+    (let* ((begin (eat--t-term-scroll-begin eat--t-term))
+           (end (eat--t-term-scroll-end eat--t-term))
+           (n (min (max (or n 1) 0) (1+ (- end begin)))))
+      (let ((y (eat--t-cur-y (tmux-control--vt-cursor))))
+        (tmux-control--vt-scroll-rows
+         begin end n nil
+         (and as-side-effect (<= begin y end) (max (- y n) begin)))))))
+
+(defun tmux-control--eat-scroll-down-advice (orig-fn &optional n)
+  "Scroll a partial scroll region down without disturbing the rest.
+See `tmux-control--eat-scroll-up-advice'.  ORIG-FN is
+`eat--t-scroll-down', called with N."
+  (if (not (and tmux-control--vt-fixes (tmux-control--vt-partial-region-p)))
+      (funcall orig-fn n)
+    (let ((begin (eat--t-term-scroll-begin eat--t-term))
+          (end (eat--t-term-scroll-end eat--t-term)))
+      (tmux-control--vt-scroll-rows begin end
+                                    (min (max (or n 1) 0) (1+ (- end begin)))
+                                    t))))
+
+(defun tmux-control--vt-line-op-bottom (y)
+  "Return the last row that inserting or deleting lines at row Y affects.
+That is the region's bottom margin when Y is inside the scroll region,
+and the last row of the screen otherwise, as in tmux."
+  (if (<= (eat--t-term-scroll-begin eat--t-term) y
+          (eat--t-term-scroll-end eat--t-term))
+      (eat--t-term-scroll-end eat--t-term)
+    (tmux-control--vt-height)))
+
+(defun tmux-control--eat-insert-line-advice (orig-fn n)
+  "Insert N blank lines at the cursor, within the scroll region.
+Eat counts the room left in the region from the screen top, so inside a
+region that starts lower it inserts too few lines.  With the cursor
+outside the region, tmux inserts in the rest of the screen (xterm would
+do nothing; Eat does nothing).  ORIG-FN is `eat--t-insert-line'."
+  (if (not tmux-control--vt-fixes)
+      (funcall orig-fn n)
+    (let ((y (eat--t-cur-y (tmux-control--vt-cursor))))
+      (tmux-control--vt-scroll-rows y (tmux-control--vt-line-op-bottom y)
+                                    (max (or n 1) 1) t))))
+
+(defun tmux-control--eat-delete-line-advice (orig-fn n)
+  "Delete N lines at the cursor, within the scroll region.
+Besides the miscount in `tmux-control--eat-insert-line-advice', Eat
+signals an error, inside the output filter, when the deletion reaches the
+region's bottom with a background color set.  ORIG-FN is
+`eat--t-delete-line'."
+  (if (not tmux-control--vt-fixes)
+      (funcall orig-fn n)
+    (let ((y (eat--t-cur-y (tmux-control--vt-cursor))))
+      (tmux-control--vt-scroll-rows y (tmux-control--vt-line-op-bottom y)
+                                    (max (or n 1) 1) nil))))
+
+(defun tmux-control--eat-erase-in-disp-advice (orig-fn &optional n)
+  "Erase the display without moving the cursor; ED 3 erases only scrollback.
+Eat moves the cursor home for ED 2 and one column right for ED 1, and
+its ED 3 erases the screen as well.  ORIG-FN is `eat--t-erase-in-disp',
+called with N."
+  (if (not (and tmux-control--vt-fixes (memq n '(1 2 3))))
+      (funcall orig-fn n)
+    (let* ((cursor (tmux-control--vt-cursor))
+           (y (eat--t-cur-y cursor))
+           (x (eat--t-cur-x cursor)))
+      (if (= n 3)
+          (let ((begin (eat--t-disp-begin (eat--t-term-display eat--t-term))))
+            (delete-region (point-min) begin))
+        (funcall orig-fn n))
+      (tmux-control--vt-place-cursor y x))))
+
+(defconst tmux-control--vt-maybe-wide-regexp
+  (format "[%c-%c]" #x1100 #x10ffff)
+  "Matches every character that can be double-width, and more.")
+
+(defun tmux-control--vt-first-unfitting-wide (str beg end)
+  "Return where in STR a double-width character would start on the last column.
+Follows the cursor through STR from BEG to END the way Eat writes it, and
+returns the index of the first double-width character with only one
+column left on its row, or nil."
+  (let* ((disp (eat--t-term-display eat--t-term))
+         (width (eat--t-disp-width disp))
+         (wrap (eat--t-term-auto-margin eat--t-term))
+         (x (eat--t-cur-x (eat--t-disp-cursor disp)))
+         (i beg)
+         (found nil))
+    (while (and (not found) (< i end))
+      (let ((cw (char-width (aref str i))))
+        (cond ((= cw 0))
+              ((and wrap (> x width)) (setq x (1+ cw)))
+              ((> (+ x cw -1) width) (setq found i))
+              (t (setq x (min (+ x cw) (if wrap (1+ width) width))))))
+      (setq i (1+ i)))
+    found))
+
+(defun tmux-control--eat-write-wide-advice (orig-fn str &optional beg end)
+  "Wrap, or drop, a double-width character that does not fit on its row.
+With one column left, Eat's write loop makes no progress on a
+double-width character and never returns, freezing Emacs inside the
+output filter.  tmux wraps the character to the next row first, leaving
+the last column as it was; with autowrap off it drops the character.
+ORIG-FN is `eat--t-write', called with STR, BEG and END."
+  (let ((beg (or beg 0))
+        (end (or end (length str))))
+    (if (not (and tmux-control--vt-fixes
+                  (string-match tmux-control--vt-maybe-wide-regexp str beg)
+                  (< (match-beginning 0) end)))
+        (funcall orig-fn str beg end)
+      (while (< beg end)
+        (let ((at (tmux-control--vt-first-unfitting-wide str beg end)))
+          (if (not at)
+              (progn (funcall orig-fn str beg end)
+                     (setq beg end))
+            (when (< beg at)
+              (funcall orig-fn str beg at))
+            (let* ((disp (eat--t-term-display eat--t-term))
+                   (cursor (eat--t-disp-cursor disp))
+                   (width (eat--t-disp-width disp))
+                   (x (eat--t-cur-x cursor))
+                   (cw (char-width (aref str at))))
+              (cond
+               ;; Fits after all, or Eat already wraps (pending wrap).
+               ((or (> x width) (<= (+ x cw -1) width))
+                (funcall orig-fn str at (1+ at)))
+               ((and (eat--t-term-auto-margin eat--t-term) (<= cw width))
+                ;; Step past the last column into Eat's pending-wrap
+                ;; state; its write then wraps before the character.
+                (unless (or (eobp) (eq (char-after) ?\n))
+                  (forward-char 1))
+                (setf (eat--t-cur-x cursor) (1+ width))
+                (funcall orig-fn str at (1+ at)))))
+            (setq beg (1+ at))))))))
+
+(defconst tmux-control--vt-advice
+  '((eat--t-write . tmux-control--eat-write-wide-advice)
+    (eat--t-cur-down . tmux-control--eat-cur-down-advice)
+    (eat--t-cur-up . tmux-control--eat-cur-up-advice)
+    (eat--t-cur-vertical-abs . tmux-control--eat-absolute-row-advice)
+    (eat--t-beg-of-next-line . tmux-control--eat-next-line-advice)
+    (eat--t-beg-of-prev-line . tmux-control--eat-prev-line-advice)
+    (eat--t-index . tmux-control--eat-index-advice)
+    (eat--t-line-feed . tmux-control--eat-line-feed-advice)
+    (eat--t-reverse-index . tmux-control--eat-reverse-index-advice)
+    (eat--t-scroll-up . tmux-control--eat-scroll-up-advice)
+    (eat--t-scroll-down . tmux-control--eat-scroll-down-advice)
+    (eat--t-insert-line . tmux-control--eat-insert-line-advice)
+    (eat--t-delete-line . tmux-control--eat-delete-line-advice)
+    (eat--t-erase-in-disp . tmux-control--eat-erase-in-disp-advice))
+  "Eat functions and the advice that corrects them while rendering.")
+
+(dolist (entry tmux-control--vt-advice)
+  (advice-remove (car entry) (cdr entry))
+  (advice-add (car entry) :around (cdr entry)))
+
+(defun tmux-control--bare-line-feed-p (output)
+  "Return non-nil when OUTPUT has a line feed not after a carriage return.
+Jumps from line feed to line feed, so output made of CR LF lines costs a
+search per line rather than a regexp attempt at every character."
+  (let ((i 0) (bare nil))
+    (while (and (not bare) (setq i (string-search "\n" output i)))
+      (when (or (= i 0) (/= (aref output (1- i)) ?\r))
+        (setq bare t))
+      (setq i (1+ i)))
+    bare))
+
+(defun tmux-control--bare-line-feeds-to-index (output)
+  "Return OUTPUT with each line feed not after a carriage return as IND.
+A terminal moves down a row on a bare LF and keeps the column; Eat also
+returns to column one.  Programs in raw mode (the pane's terminal has no
+output processing) move down with a bare LF, so Eat would misplace what
+they draw next.  ESC D (IND) moves down keeping the column.  CR LF stays
+as it is, Eat's fast path.  A line feed inside an OSC, DCS, APC, PM or
+SOS string is left alone."
+  (if (not (tmux-control--bare-line-feed-p output))
+      output
+    (let ((pieces nil) (start 0) (i 0) (end (length output)))
+      (while (setq i (string-match "\n\\|\e[]P_^X]" output i))
+        (if (/= (aref output i) ?\n)
+            ;; Skip a string sequence to its BEL or ST terminator.
+            (setq i (if (string-match "\a\\|\e\\\\" output (+ i 2))
+                        (match-end 0)
+                      end))
+          (when (or (= i 0) (/= (aref output (1- i)) ?\r))
+            (push (substring output start i) pieces)
+            (push "\eD" pieces)
+            (setq start (1+ i)))
+          (setq i (1+ i))))
+      (push (substring output start) pieces)
+      (apply #'concat (nreverse pieces)))))
+
 (defun tmux-control--feed-terminal (output)
   "Process decoded terminal OUTPUT into Eat without redisplaying.
 
@@ -6752,15 +7157,20 @@ whole before they reach Eat."
   (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
     (let ((inhibit-read-only t)
           (tmux-control--suppress-responses t)
-          (tmux-control--combining-write-scan nil))
-      (if (and (= 0 (length tmux-control--utf8-carry))
-               (not (string-match-p tmux-control--eight-bit-char-regexp output)))
-          ;; Fast path: no pending partial char and no raw bytes.
-          (eat-term-process-output tmux-control--terminal output)
+          (tmux-control--combining-write-scan nil)
+          (tmux-control--vt-fixes tmux-control-correct-emulation))
+      ;; Fast path: no pending partial char and no raw bytes.
+      (unless (and (= 0 (length tmux-control--utf8-carry))
+                   (not (string-match-p tmux-control--eight-bit-char-regexp
+                                        output)))
         (let ((res (tmux-control--utf8-decode-stream
                     tmux-control--utf8-carry output)))
-          (setq tmux-control--utf8-carry (cdr res))
-          (eat-term-process-output tmux-control--terminal (car res))))
+          (setq tmux-control--utf8-carry (cdr res)
+                output (car res))))
+      (eat-term-process-output tmux-control--terminal
+                               (if tmux-control--vt-fixes
+                                   (tmux-control--bare-line-feeds-to-index output)
+                                 output))
       (setq tmux-control--display-dirty t))))
 
 (defun tmux-control--flush-display (sync-windows)
@@ -9451,6 +9861,8 @@ also does its usual cleanup."
   (advice-remove #'eat--synchronize-scroll
                  #'tmux-control--eat-synchronize-scroll-advice)
   (advice-remove #'eat-self-input #'tmux-control--eat-input-sync-advice)
+  (dolist (entry tmux-control--vt-advice)
+    (advice-remove (car entry) (cdr entry)))
   (remove-hook 'window-size-change-functions
                #'tmux-control--scrollback-follow-resize)
   (remove-hook 'window-size-change-functions #'tmux-control--on-frame-size-change)

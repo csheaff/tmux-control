@@ -110,17 +110,27 @@ A tab moves to the next multiple of 8, but never past the last column."""
     return "".join(out)
 
 
-def render_emacs(cases, workdir):
+def render_emacs(cases, workdir, timeout=None):
+    """Render CASES in one Emacs; a case that never finishes is reported.
+If the batch does not finish within TIMEOUT seconds (by default a few per
+case), each case is rendered alone with a short limit, so a hang -- an
+emulator loop that never returns -- names its case instead of stalling."""
     inp, out = os.path.join(workdir, "cases.json"), os.path.join(workdir, "out.json")
     with open(inp, "w") as f:
         json.dump([{"w": w, "h": h, "b64": base64.b64encode(d).decode()}
                    for w, h, d in cases], f)
     # Load the source by path: a tmux-control.elc left from another branch
     # can carry a newer timestamp than the source it no longer matches.
-    r = subprocess.run([EMACS, "-Q", "--batch", "-L", EAT_DIR, "-L", ROOT,
-                        "-l", os.path.join(ROOT, "tmux-control.el"), "-l",
-                        os.path.join(HERE, "vt-oracle-render.el"), inp, out],
-                       capture_output=True, text=True)
+    cmd = [EMACS, "-Q", "--batch", "-L", EAT_DIR, "-L", ROOT,
+           "-l", os.path.join(ROOT, "tmux-control.el"), "-l",
+           os.path.join(HERE, "vt-oracle-render.el"), inp, out]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=timeout or 30 + 2 * len(cases))
+    except subprocess.TimeoutExpired:
+        if len(cases) == 1:
+            return [{"error": "render did not finish (an emulator loop?)"}]
+        return [render_emacs([case], workdir, timeout=20)[0] for case in cases]
     if r.returncode:
         sys.exit(f"Emacs render failed:\n{r.stderr[-3000:]}")
     with open(out, encoding="utf-8") as f:
