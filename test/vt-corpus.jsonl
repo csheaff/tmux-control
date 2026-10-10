@@ -24,7 +24,7 @@
 {"name": "dl-with-background-color-extra-row", "size": "20x8", "input": "\u001b[42m\u001b[8B\u001b[2M", "expect": "diverge", "note": "DL with a background color set leaves an extra row"}
 {"name": "su-in-region-keeps-cursor", "size": "12x6", "input": "\u001b[4;6r\u001b[2;11H\u001b[5S", "expect": "diverge", "note": "SU does not move the cursor"}
 {"name": "su-in-region-text", "size": "12x6", "input": "gdiabjjaeecb\u001b[4;6r\u001b[6S", "expect": "diverge", "note": "SU scrolls only the region"}
-{"name": "ri-in-region", "size": "12x6", "input": "\u001b[6;6Hehijfhjajgf\u001b[5;6r\u001bM", "expect": "diverge", "note": "RI at the screen top, outside the region"}
+{"name": "ri-outside-region", "size": "12x6", "input": "\u001b[6;6Hehijfhjajgf\u001b[5;6r\u001bM", "expect": "diverge", "note": "RI at the screen top, outside the region"}
 {"name": "ed2-keeps-cursor", "size": "12x6", "input": "\u001b[3;1H\u001b[2J", "expect": "diverge", "note": "ED 2 erases the screen without moving the cursor"}
 {"name": "ed1-keeps-cursor", "size": "12x6", "input": "\u001b[1J", "expect": "diverge", "note": "ED 1 does not move the cursor"}
 {"name": "bare-lf-keeps-column", "size": "12x6", "input": "\u001b[1;8H\n", "expect": "diverge", "note": "a bare LF moves down without returning to column 1"}

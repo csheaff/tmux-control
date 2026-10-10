@@ -805,7 +805,8 @@ make test-vt-oracle
 ```
 
 To look for new divergences, `make vt-fuzz` renders random escape
-sequences, minimizes each divergent one, and prints corpus-ready lines.
+sequences, minimizes the first divergent ones (20 by default; `--minimize`
+sets the number), and prints corpus-ready lines.
 `python3 test/vt-oracle.py check '\x1b[2;3r\x1b[5B' -s 12x6` shows one
 stream's two screens side by side.
 

@@ -10,8 +10,8 @@
 ;; tmux-control's own output path (`tmux-control--feed-terminal', which applies
 ;; its UTF-8 reassembly and any Eat adjustments, then
 ;; `tmux-control--flush-display') into a fresh WxH terminal.
-;; OUT.json gets each screen's rows and the cursor (1-based), or the error the
-;; render signalled.
+;; OUT.json gets each screen's rows, the cursor as shown (1-based) and as
+;; Eat records it, or the error the render signalled.
 
 ;;; Code:
 
@@ -38,14 +38,20 @@ second column; `capture-pane' prints only the glyph."
       (tmux-control--feed-terminal (decode-coding-string bytes 'utf-8-unix))
       (tmux-control--flush-display nil)
       (let* ((top (eat-term-display-beginning term))
-             (cursor (eat-term-display-cursor term))
-             (rows (split-string (tmux-control-vt-oracle--visible top (point-max))
+             (rows (split-string (tmux-control-vt-oracle--visible
+                                  top (eat-term-end term))
                                  "\n"))
-             (bol (save-excursion (goto-char cursor) (line-beginning-position))))
+             (shown (eat-term-display-cursor term))
+             (bol (save-excursion (goto-char shown) (line-beginning-position)))
+             ;; Eat's own record of the cursor.  After a character fills the
+             ;; last column it holds column WIDTH+1, a pending wrap, as tmux
+             ;; does, while the cursor is shown on that character.
+             (cursor (eat--t-disp-cursor (eat--t-term-display term))))
         `((rows . ,(vconcat rows))
           (cy . ,(1+ (count-lines top bol)))
-          (cx . ,(1+ (string-width
-                      (tmux-control-vt-oracle--visible bol cursor)))))))))
+          (cx . ,(1+ (string-width (tmux-control-vt-oracle--visible bol shown))))
+          (sy . ,(eat--t-cur-y cursor))
+          (sx . ,(eat--t-cur-x cursor)))))))
 
 (let* ((in (pop command-line-args-left))
        (out (pop command-line-args-left))

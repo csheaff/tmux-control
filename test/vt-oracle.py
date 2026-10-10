@@ -22,7 +22,6 @@ the environment (the Makefile sets them).
 """
 import argparse
 import base64
-import codecs
 import json
 import os
 import random
@@ -54,35 +53,46 @@ class Tmux:
                               capture_output=True, text=True, check=check,
                               timeout=timeout)
 
-    def render(self, width, height, data, n):
+    def start(self, width, height, data, n):
+        """Start case N: a WIDTHxHEIGHT pane that writes DATA once."""
         path = os.path.join(self.dir, f"{n}.bin")
         with open(path, "wb") as f:
             f.write(data)
         cmd = (f"stty -opost; cat {path}; "
                f"tmux -S {self.sock} wait-for -S done{n}; exec sleep 100000")
-        session = f"c{n}"
-        self.run("new-session", "-d", "-s", session, "-x", str(width),
+        self.run("new-session", "-d", "-s", f"c{n}", "-x", str(width),
                  "-y", str(height), cmd, check=True)
+
+    def finish(self, height, n):
+        """Wait for case N's pane to have written its data; return its screen."""
+        session = f"c{n}"
         self.run("wait-for", f"done{n}")
         # The server reads pane output asynchronously; wait until two
         # consecutive snapshots agree before trusting one.
         snap, last = None, None
         for _ in range(50):
-            rows = self.run("capture-pane", "-p", "-t", session).stdout
-            cur = self.run("display", "-p", "-t", session,
-                           "#{cursor_x} #{cursor_y}").stdout
-            snap = (rows, cur)
+            snap = self.run("display", "-p", "-t", session,
+                            "#{cursor_x} #{cursor_y} #{pane_width}",
+                            ";", "capture-pane", "-p", "-t", session).stdout
             if snap == last:
                 break
             last = snap
         self.run("kill-session", "-t", session)
-        cx, cy = snap[1].split()
-        rows = [expand_tabs(r, width) for r in snap[0].split("\n")[:height]]
-        return {"rows": rows, "cx": int(cx) + 1, "cy": int(cy) + 1}
+        head, _, text = snap.partition("\n")
+        cx, cy, width = (int(v) for v in head.split())
+        rows = [expand_tabs(r, width) for r in text.split("\n")[:height]]
+        return {"rows": rows, "cx": cx + 1, "cy": cy + 1}
 
     def close(self):
         self.run("kill-server")
         shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def char_width(ch):
+    """Return the columns CH takes in a terminal: 0, 1 or 2."""
+    if unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in "WF" else 1
 
 
 def expand_tabs(row, width):
@@ -96,7 +106,7 @@ A tab moves to the next multiple of 8, but never past the last column."""
             col = max(col, stop)
         else:
             out.append(ch)
-            col += 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+            col += char_width(ch)
     return "".join(out)
 
 
@@ -105,9 +115,10 @@ def render_emacs(cases, workdir):
     with open(inp, "w") as f:
         json.dump([{"w": w, "h": h, "b64": base64.b64encode(d).decode()}
                    for w, h, d in cases], f)
-    # load-prefer-newer: never render with a stale tmux-control.elc.
-    r = subprocess.run([EMACS, "-Q", "--batch", "--eval", "(setq load-prefer-newer t)",
-                        "-L", EAT_DIR, "-L", ROOT, "-l", "tmux-control", "-l",
+    # Load the source by path: a tmux-control.elc left from another branch
+    # can carry a newer timestamp than the source it no longer matches.
+    r = subprocess.run([EMACS, "-Q", "--batch", "-L", EAT_DIR, "-L", ROOT,
+                        "-l", os.path.join(ROOT, "tmux-control.el"), "-l",
                         os.path.join(HERE, "vt-oracle-render.el"), inp, out],
                        capture_output=True, text=True)
     if r.returncode:
@@ -117,15 +128,35 @@ def render_emacs(cases, workdir):
 
 
 def normalize(rows, height):
-    rows = [r.rstrip() for r in rows][:height]
+    # tmux-control composes accents Eat would show apart; capture-pane may
+    # keep them decomposed.  Compare composed text, as tmux-control's own
+    # screen comparison does.
+    rows = [unicodedata.normalize("NFC", r).rstrip() for r in rows][:height]
     return rows + [""] * (height - len(rows))
+
+
+def cursor_matches(width, truth, mine):
+    """Whether Eat's cursor agrees with tmux's, as shown and as recorded.
+After a character fills the last column, tmux's cursor column is WIDTH+1
+(a pending wrap); Eat records the same but shows the cursor on the last
+cell, or on the start of a double-width character there."""
+    if (mine["sy"], mine["sx"]) != (truth["cy"], truth["cx"]):
+        return False
+    if mine["cy"] != truth["cy"]:
+        return False
+    if truth["cx"] <= width:
+        return mine["cx"] == truth["cx"]
+    return mine["cx"] in (width, width - 1)
 
 
 def compare(cases):
     """Render CASES [(w, h, bytes)]; return [(diff-or-None, tmux, emacs)]."""
     tmux = Tmux()
     try:
-        truth = [tmux.render(w, h, d, i) for i, (w, h, d) in enumerate(cases)]
+        # Start every pane first so they all run at once, then collect.
+        for i, (w, h, d) in enumerate(cases):
+            tmux.start(w, h, d, i)
+        truth = [tmux.finish(h, i) for i, (_, h, _) in enumerate(cases)]
         mine = render_emacs(cases, tmux.dir)
     finally:
         tmux.close()
@@ -140,9 +171,9 @@ def compare(cases):
                                                         normalize(e["rows"], h)))
                        if a != b)
             diff = f"screen differs from row {row + 1}"
-        elif (t["cy"], min(t["cx"], w)) != (e["cy"], min(e["cx"], w)):
-            diff = (f"cursor at row {e['cy']} col {e['cx']}, "
-                    f"tmux row {t['cy']} col {t['cx']}")
+        elif not cursor_matches(w, t, e):
+            diff = (f"cursor at row {e['cy']} col {e['cx']} "
+                    f"(recorded {e['sy']},{e['sx']}), tmux row {t['cy']} col {t['cx']}")
         else:
             diff = None
         results.append((diff, t, e))
@@ -196,14 +227,18 @@ def random_op(rng, w, h):
     n = rng.randint(1, h + 2)
     top = rng.randint(1, h - 1)
     return rng.choice([
-        text, text, "\r\n", "\r", "\n", "\x1b[H",
+        text, text, "\r\n", "\r", "\n", "\x1b[H", "\t", "\b", "\v", "\f", "中",
         f"\x1b[{rng.randint(1, h)};{rng.randint(1, w)}H",
         f"\x1b[{n}A", f"\x1b[{n}B", f"\x1b[{n}C", f"\x1b[{n}D",
-        f"\x1b[{rng.choice([0, 1, 2])}K", f"\x1b[{rng.choice([0, 1, 2])}J",
+        f"\x1b[{n}E", f"\x1b[{n}F", f"\x1b[{rng.randint(1, w)}G", f"\x1b[{rng.randint(1, h)}d",
+        f"\x1b[{n}e", f"\x1b[{n}a",
+        f"\x1b[{rng.choice([0, 1, 2])}K", f"\x1b[{rng.choice([0, 1, 2, 3])}J",
         f"\x1b[{n}L", f"\x1b[{n}M", f"\x1b[{n}@", f"\x1b[{n}P", f"\x1b[{n}X",
-        f"\x1b[{n}S", f"\x1b[{n}T", "\x1bM", "\x1bD", "\x1bE",
+        f"\x1b[{n}S", f"\x1b[{n}T", "\x1bM", "\x1bD", "\x1bE", "\x1b7", "\x1b8",
         f"\x1b[{top};{rng.randint(top + 1, h)}r", "\x1b[r",
         f"\x1b[{rng.choice([0, 7, 31, 42])}m",
+        "\x1b[4h", "\x1b[4l", "\x1b[?7l", "\x1b[?7h", "\x1bH", "\x1b[3g", "\x1b[0g",
+        f"\x1b[{rng.randint(1, 3)}I", f"\x1b[{rng.randint(1, 3)}Z",
     ])
 
 
@@ -212,18 +247,20 @@ def diverges(w, h, ops):
 
 
 def minimize(w, h, ops):
-    """Delta-debug OPS to a minimal list that still diverges."""
+    """Delta-debug OPS to a minimal list that still diverges.
+Each round renders every one-chunk removal together, in one tmux server
+and one Emacs, and keeps the first that still diverges."""
     chunk = max(1, len(ops) // 2)
     while chunk:
-        i, shrunk = 0, False
-        while i < len(ops):
-            trial = ops[:i] + ops[i + chunk:]
-            if trial and diverges(w, h, trial):
-                ops, shrunk = trial, True
-            else:
-                i += chunk
-        if not shrunk:
+        trials = [t for t in (ops[:i] + ops[i + chunk:]
+                              for i in range(0, len(ops), chunk)) if t]
+        results = compare([(w, h, "".join(t).encode()) for t in trials]) if trials else []
+        hit = next((t for t, (diff, _, _) in zip(trials, results) if diff), None)
+        if hit is None:
             chunk //= 2
+        else:
+            ops = hit
+            chunk = min(chunk, max(1, len(ops) // 2))
     return ops
 
 
@@ -247,9 +284,16 @@ def cmd_fuzz(args):
     return 0
 
 
+def parse_escapes(text):
+    """Return TEXT with Python string escapes (\\x1b, \\n, \\u4e2d) decoded.
+Characters typed as themselves, such as 中, are kept."""
+    ascii_text = text.encode("ascii", "backslashreplace").decode("ascii")
+    return ascii_text.encode("ascii").decode("unicode_escape")
+
+
 def cmd_check(args):
     w, h = parse_size(args.size)
-    data = codecs.decode(args.bytes, "unicode_escape").encode("latin-1").decode("utf-8").encode()
+    data = parse_escapes(args.bytes).encode("utf-8")
     diff, t, e = compare([(w, h, data)])[0]
     show(w, h, t, e)
     print(diff or "match")
