@@ -7264,6 +7264,77 @@ whole before they reach Eat."
                                  output))
       (setq tmux-control--display-dirty t))))
 
+(defconst tmux-control--eat-redisplay-source-hash
+  "1d810829041592444f3882afa7e03b1a718aa409"
+  "`sha1' of `eat-term-redisplay' as read from eat.el, the version that
+`tmux-control--eat-redisplay-advice' reproduces (Eat 0.9.4 and its
+development head).  Another version keeps Eat's own function.")
+
+(defvar tmux-control--eat-redisplay-matches 'unknown
+  "Whether this Eat's `eat-term-redisplay' is the one tmux-control copies.
+`unknown' until `tmux-control--eat-redisplay-matches-p' first checks.")
+
+(defun tmux-control--eat-redisplay-matches-p ()
+  "Return non-nil when Eat's redisplay is the version tmux-control copies.
+Reads its definition from eat.el once and compares it, so a different
+Eat -- or one installed without its source -- keeps Eat's own function."
+  (when (eq tmux-control--eat-redisplay-matches 'unknown)
+    (setq tmux-control--eat-redisplay-matches
+          (let ((file (or (locate-library "eat.el" t)
+                          (locate-library "eat.el.gz" t))))
+            (and file
+                 (ignore-errors
+                   (with-temp-buffer
+                     (insert-file-contents file)
+                     (goto-char (point-min))
+                     (and (re-search-forward "^(defun eat-term-redisplay " nil t)
+                          (progn
+                            (goto-char (match-beginning 0))
+                            (equal (sha1 (prin1-to-string (read (current-buffer))))
+                                   tmux-control--eat-redisplay-source-hash)))))))))
+  tmux-control--eat-redisplay-matches)
+
+(defun tmux-control--eat-redisplay-advice (orig-fn terminal)
+  "Run Eat's redisplay of TERMINAL without leaving a marker behind.
+After the screen scrolls, `eat-term-redisplay' joins the lines that left
+it, bounded by a marker it never detaches.  Until garbage collection
+unchains it, every later insertion and deletion in the buffer updates it
+too, so a pane that keeps scrolling (a log, a build, an agent) gets
+steadily slower to render: measured at 10 times slower per change after
+30 seconds of streaming, and back to normal only after a collection --
+which a high `gc-cons-threshold' postpones.  Same work, marker detached.
+Other Eat buffers keep Eat's own function, and so does an Eat whose
+redisplay is not the version copied here (see
+`tmux-control--eat-redisplay-matches-p').  ORIG-FN is
+`eat-term-redisplay'."
+  (if (not (and (with-current-buffer (eat--t-term-buffer terminal)
+                  (derived-mode-p 'tmux-control-mode))
+                (tmux-control--eat-redisplay-matches-p)))
+      (funcall orig-fn terminal)
+    (let ((inhibit-quit t))
+      (eat--t-with-env terminal
+        (let ((disp (eat--t-term-display eat--t-term)))
+          (when (< (eat--t-disp-old-begin disp)
+                   (eat--t-disp-begin disp))
+            ;; Join long lines.
+            (let ((limit (copy-marker (1- (eat--t-disp-begin disp)))))
+              (unwind-protect
+                  (save-excursion
+                    (goto-char (max (1- (eat--t-disp-old-begin disp))
+                                    (point-min)))
+                    (while (< (point) limit)
+                      (eat--t-join-long-line limit)))
+                (set-marker limit nil)))
+            ;; Truncate scrollback.
+            (when eat-term-scrollback-size
+              (delete-region
+               (point-min)
+               (max (point-min) (- (point) eat-term-scrollback-size))))
+            (set-marker (eat--t-disp-old-begin disp)
+                        (eat--t-disp-begin disp))))))))
+
+(advice-add 'eat-term-redisplay :around #'tmux-control--eat-redisplay-advice)
+
 (defun tmux-control--flush-display (sync-windows)
   "Redisplay Eat once when output has been fed since the last flush.
 SYNC-WINDOWS is the result of `tmux-control--current-sync-windows' taken
@@ -9954,6 +10025,7 @@ also does its usual cleanup."
   (advice-remove #'eat-self-input #'tmux-control--eat-input-sync-advice)
   (dolist (entry tmux-control--vt-advice)
     (advice-remove (car entry) (cdr entry)))
+  (advice-remove 'eat-term-redisplay #'tmux-control--eat-redisplay-advice)
   (remove-hook 'window-size-change-functions
                #'tmux-control--scrollback-follow-resize)
   (remove-hook 'window-size-change-functions #'tmux-control--on-frame-size-change)
