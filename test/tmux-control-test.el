@@ -4870,6 +4870,15 @@ receives in `synced' (a list of lists, one per sync call)."
                         #'tmux-control--eat-redisplay-advice))
           (should (equal-including-properties ours (buffer-string))))))))
 
+(ert-deftest tmux-control-test-terminal-buffers-keep-no-undo ()
+  ;; Output only ever changes these buffers; recording undo for it piled up
+  ;; entries (and copies of deleted text) for nothing.
+  (with-temp-buffer
+    (tmux-control--reset-buffer)
+    (should (eq buffer-undo-list t))
+    (tmux-control--write-terminal "one\r\ntwo\r\n\e[2J\e[Hthree")
+    (should (eq buffer-undo-list t))))
+
 (ert-deftest tmux-control-test-alt-screen-sync-preserves-first-row ()
   (save-window-excursion
     (with-temp-buffer
