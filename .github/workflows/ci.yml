@@ -122,3 +122,6 @@ jobs:
 
       - name: Integration tests (live tmux render oracle)
         run: make test-integration EAT_DIR="$HOME/eat"
+
+      - name: Terminal-emulation oracle (Eat against tmux)
+        run: make test-vt-oracle EAT_DIR="$HOME/eat"

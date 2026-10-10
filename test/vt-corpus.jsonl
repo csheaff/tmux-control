@@ -1,0 +1,30 @@
+{"name": "text-and-crlf", "size": "12x4", "input": "hello\r\nworld", "expect": "match", "note": ""}
+{"name": "autowrap", "size": "12x4", "input": "abcdefghijklmnopq", "expect": "match", "note": ""}
+{"name": "pending-wrap-then-cr", "size": "12x4", "input": "abcdefghijkl\rX", "expect": "match", "note": ""}
+{"name": "sgr-colors", "size": "12x4", "input": "\u001b[31mred\u001b[0m \u001b[1;42mbold\u001b[0m", "expect": "match", "note": ""}
+{"name": "cup-and-erase-in-line", "size": "12x4", "input": "aaaaaaaaaa\r\nbbbbbbbbbb\r\ncccccccccc\u001b[1;5H\u001b[0K\u001b[2;5H\u001b[1K\u001b[3;5H\u001b[2K", "expect": "match", "note": ""}
+{"name": "erase-below", "size": "12x4", "input": "aaaa\r\nbbbb\r\ncccc\r\ndddd\u001b[2;3H\u001b[0J", "expect": "match", "note": ""}
+{"name": "scroll-at-bottom", "size": "12x4", "input": "line0\r\nline1\r\nline2\r\nline3\r\nline4\r\nline5\r\nline6\r\nline7\r\nline8", "expect": "match", "note": ""}
+{"name": "box-drawing-and-wide", "size": "12x4", "input": "中文 ok\r\n─│╭╮╰╯", "expect": "match", "note": ""}
+{"name": "cursor-clamps", "size": "12x4", "input": "\u001b[20C\u001b[20Bx\u001b[30Ay\u001b[30Dz", "expect": "match", "note": ""}
+{"name": "tab-stops", "size": "12x4", "input": "a\tb\tc\r\nabcdefghij\tX", "expect": "match", "note": "a tab stops at the last column"}
+{"name": "insert-delete-chars", "size": "12x4", "input": "abcdefgh\u001b[1;3H\u001b[2@\u001b[1;6H\u001b[1P\u001b[1;2H\u001b[2X", "expect": "match", "note": ""}
+{"name": "save-restore-cursor", "size": "12x4", "input": "ab\u001b7\u001b[3;5Hx\u001b8y", "expect": "match", "note": ""}
+{"name": "alt-screen-roundtrip", "size": "12x4", "input": "main\u001b[?1049halt\u001b[?1049l", "expect": "match", "note": ""}
+{"name": "region-scrolls-at-bottom-margin", "size": "12x6", "input": "r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\u001b[2;4r\u001b[4;1H\r\nnew", "expect": "match", "note": ""}
+{"name": "insert-line-in-region", "size": "12x6", "input": "r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\u001b[2;5r\u001b[3;1H\u001b[1L", "expect": "match", "note": ""}
+{"name": "delete-line-full-screen", "size": "12x6", "input": "r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\u001b[4;1H\u001b[2M", "expect": "match", "note": ""}
+{"name": "bottom-row-erased-at-col-1", "size": "80x24", "input": "\u001b[2J\u001b[24;1Hx\u001b[24;1H\u001b[2K", "expect": "match", "note": "the emacs-eat#263 state renders correctly"}
+{"name": "cud-stops-at-bottom-margin", "size": "12x6", "input": "\u001b[2;3r\u001b[5B", "expect": "diverge", "note": "CUD from inside or above the scroll region stops at its bottom margin"}
+{"name": "cuu-stops-at-top-margin", "size": "12x6", "input": "\u001b[2;3r\u001bE\u001b[4A", "expect": "diverge", "note": "CUU from inside or below the scroll region stops at its top margin"}
+{"name": "dl-in-region-deletes-n", "size": "12x6", "input": "r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\u001b[2;5r\u001b[4;1H\u001b[2M", "expect": "diverge", "note": "DL inside a region deletes one line too few when N reaches the margin"}
+{"name": "il-outside-region-is-ignored", "size": "20x8", "input": "bdacdijigbbaghaehdcfhf\u001b[3;4r\u001b[3L", "expect": "diverge", "note": "IL with the cursor outside the scroll region does nothing"}
+{"name": "dl-outside-region-is-ignored", "size": "12x6", "input": "aijfghagjfa\u001b[2;3r\u001b[3M", "expect": "diverge", "note": "IL/DL with the cursor outside the scroll region do nothing"}
+{"name": "dl-with-background-color", "size": "12x6", "input": "\u001b[42m\u001b[7M", "expect": "diverge", "note": "DL of more lines than remain, with a background color set, signals wholenump -1"}
+{"name": "dl-with-background-color-extra-row", "size": "20x8", "input": "\u001b[42m\u001b[8B\u001b[2M", "expect": "diverge", "note": "DL with a background color set leaves an extra row"}
+{"name": "su-in-region-keeps-cursor", "size": "12x6", "input": "\u001b[4;6r\u001b[2;11H\u001b[5S", "expect": "diverge", "note": "SU does not move the cursor"}
+{"name": "su-in-region-text", "size": "12x6", "input": "gdiabjjaeecb\u001b[4;6r\u001b[6S", "expect": "diverge", "note": "SU scrolls only the region"}
+{"name": "ri-in-region", "size": "12x6", "input": "\u001b[6;6Hehijfhjajgf\u001b[5;6r\u001bM", "expect": "diverge", "note": "RI at the screen top, outside the region"}
+{"name": "ed2-keeps-cursor", "size": "12x6", "input": "\u001b[3;1H\u001b[2J", "expect": "diverge", "note": "ED 2 erases the screen without moving the cursor"}
+{"name": "ed1-keeps-cursor", "size": "12x6", "input": "\u001b[1J", "expect": "diverge", "note": "ED 1 does not move the cursor"}
+{"name": "bare-lf-keeps-column", "size": "12x6", "input": "\u001b[1;8H\n", "expect": "diverge", "note": "a bare LF moves down without returning to column 1"}

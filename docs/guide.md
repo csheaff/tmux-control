@@ -791,6 +791,24 @@ switching, and the tab bar's activity flags.  It needs a real tmux on `PATH`
 make test-integration
 ```
 
+A **terminal-emulation oracle** (`test/vt-oracle.py`) checks the emulator
+itself, below the connection.  It feeds the same bytes to a real tmux pane
+and, through tmux-control's own output path, to a headless Eat terminal, and
+compares the screen text and cursor.  `test/vt-corpus.jsonl` holds everyday
+output that must match, plus minimized repros of known Eat divergences
+(marked `"expect": "diverge"`, each with a note).  The run fails on a
+regression, and also when a known divergence starts matching, so its entry
+gets flipped to `"match"`:
+
+```sh
+make test-vt-oracle
+```
+
+To look for new divergences, `make vt-fuzz` renders random escape
+sequences, minimizes each divergent one, and prints corpus-ready lines.
+`python3 test/vt-oracle.py check '\x1b[2;3r\x1b[5B' -s 12x6` shows one
+stream's two screens side by side.
+
 For the GUI multi-pane tiling — which needs a real frame and can't be
 checked in batch — `test/tmux-control-live-oracle.el` exposes the same
 render-vs-`capture-pane` comparison as commands to run against a live GUI
