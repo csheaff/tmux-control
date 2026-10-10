@@ -6619,6 +6619,11 @@ receives in `synced' (a list of lists, one per sync call)."
                  "\e]0;x\ny\a\eD"))
   (should (equal (tmux-control--bare-line-feeds-to-index "\ePq\n\e\\\n")
                  "\ePq\n\e\\\eD"))
+  ;; BEL ends an OSC but is payload inside a DCS (or APC, PM, SOS).
+  (should (equal (tmux-control--bare-line-feeds-to-index "\ePq\a\nx\e\\\n")
+                 "\ePq\a\nx\e\\\eD"))
+  (should (equal (tmux-control--bare-line-feeds-to-index "\e_a\a\n\e\\")
+                 "\e_a\a\n\e\\"))
   ;; An unterminated string runs to the end of the chunk.
   (should (equal (tmux-control--bare-line-feeds-to-index "x\n\e]0;t\nu")
                  "x\eD\e]0;t\nu"))

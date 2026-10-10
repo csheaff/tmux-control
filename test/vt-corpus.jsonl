@@ -37,3 +37,10 @@
 {"name": "index-below-region-on-last-row", "size": "10x6", "input": "r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\u001b[2;3r\u001b[6;1H\u001bD\u001bD", "expect": "match", "note": "IND on the last row, below the region, does nothing"}
 {"name": "line-feed-below-region-on-last-row", "size": "10x6", "input": "r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\u001b[2;3r\u001b[6;3H\r\nX", "expect": "match", "note": "CR LF on the last row, below the region, only returns"}
 {"name": "ri-above-region-on-first-row", "size": "10x6", "input": "r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\u001b[3;5r\u001b[1;1H\u001bMX", "expect": "match", "note": "RI on the first row, above the region, does nothing"}
+{"name": "wrap-at-region-bottom-margin", "size": "20x8", "input": "\u001b[1;3r\u001b[6B\tgdcfcfbehefhggcbccfi", "expect": "match", "note": "text that wraps on the region's bottom margin scrolls the region and continues on that row"}
+{"name": "pending-wrap-kept-by-delete-line", "size": "12x6", "input": "dbddiaggaded\u001b[3M", "expect": "match", "note": "DL keeps a pending wrap"}
+{"name": "pending-wrap-kept-by-index", "size": "20x8", "input": "ijdfffjcadcighfefchj\n", "expect": "match", "note": "a bare LF (IND) keeps a pending wrap"}
+{"name": "pending-wrap-kept-by-reverse-index", "size": "20x8", "input": "ddachbdedhdfiggjbgdb\u001bM", "expect": "match", "note": "RI keeps a pending wrap"}
+{"name": "pending-wrap-kept-by-scroll", "size": "9x12", "input": "jaaahiffe\u001b[9S", "expect": "match", "note": "SU keeps a pending wrap"}
+{"name": "pending-wrap-kept-by-vpa", "size": "9x12", "input": "ecbjbbhgc\u001b[7d", "expect": "match", "note": "VPA keeps a pending wrap"}
+{"name": "pending-wrap-clamped-by-cuu", "size": "12x6", "input": "fjecieebecje\u001b[8A", "expect": "match", "note": "CUU moves a pending wrap onto the last column, even when it cannot move up"}
