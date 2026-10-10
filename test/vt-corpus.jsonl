@@ -15,16 +15,46 @@
 {"name": "insert-line-in-region", "size": "12x6", "input": "r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\u001b[2;5r\u001b[3;1H\u001b[1L", "expect": "match", "note": ""}
 {"name": "delete-line-full-screen", "size": "12x6", "input": "r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\u001b[4;1H\u001b[2M", "expect": "match", "note": ""}
 {"name": "bottom-row-erased-at-col-1", "size": "80x24", "input": "\u001b[2J\u001b[24;1Hx\u001b[24;1H\u001b[2K", "expect": "match", "note": "the emacs-eat#263 state renders correctly"}
-{"name": "cud-stops-at-bottom-margin", "size": "12x6", "input": "\u001b[2;3r\u001b[5B", "expect": "diverge", "note": "CUD from inside or above the scroll region stops at its bottom margin"}
-{"name": "cuu-stops-at-top-margin", "size": "12x6", "input": "\u001b[2;3r\u001bE\u001b[4A", "expect": "diverge", "note": "CUU from inside or below the scroll region stops at its top margin"}
-{"name": "dl-in-region-deletes-n", "size": "12x6", "input": "r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\u001b[2;5r\u001b[4;1H\u001b[2M", "expect": "diverge", "note": "DL inside a region deletes one line too few when N reaches the margin"}
-{"name": "il-outside-region-is-ignored", "size": "20x8", "input": "bdacdijigbbaghaehdcfhf\u001b[3;4r\u001b[3L", "expect": "diverge", "note": "IL with the cursor outside the scroll region does nothing"}
-{"name": "dl-outside-region-is-ignored", "size": "12x6", "input": "aijfghagjfa\u001b[2;3r\u001b[3M", "expect": "diverge", "note": "IL/DL with the cursor outside the scroll region do nothing"}
-{"name": "dl-with-background-color", "size": "12x6", "input": "\u001b[42m\u001b[7M", "expect": "diverge", "note": "DL of more lines than remain, with a background color set, signals wholenump -1"}
-{"name": "dl-with-background-color-extra-row", "size": "20x8", "input": "\u001b[42m\u001b[8B\u001b[2M", "expect": "diverge", "note": "DL with a background color set leaves an extra row"}
-{"name": "su-in-region-keeps-cursor", "size": "12x6", "input": "\u001b[4;6r\u001b[2;11H\u001b[5S", "expect": "diverge", "note": "SU does not move the cursor"}
-{"name": "su-in-region-text", "size": "12x6", "input": "gdiabjjaeecb\u001b[4;6r\u001b[6S", "expect": "diverge", "note": "SU scrolls only the region"}
-{"name": "ri-outside-region", "size": "12x6", "input": "\u001b[6;6Hehijfhjajgf\u001b[5;6r\u001bM", "expect": "diverge", "note": "RI at the screen top, outside the region"}
-{"name": "ed2-keeps-cursor", "size": "12x6", "input": "\u001b[3;1H\u001b[2J", "expect": "diverge", "note": "ED 2 erases the screen without moving the cursor"}
-{"name": "ed1-keeps-cursor", "size": "12x6", "input": "\u001b[1J", "expect": "diverge", "note": "ED 1 does not move the cursor"}
-{"name": "bare-lf-keeps-column", "size": "12x6", "input": "\u001b[1;8H\n", "expect": "diverge", "note": "a bare LF moves down without returning to column 1"}
+{"name": "cud-stops-at-bottom-margin", "size": "12x6", "input": "\u001b[2;3r\u001b[5B", "expect": "match", "note": "CUD from inside or above the scroll region stops at its bottom margin"}
+{"name": "cuu-stops-at-top-margin", "size": "12x6", "input": "\u001b[2;3r\u001bE\u001b[4A", "expect": "match", "note": "CUU from inside or below the scroll region stops at its top margin"}
+{"name": "dl-in-region-deletes-n", "size": "12x6", "input": "r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\u001b[2;5r\u001b[4;1H\u001b[2M", "expect": "match", "note": "DL inside a region deletes one line too few when N reaches the margin"}
+{"name": "il-outside-region-acts-on-rest-of-screen", "size": "20x8", "input": "bdacdijigbbaghaehdcfhf\u001b[3;4r\u001b[3L", "expect": "match", "note": "IL with the cursor outside the scroll region inserts in the rest of the screen, as tmux does"}
+{"name": "dl-outside-region-acts-on-rest-of-screen", "size": "12x6", "input": "aijfghagjfa\u001b[2;3r\u001b[3M", "expect": "match", "note": "DL with the cursor outside the scroll region deletes in the rest of the screen, as tmux does"}
+{"name": "dl-with-background-color", "size": "12x6", "input": "\u001b[42m\u001b[7M", "expect": "match", "note": "DL of more lines than remain, with a background color set, signals wholenump -1"}
+{"name": "dl-with-background-color-extra-row", "size": "20x8", "input": "\u001b[42m\u001b[8B\u001b[2M", "expect": "match", "note": "DL with a background color set leaves an extra row"}
+{"name": "su-in-region-keeps-cursor", "size": "12x6", "input": "\u001b[4;6r\u001b[2;11H\u001b[5S", "expect": "match", "note": "SU does not move the cursor"}
+{"name": "su-in-region-text", "size": "12x6", "input": "gdiabjjaeecb\u001b[4;6r\u001b[6S", "expect": "match", "note": "SU scrolls only the region"}
+{"name": "ri-outside-region", "size": "12x6", "input": "\u001b[6;6Hehijfhjajgf\u001b[5;6r\u001bM", "expect": "match", "note": "RI at the screen top, outside the region"}
+{"name": "ed2-keeps-cursor", "size": "12x6", "input": "\u001b[3;1H\u001b[2J", "expect": "match", "note": "ED 2 erases the screen without moving the cursor"}
+{"name": "ed1-keeps-cursor", "size": "12x6", "input": "\u001b[1J", "expect": "match", "note": "ED 1 does not move the cursor"}
+{"name": "bare-lf-keeps-column", "size": "12x6", "input": "\u001b[1;8H\n", "expect": "match", "note": "a bare LF moves down without returning to column 1"}
+{"name": "wide-char-on-last-column-wraps", "size": "12x3", "input": "abcdefghijk中X", "expect": "match", "note": "a double-width character with one column left wraps to the next row (Eat looped forever)"}
+{"name": "wide-char-on-last-column-no-autowrap", "size": "12x3", "input": "\u001b[?7labcdefghijk中X", "expect": "match", "note": "with autowrap off, a double-width character that does not fit is dropped (Eat looped forever)"}
+{"name": "wide-char-fills-last-columns", "size": "12x3", "input": "abcdefghij中", "expect": "match", "note": "a double-width character in the last two columns leaves a pending wrap"}
+{"name": "cnl-cpl", "size": "12x6", "input": "a\u001b[3;2H\u001b[1Eb\u001b[2Fc", "expect": "match", "note": "CNL moves down and CPL up, to column one (Eat swapped them)"}
+{"name": "cnl-stops-at-bottom-margin", "size": "10x6", "input": "r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\u001b[2;4r\u001b[3;3H\u001b[5E", "expect": "match", "note": "CNL stops at the region's bottom margin"}
+{"name": "ed3-erases-only-scrollback", "size": "10x4", "input": "aaa\r\nbbb\u001b[3J", "expect": "match", "note": "ED 3 erases the scrollback, not the screen"}
+{"name": "index-below-region-on-last-row", "size": "10x6", "input": "r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\u001b[2;3r\u001b[6;1H\u001bD\u001bD", "expect": "match", "note": "IND on the last row, below the region, does nothing"}
+{"name": "line-feed-below-region-on-last-row", "size": "10x6", "input": "r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\u001b[2;3r\u001b[6;3H\r\nX", "expect": "match", "note": "CR LF on the last row, below the region, only returns"}
+{"name": "ri-above-region-on-first-row", "size": "10x6", "input": "r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\u001b[3;5r\u001b[1;1H\u001bMX", "expect": "match", "note": "RI on the first row, above the region, does nothing"}
+{"name": "wrap-at-region-bottom-margin", "size": "20x8", "input": "\u001b[1;3r\u001b[6B\tgdcfcfbehefhggcbccfi", "expect": "match", "note": "text that wraps on the region's bottom margin scrolls the region and continues on that row"}
+{"name": "pending-wrap-kept-by-delete-line", "size": "12x6", "input": "dbddiaggaded\u001b[3M", "expect": "match", "note": "DL keeps a pending wrap"}
+{"name": "pending-wrap-kept-by-index", "size": "20x8", "input": "ijdfffjcadcighfefchj\n", "expect": "match", "note": "a bare LF (IND) keeps a pending wrap"}
+{"name": "pending-wrap-kept-by-reverse-index", "size": "20x8", "input": "ddachbdedhdfiggjbgdb\u001bM", "expect": "match", "note": "RI keeps a pending wrap"}
+{"name": "pending-wrap-kept-by-scroll", "size": "9x12", "input": "jaaahiffe\u001b[9S", "expect": "match", "note": "SU keeps a pending wrap"}
+{"name": "pending-wrap-kept-by-vpa", "size": "9x12", "input": "ecbjbbhgc\u001b[7d", "expect": "match", "note": "VPA keeps a pending wrap"}
+{"name": "pending-wrap-clamped-by-cuu", "size": "12x6", "input": "fjecieebecje\u001b[8A", "expect": "match", "note": "CUU moves a pending wrap onto the last column, even when it cannot move up"}
+{"name": "ed1-on-empty-row", "size": "9x4", "input": "ab\r\n\r\ncd\u001b[2;1H\u001b[1J", "expect": "match", "note": "ED 1 on an empty row erases it in place (Eat deleted the row's line break, shifting the screen up)"}
+{"name": "ed1-after-restore", "size": "9x4", "input": "\r\negjfeijjfcj\u001b8\u001b[1J", "expect": "match", "note": "ED 1 at the top-left of the screen keeps every row in place"}
+{"name": "el1-erases-whole-wide-char", "size": "9x3", "input": "ab中cd\u001b[1;4H\u001b[1K", "expect": "match", "note": "EL 1 ending on a double-width character's second column erases it"}
+{"name": "ed1-with-background", "size": "9x4", "input": "\u001b[42mab\r\ncd\u001b[2;5H\u001b[1J", "expect": "match", "note": "ED 1 with a background color set"}
+{"name": "tab-from-pending-wrap", "size": "12x6", "input": "gaabcidichba\t", "expect": "match", "note": "a tab from a pending wrap leaves the cursor there"}
+{"name": "vpr-ignored-by-tmux", "size": "12x6", "input": "\u001b[8e", "expect": "diverge", "note": "tmux ignores VPR (CSI e); Eat moves down.  Left as is: tmux's terminfo has no VPR, so programs do not send it there"}
+{"name": "cht-ignored-by-tmux", "size": "12x6", "input": "\u001b[2I", "expect": "diverge", "note": "tmux ignores CHT (CSI I); Eat tabs.  Left as is, as for VPR"}
+{"name": "tab-stops-cleared", "size": "12x6", "input": "\u001b[3g\t", "expect": "diverge", "note": "Eat has fixed tab stops every 8 columns; TBC and HTS change tmux's"}
+{"name": "tab-stop-set", "size": "9x12", "input": "cbg\u001bH\u001b[2D\t", "expect": "diverge", "note": "Eat has fixed tab stops every 8 columns; TBC and HTS change tmux's"}
+{"name": "backspace-onto-wide-char", "size": "12x6", "input": "中\b", "expect": "diverge", "note": "the cursor is on a double-width character's second column; Eat shows it on the first (it records the same column)"}
+{"name": "backspace-reverse-wrap", "size": "9x12", "input": "cgaddfjbabf\u001b[10;12r\f\b", "expect": "diverge", "note": "tmux moves a backspace at column one back onto a wrapped row above; Eat does not"}
+{"name": "el0-from-wide-second-column", "size": "9x3", "input": "ab中cd\u001b[1;4H\u001b[0K", "expect": "diverge", "note": "EL 0 from a double-width character's second column: tmux's grid keeps the character, Eat erases it"}
+{"name": "ich-most-of-row", "size": "9x3", "input": "ddfjibfh\r\u001b[8@", "expect": "diverge", "note": "tmux's grid blanks only the cells it moved when inserting more than half the row (a terminal attached to tmux shows the blanks); Eat blanks the whole gap"}
+{"name": "il-most-of-screen-outside-region", "size": "9x8", "input": "abc\r\ndef\u001b[3;7r\u001b[7L", "expect": "diverge", "note": "as for ICH: tmux's grid leaves old rows in the gap when inserting more than half the remaining rows"}
