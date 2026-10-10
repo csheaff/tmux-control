@@ -4767,9 +4767,10 @@ receives in `synced' (a list of lists, one per sync call)."
   (save-window-excursion
     (with-temp-buffer
       (switch-to-buffer (current-buffer))
-      (insert (mapconcat (lambda (i) (format "row %d" i)) (number-sequence 1 60) "\n"))
       (let* ((window (selected-window))
              (height (window-body-height window))
+             (_ (insert (mapconcat (lambda (i) (format "row %d" i))
+                                   (number-sequence 1 (+ 21 height 10)) "\n")))
              (top (save-excursion (goto-char (point-min)) (forward-line 20) (point)))
              (row (lambda (n) (save-excursion (goto-char top) (forward-line n) (point))))
              (asked nil))
@@ -4791,6 +4792,15 @@ receives in `synced' (a list of lists, one per sync call)."
           (set-window-start window (funcall row 5))
           (should (eq 'asked (tmux-control--cursor-visible-p
                               window (funcall row 2) top)))
+          (should asked)
+          ;; Partway through a pixel scroll the row a window height down can
+          ;; show at the bottom: Emacs decides (a batch frame keeps no
+          ;; vscroll, so report one).
+          (setq asked nil)
+          (set-window-start window top)
+          (cl-letf (((symbol-function 'window-vscroll) (lambda (&rest _) 7)))
+            (should (eq 'asked (tmux-control--cursor-visible-p
+                                window (funcall row height) top))))
           (should asked))))))
 
 (ert-deftest tmux-control-test-typing-sync-advice-scope ()

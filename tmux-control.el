@@ -7413,16 +7413,20 @@ ORIG-FN is Eat's scroll synchronization."
 (defun tmux-control--cursor-visible-p (window cursor screen-top)
   "Return non-nil when WINDOW shows the line of CURSOR, at least partly.
 SCREEN-TOP is the start of the terminal's current screen.  When the window
-starts within the live screen, at or above the cursor, count the rows to
-the cursor (fast, in C) against the window's height: every terminal row
-is one line.  Otherwise -- a window reading history above the screen, say
--- ask `pos-visible-in-window-p', which lays out the window from its start
+starts within the live screen, at or above the cursor, and is not partway
+through a pixel scroll, count the rows to the cursor (fast, in C) against
+the window's height: every terminal row is one line.  Otherwise -- a
+window reading history above the screen, say -- ask
+`pos-visible-in-window-p', which lays out the window from its start
 to the cursor and costs about a millisecond on a busy screen.  The quick
 answer can call a cursor visible that tall fallback glyphs pushed just
 below the window; such a window is following the live screen anyway, and
 `tmux-control--keep-cursor-visible' brings the cursor back into view."
   (let ((start (window-start window)))
-    (if (and screen-top (>= start screen-top) (<= start cursor))
+    (if (and screen-top (>= start screen-top) (<= start cursor)
+             ;; Partway through a pixel scroll, the row one window height
+             ;; down can already show at the bottom: ask Emacs.
+             (zerop (window-vscroll window t)))
         (< (count-lines start (save-excursion (goto-char cursor) (pos-bol)))
            (window-body-height window))
       (pos-visible-in-window-p cursor window t))))
