@@ -2375,7 +2375,7 @@ each wrapped in an evolving prompt line and a status bar.")
                 (`(add-hook ,hook ,function . ,_)
                  (push (list 'hook (eval hook t) (eval function t)) sites)))))
         (end-of-file nil)))
-    (should (= (length sites) 6))
+    (should (= (length sites) 7))
     ;; The emulation fixes are installed from a table rather than one
     ;; `advice-add' form each.
     (dolist (entry tmux-control--vt-advice)
@@ -4778,6 +4778,36 @@ receives in `synced' (a list of lists, one per sync call)."
         (tmux-control--eat-input-sync-advice #'orig 1 ?a)
         (should (functionp (car seen)))
         (should-not (eq (car seen) 'eat-own))))))
+
+;; Eat's redisplay after a scroll bounds its line joining with a marker it
+;; never detaches; chained until garbage collection, each one slows every
+;; later change to the buffer.
+(ert-deftest tmux-control-test-redisplay-detaches-its-marker ()
+  (let ((made nil)
+        (stream (mapconcat (lambda (i) (format "row %02d of a scrolling pane\r\n" i))
+                           (number-sequence 1 30) "")))
+    (with-temp-buffer
+      (tmux-control--reset-buffer)
+      (eat-term-resize tmux-control--terminal 12 4)
+      (let ((copy (symbol-function 'copy-marker)))
+        (cl-letf (((symbol-function 'copy-marker)
+                   (lambda (&rest args) (car (push (apply copy args) made)))))
+          (dolist (line (split-string stream "\n" t))
+            (tmux-control--write-terminal (concat line "\n")))))
+      (should made)
+      (should-not (seq-some #'marker-buffer made))
+      ;; Same text as Eat's own redisplay leaves.
+      (let ((ours (buffer-string)))
+        (with-temp-buffer
+          (tmux-control--reset-buffer)
+          (eat-term-resize tmux-control--terminal 12 4)
+          (advice-remove 'eat-term-redisplay #'tmux-control--eat-redisplay-advice)
+          (unwind-protect
+              (dolist (line (split-string stream "\n" t))
+                (tmux-control--write-terminal (concat line "\n")))
+            (advice-add 'eat-term-redisplay :around
+                        #'tmux-control--eat-redisplay-advice))
+          (should (equal-including-properties ours (buffer-string))))))))
 
 (ert-deftest tmux-control-test-alt-screen-sync-preserves-first-row ()
   (save-window-excursion
