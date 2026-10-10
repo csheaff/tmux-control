@@ -4713,8 +4713,9 @@ receives in `synced' (a list of lists, one per sync call)."
 
 (ert-deftest tmux-control-test-typing-still-syncs-window-reading-history ()
   ;; A window scrolled into history (starting above the live screen), one
-  ;; whose point is off the cursor, or one partway through a pixel scroll
-  ;; still jumps back to the cursor on the first key, as Eat does.
+  ;; whose point is off the cursor, one that doesn't show the cursor line,
+  ;; or one partway through a pixel scroll still jumps back to the cursor on
+  ;; the first key, as Eat does.
   (tmux-control-test--with-typing-window
     (tmux-control--write-terminal
      (mapconcat (lambda (i) (format "line %d" i)) (number-sequence 1 80) "\r\n"))
@@ -4743,7 +4744,15 @@ receives in `synced' (a list of lists, one per sync call)."
                  (lambda (&rest _) nil)))
         (eat-self-input 1 ?d)
         (should (memq window (car synced))))
-      (should (equal sent '("d" "c" "b" "a"))))))
+      ;; Partway through a pixel scroll (a batch frame keeps no vscroll, so
+      ;; report one), with everything else following.
+      (cl-letf (((symbol-function 'pos-visible-in-window-p)
+                 (lambda (&rest _) t))
+                ((symbol-function 'window-vscroll)
+                 (lambda (&rest _) 7)))
+        (eat-self-input 1 ?e)
+        (should (memq window (car synced))))
+      (should (equal sent '("e" "d" "c" "b" "a"))))))
 
 (ert-deftest tmux-control-test-typing-sync-advice-scope ()
   ;; Mouse events and buffers outside tmux-control get Eat's own sync
