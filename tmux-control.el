@@ -7023,20 +7023,68 @@ region's bottom with a background color set.  ORIG-FN is
       (tmux-control--vt-scroll-rows y (tmux-control--vt-line-op-bottom y)
                                     (max (or n 1) 1) nil))))
 
+(defun tmux-control--vt-erase-row-start (y x)
+  "Blank columns 1 to X of screen row Y, as EL 1 does.
+A double-width character whose first column is erased goes entirely: Eat
+keeps an invisible padding cell before the glyph, and erasing only the
+padding would shift the glyph right.  With a background color set, the
+erased cells take it."
+  (tmux-control--vt-goto-row y)
+  (let* ((bol (point))
+         (len (- (pos-eol) bol))
+         (k (min x len))
+         (face (eat--t-term-face eat--t-term))
+         (attrs (and (eat--t-face-bg face) (eat--t-face-face face))))
+    (when (and (> k 0) (< k len)
+               (get-text-property (+ bol k -1) 'eat--t-invisible-space))
+      (setq k (1+ k)))
+    (delete-region bol (+ bol k))
+    (let ((fill (make-string (if attrs (max k x) k) ?\s)))
+      (when attrs
+        (put-text-property 0 (length fill) 'face attrs fill)
+        (put-text-property 0 (length fill) 'font-lock-face attrs fill))
+      (insert fill))))
+
+(defun tmux-control--eat-erase-in-line-advice (orig-fn &optional n)
+  "Make EL 1 erase whole double-width characters.
+See `tmux-control--vt-erase-row-start'.  ORIG-FN is
+`eat--t-erase-in-line', called with N."
+  (if (not (and tmux-control--vt-fixes (eq n 1)))
+      (funcall orig-fn n)
+    (let* ((cursor (tmux-control--vt-cursor))
+           (y (eat--t-cur-y cursor))
+           (x (eat--t-cur-x cursor)))
+      (tmux-control--vt-erase-row-start y x)
+      (tmux-control--vt-place-cursor y x))))
+
+(defun tmux-control--eat-horizontal-tab-advice (orig-fn &optional n)
+  "Make a tab from a pending wrap leave the cursor there, as tmux does.
+Eat moves it back onto the last column.  ORIG-FN is
+`eat--t-horizontal-tab', called with N."
+  (unless (and tmux-control--vt-fixes (tmux-control--vt-pending-wrap-p))
+    (funcall orig-fn n)))
+
 (defun tmux-control--eat-erase-in-disp-advice (orig-fn &optional n)
   "Erase the display without moving the cursor; ED 3 erases only scrollback.
-Eat moves the cursor home for ED 2 and one column right for ED 1, and
-its ED 3 erases the screen as well.  ORIG-FN is `eat--t-erase-in-disp',
+Eat moves the cursor home for ED 2 and one column right for ED 1, its
+ED 1 on an empty row deletes the row's line break (shifting the screen
+up), and its ED 3 erases the screen as well.  ORIG-FN is `eat--t-erase-in-disp',
 called with N."
   (if (not (and tmux-control--vt-fixes (memq n '(1 2 3))))
       (funcall orig-fn n)
     (let* ((cursor (tmux-control--vt-cursor))
            (y (eat--t-cur-y cursor))
            (x (eat--t-cur-x cursor)))
-      (if (= n 3)
-          (let ((begin (eat--t-disp-begin (eat--t-term-display eat--t-term))))
-            (delete-region (point-min) begin))
-        (funcall orig-fn n))
+      (pcase n
+        (3 (delete-region (point-min)
+                          (eat--t-disp-begin (eat--t-term-display eat--t-term))))
+        (1 (let ((blank (tmux-control--vt-blank-row)))
+             (dotimes (i (1- y))
+               (tmux-control--vt-goto-row (1+ i))
+               (delete-region (point) (pos-eol))
+               (insert blank))
+             (tmux-control--vt-erase-row-start y x)))
+        (_ (funcall orig-fn n)))
       (tmux-control--vt-place-cursor y x))))
 
 
@@ -7122,7 +7170,9 @@ ORIG-FN is `eat--t-write', called with STR, BEG and END."
     (eat--t-scroll-down . tmux-control--eat-scroll-down-advice)
     (eat--t-insert-line . tmux-control--eat-insert-line-advice)
     (eat--t-delete-line . tmux-control--eat-delete-line-advice)
-    (eat--t-erase-in-disp . tmux-control--eat-erase-in-disp-advice))
+    (eat--t-erase-in-disp . tmux-control--eat-erase-in-disp-advice)
+    (eat--t-erase-in-line . tmux-control--eat-erase-in-line-advice)
+    (eat--t-horizontal-tab . tmux-control--eat-horizontal-tab-advice))
   "Eat functions and the advice that corrects them while rendering.")
 
 (dolist (entry tmux-control--vt-advice)

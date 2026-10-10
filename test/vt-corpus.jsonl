@@ -44,3 +44,17 @@
 {"name": "pending-wrap-kept-by-scroll", "size": "9x12", "input": "jaaahiffe\u001b[9S", "expect": "match", "note": "SU keeps a pending wrap"}
 {"name": "pending-wrap-kept-by-vpa", "size": "9x12", "input": "ecbjbbhgc\u001b[7d", "expect": "match", "note": "VPA keeps a pending wrap"}
 {"name": "pending-wrap-clamped-by-cuu", "size": "12x6", "input": "fjecieebecje\u001b[8A", "expect": "match", "note": "CUU moves a pending wrap onto the last column, even when it cannot move up"}
+{"name": "ed1-on-empty-row", "size": "9x4", "input": "ab\r\n\r\ncd\u001b[2;1H\u001b[1J", "expect": "match", "note": "ED 1 on an empty row erases it in place (Eat deleted the row's line break, shifting the screen up)"}
+{"name": "ed1-after-restore", "size": "9x4", "input": "\r\negjfeijjfcj\u001b8\u001b[1J", "expect": "match", "note": "ED 1 at the top-left of the screen keeps every row in place"}
+{"name": "el1-erases-whole-wide-char", "size": "9x3", "input": "ab中cd\u001b[1;4H\u001b[1K", "expect": "match", "note": "EL 1 ending on a double-width character's second column erases it"}
+{"name": "ed1-with-background", "size": "9x4", "input": "\u001b[42mab\r\ncd\u001b[2;5H\u001b[1J", "expect": "match", "note": "ED 1 with a background color set"}
+{"name": "tab-from-pending-wrap", "size": "12x6", "input": "gaabcidichba\t", "expect": "match", "note": "a tab from a pending wrap leaves the cursor there"}
+{"name": "vpr-ignored-by-tmux", "size": "12x6", "input": "\u001b[8e", "expect": "diverge", "note": "tmux ignores VPR (CSI e); Eat moves down.  Left as is: tmux's terminfo has no VPR, so programs do not send it there"}
+{"name": "cht-ignored-by-tmux", "size": "12x6", "input": "\u001b[2I", "expect": "diverge", "note": "tmux ignores CHT (CSI I); Eat tabs.  Left as is, as for VPR"}
+{"name": "tab-stops-cleared", "size": "12x6", "input": "\u001b[3g\t", "expect": "diverge", "note": "Eat has fixed tab stops every 8 columns; TBC and HTS change tmux's"}
+{"name": "tab-stop-set", "size": "9x12", "input": "cbg\u001bH\u001b[2D\t", "expect": "diverge", "note": "Eat has fixed tab stops every 8 columns; TBC and HTS change tmux's"}
+{"name": "backspace-onto-wide-char", "size": "12x6", "input": "中\b", "expect": "diverge", "note": "the cursor is on a double-width character's second column; Eat shows it on the first (it records the same column)"}
+{"name": "backspace-reverse-wrap", "size": "9x12", "input": "cgaddfjbabf\u001b[10;12r\f\b", "expect": "diverge", "note": "tmux moves a backspace at column one back onto a wrapped row above; Eat does not"}
+{"name": "el0-from-wide-second-column", "size": "9x3", "input": "ab中cd\u001b[1;4H\u001b[0K", "expect": "diverge", "note": "EL 0 from a double-width character's second column: tmux's grid keeps the character, Eat erases it"}
+{"name": "ich-most-of-row", "size": "9x3", "input": "ddfjibfh\r\u001b[8@", "expect": "diverge", "note": "tmux's grid blanks only the cells it moved when inserting more than half the row (a terminal attached to tmux shows the blanks); Eat blanks the whole gap"}
+{"name": "il-most-of-screen-outside-region", "size": "9x8", "input": "abc\r\ndef\u001b[3;7r\u001b[7L", "expect": "diverge", "note": "as for ICH: tmux's grid leaves old rows in the gap when inserting more than half the remaining rows"}
