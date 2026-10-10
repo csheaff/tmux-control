@@ -2376,6 +2376,10 @@ each wrapped in an evolving prompt line and a status bar.")
                  (push (list 'hook (eval hook t) (eval function t)) sites)))))
         (end-of-file nil)))
     (should (= (length sites) 5))
+    ;; The emulation fixes are installed from a table rather than one
+    ;; `advice-add' form each.
+    (dolist (entry tmux-control--vt-advice)
+      (push (list 'advice (car entry) :around (cdr entry)) sites))
     ;; The first tmux-control buffer adds the resize hooks.
     (with-temp-buffer
       (tmux-control-scrollback-mode))
@@ -6498,6 +6502,81 @@ output), :calls (side-effect invocations in order), :active-pane,
               (should (string-match-p "Server tmux: 3.6a" (buffer-string)))
               (should-not (string-match-p "SECRET OUTPUT" (buffer-string))))
           (kill-buffer report))))))
+
+(ert-deftest tmux-control-test-bare-line-feeds-become-index ()
+  ;; A bare LF keeps the column in a terminal; Eat returns to column one, so
+  ;; tmux-control hands Eat IND (ESC D) instead.  CR LF stays, and a line
+  ;; feed inside an OSC/DCS string is payload, not a line feed.
+  (should (equal (tmux-control--bare-line-feeds-to-index "a\nb") "a\eDb"))
+  (should (equal (tmux-control--bare-line-feeds-to-index "\n\n") "\eD\eD"))
+  (should (equal (tmux-control--bare-line-feeds-to-index "a\r\n\nb") "a\r\n\eDb"))
+  (should (equal (tmux-control--bare-line-feeds-to-index "\e]0;x\ny\a\n")
+                 "\e]0;x\ny\a\eD"))
+  (should (equal (tmux-control--bare-line-feeds-to-index "\ePq\n\e\\\n")
+                 "\ePq\n\e\\\eD"))
+  ;; An unterminated string runs to the end of the chunk.
+  (should (equal (tmux-control--bare-line-feeds-to-index "x\n\e]0;t\nu")
+                 "x\eD\e]0;t\nu"))
+  ;; Ordinary output is returned as is, without copying.
+  (let ((text "one\r\ntwo\r\n"))
+    (should (eq (tmux-control--bare-line-feeds-to-index text) text))))
+
+(defun tmux-control-test--render (output &optional width height)
+  "Render OUTPUT through tmux-control; return (ROWS ROW COLUMN) of the screen.
+The terminal is WIDTH x HEIGHT, 12x6 by default."
+  (with-temp-buffer
+    (tmux-control--reset-buffer)
+    (eat-term-resize tmux-control--terminal (or width 12) (or height 6))
+    (tmux-control--write-terminal output)
+    (let* ((top (eat-term-display-beginning tmux-control--terminal))
+           (cursor (eat-term-display-cursor tmux-control--terminal))
+           (bol (save-excursion (goto-char cursor) (line-beginning-position))))
+      (list (split-string (buffer-substring-no-properties top (point-max)) "\n")
+            (1+ (count-lines top bol))
+            (1+ (- cursor bol))))))
+
+(ert-deftest tmux-control-test-emulation-fixes-are-scoped ()
+  ;; The fixes apply while tmux-control renders, and only with the option on.
+  (let ((tmux-control-correct-emulation t))
+    ;; A bare LF keeps the column; CUD stops at the region's bottom margin.
+    (should (equal (cdr (tmux-control-test--render "\e[1;8H\n")) '(2 8)))
+    (should (equal (cdr (tmux-control-test--render "\e[2;3r\e[5B")) '(3 1)))
+    ;; ED 2 erases without moving the cursor.
+    (should (equal (cdr (tmux-control-test--render "abc\e[3;5H\e[2J")) '(3 5))))
+  (let ((tmux-control-correct-emulation nil))
+    (should (equal (cdr (tmux-control-test--render "\e[2;3r\e[5B")) '(6 1))))
+  ;; A plain Eat terminal keeps Eat's behavior even with the option on.
+  (let ((tmux-control-correct-emulation t))
+    (with-temp-buffer
+      (let ((term (eat-term-make (current-buffer) (point-min))))
+        (eat-term-resize term 12 6)
+        (eat-term-process-output term "\e[2;3r\e[5B")
+        (eat-term-redisplay term)
+        (should (= (count-lines (eat-term-display-beginning term)
+                                (eat-term-display-cursor term))
+                   5))
+        (eat-term-delete term)))))
+
+(ert-deftest tmux-control-test-region-line-operations ()
+  ;; Insert and delete lines and scroll inside a region that starts below the
+  ;; top of the screen; the rows outside it and the cursor stay put.
+  (let ((tmux-control-correct-emulation t)
+        (rows "r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6"))
+    (should (equal (tmux-control-test--render (concat rows "\e[2;5r\e[4;1H\e[2M"))
+                   '(("r1" "r2" "r3" "" "" "r6") 4 1)))
+    (should (equal (tmux-control-test--render (concat rows "\e[2;5r\e[3;2H\e[1L"))
+                   '(("r1" "r2" " " "r3" "r4" "r6") 3 2)))
+    (should (equal (tmux-control-test--render (concat rows "\e[2;5r\e[1;1H\e[2S"))
+                   '(("r1" "r4" "r5" "" "" "r6") 1 1)))
+    (should (equal (tmux-control-test--render (concat rows "\e[2;5r\e[6;1H\e[1T"))
+                   '(("r1" "" "r2" "r3" "r4" "r6") 6 1)))))
+
+(ert-deftest tmux-control-test-delete-lines-with-background-does-not-signal ()
+  ;; Eat signals `wholenump' here, inside the output filter.
+  (let ((tmux-control-correct-emulation t))
+    (should (equal (cdr (tmux-control-test--render "\e[42m\e[7M")) '(1 1)))
+    (should (= (length (car (tmux-control-test--render "\e[42m\e[8B\e[2M" 20 8)))
+               8))))
 
 (ert-deftest tmux-control-test-unicode-composition-across-chunks-and-sgr ()
   (with-temp-buffer
