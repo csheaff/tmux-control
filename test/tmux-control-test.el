@@ -4727,7 +4727,9 @@ receives in `synced' (a list of lists, one per sync call)."
            (cursor (eat-term-display-cursor tmux-control--terminal))
            (top (eat-term-display-beginning tmux-control--terminal)))
       (should (> top (point-min)))
-      (cl-letf (((symbol-function 'pos-visible-in-window-p)
+      ;; Visibility is decided by `tmux-control--cursor-visible-p' (tested
+      ;; on its own); here every window is taken to show the cursor line.
+      (cl-letf (((symbol-function 'tmux-control--cursor-visible-p)
                  (lambda (&rest _) t)))
         ;; Reading history: the window starts above the live screen.
         (set-window-point window cursor)
@@ -4744,19 +4746,52 @@ receives in `synced' (a list of lists, one per sync call)."
         (eat-self-input 1 ?c)
         (should-not (memq window (car synced))))
       ;; The cursor line is not visible in the window.
-      (cl-letf (((symbol-function 'pos-visible-in-window-p)
+      (cl-letf (((symbol-function 'tmux-control--cursor-visible-p)
                  (lambda (&rest _) nil)))
         (eat-self-input 1 ?d)
         (should (memq window (car synced))))
       ;; Partway through a pixel scroll (a batch frame keeps no vscroll, so
       ;; report one), with everything else following.
-      (cl-letf (((symbol-function 'pos-visible-in-window-p)
+      (cl-letf (((symbol-function 'tmux-control--cursor-visible-p)
                  (lambda (&rest _) t))
                 ((symbol-function 'window-vscroll)
                  (lambda (&rest _) 7)))
         (eat-self-input 1 ?e)
         (should (memq window (car synced))))
       (should (equal sent '("e" "d" "c" "b" "a"))))))
+
+(ert-deftest tmux-control-test-cursor-visible-fast-path ()
+  ;; A window starting within the live screen counts rows to the cursor
+  ;; instead of laying the window out; a window reading history above the
+  ;; screen, or one starting below the cursor, asks Emacs.
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (insert (mapconcat (lambda (i) (format "row %d" i)) (number-sequence 1 60) "\n"))
+      (let* ((window (selected-window))
+             (height (window-body-height window))
+             (top (save-excursion (goto-char (point-min)) (forward-line 20) (point)))
+             (row (lambda (n) (save-excursion (goto-char top) (forward-line n) (point))))
+             (asked nil))
+        (set-window-start window top)
+        (cl-letf (((symbol-function 'pos-visible-in-window-p)
+                   (lambda (&rest _) (setq asked t) 'asked)))
+          ;; Within the window's height: visible, without asking.
+          (should (eq t (tmux-control--cursor-visible-p
+                         window (funcall row 2) top)))
+          ;; Below the window's last line: not visible, without asking.
+          (should-not (tmux-control--cursor-visible-p
+                       window (funcall row (1+ height)) top))
+          (should-not asked)
+          ;; Reading history above the screen: Emacs decides.
+          (should (eq 'asked (tmux-control--cursor-visible-p
+                              window (funcall row 2) (funcall row 1))))
+          ;; The window starts below the cursor: Emacs decides.
+          (setq asked nil)
+          (set-window-start window (funcall row 5))
+          (should (eq 'asked (tmux-control--cursor-visible-p
+                              window (funcall row 2) top)))
+          (should asked))))))
 
 (ert-deftest tmux-control-test-typing-sync-advice-scope ()
   ;; Mouse events and buffers outside tmux-control get Eat's own sync
@@ -6178,12 +6213,12 @@ receives in `synced' (a list of lists, one per sync call)."
              (lambda (&rest _) (list 'buffer 'win-a 'win-b)))
             ((symbol-function 'eat-term-live-p) (lambda (_) t))
             ((symbol-function 'eat-term-display-cursor) (lambda (_) 42))
+            ((symbol-function 'eat-term-display-beginning) (lambda (_) 1))
             ((symbol-function 'get-buffer-window-list)
              (lambda (&rest _) (list 'win-a 'win-b)))
-            ;; The live cursor is visible only in win-a (accepts the PARTIALLY
-            ;; arg the follow-set check now passes).
-            ((symbol-function 'pos-visible-in-window-p)
-             (lambda (_pos w &optional _partially) (eq w 'win-a))))
+            ;; The live cursor is visible only in win-a.
+            ((symbol-function 'tmux-control--cursor-visible-p)
+             (lambda (w _cursor _top) (eq w 'win-a))))
     (let ((tmux-control--terminal 'term))
       (let ((tmux-control-wheel-scrolls-live-history nil))
         (should (equal (tmux-control--current-sync-windows)

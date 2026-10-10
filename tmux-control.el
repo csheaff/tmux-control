@@ -6623,14 +6623,16 @@ actually sees.  Eat's `buffer' point decision is preserved."
                  ;; list (see `tmux-control--tiled-mode-p').
                  (tmux-control--tiled-mode-p))
              base
-           (let ((cursor (eat-term-display-cursor tmux-control--terminal)))
+           (let ((cursor (eat-term-display-cursor tmux-control--terminal))
+                 (top (eat-term-display-beginning tmux-control--terminal)))
              (append
               (and (memq 'buffer base) '(buffer))
               (seq-filter
-               ;; PARTIALLY: under `pixel-scroll-precision-mode' the cursor
-               ;; line at the bottom is often a few pixels clipped; without
-               ;; this it reads as not visible and following never resumes.
-               (lambda (w) (pos-visible-in-window-p cursor w t))
+               ;; At least partly: under `pixel-scroll-precision-mode' the
+               ;; cursor line at the bottom is often a few pixels clipped;
+               ;; without that it reads as not visible and following never
+               ;; resumes.
+               (lambda (w) (tmux-control--cursor-visible-p w cursor top))
                (get-buffer-window-list (current-buffer) nil t))))))))
 
 (defun tmux-control--snap-to-live-screen (window)
@@ -7408,6 +7410,23 @@ ORIG-FN is Eat's scroll synchronization."
 (advice-add #'eat--synchronize-scroll :around
             #'tmux-control--eat-synchronize-scroll-advice)
 
+(defun tmux-control--cursor-visible-p (window cursor screen-top)
+  "Return non-nil when WINDOW shows the line of CURSOR, at least partly.
+SCREEN-TOP is the start of the terminal's current screen.  When the window
+starts within the live screen, at or above the cursor, count the rows to
+the cursor (fast, in C) against the window's height: every terminal row
+is one line.  Otherwise -- a window reading history above the screen, say
+-- ask `pos-visible-in-window-p', which lays out the window from its start
+to the cursor and costs about a millisecond on a busy screen.  The quick
+answer can call a cursor visible that tall fallback glyphs pushed just
+below the window; such a window is following the live screen anyway, and
+`tmux-control--keep-cursor-visible' brings the cursor back into view."
+  (let ((start (window-start window)))
+    (if (and screen-top (>= start screen-top) (<= start cursor))
+        (< (count-lines start (save-excursion (goto-char cursor) (pos-bol)))
+           (window-body-height window))
+      (pos-visible-in-window-p cursor window t))))
+
 (defun tmux-control--window-following-p (window cursor screen-top)
   "Return non-nil when WINDOW already shows the live terminal cursor.
 CURSOR is the terminal cursor position and SCREEN-TOP the start of the
@@ -7418,7 +7437,7 @@ through a pixel scroll, and shows the cursor line."
        (= (window-point window) cursor)
        (>= (window-start window) screen-top)
        (zerop (window-vscroll window t))
-       (pos-visible-in-window-p cursor window t)))
+       (tmux-control--cursor-visible-p window cursor screen-top)))
 
 (defun tmux-control--eat-input-sync-advice (orig-fn &rest args)
   "Skip Eat's pre-input scroll sync for windows already following the cursor.
