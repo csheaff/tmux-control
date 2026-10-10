@@ -1239,6 +1239,11 @@ buffers.  `tmux-control-unload-function' removes them."
   (when tmux-control-live-scrollback-size
     (setq-local eat-term-scrollback-size tmux-control-live-scrollback-size))
   (setq-local bookmark-make-record-function #'tmux-control--bookmark-record)
+  ;; Nothing is edited here -- input goes to the pane -- so undo only
+  ;; records each change Eat makes, with a copy of every deleted run: a
+  ;; streaming pane piled up hundreds of thousands of entries a minute for
+  ;; the garbage collector to trim.
+  (buffer-disable-undo)
   ;; Registered here, before Evil sets up the buffer, so the pane gets keys.
   ;; Evil keeps one process-wide registration per mode; nil removes it.
   (when (fboundp 'evil-set-initial-state)
