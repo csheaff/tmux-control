@@ -2375,7 +2375,7 @@ each wrapped in an evolving prompt line and a status bar.")
                 (`(add-hook ,hook ,function . ,_)
                  (push (list 'hook (eval hook t) (eval function t)) sites)))))
         (end-of-file nil)))
-    (should (= (length sites) 5))
+    (should (= (length sites) 6))
     ;; The first tmux-control buffer adds the resize hooks.
     (with-temp-buffer
       (tmux-control-scrollback-mode))
@@ -4669,6 +4669,102 @@ output), :calls (side-effect invocations in order), :active-pane,
               (should (= activations 0))
               (should (eq overriding-terminal-local-map map))
               (should (eq (key-binding (kbd "C-c")) #'ignore)))))))))
+
+(defmacro tmux-control-test--with-typing-window (&rest body)
+  "Run BODY with a live tmux-control buffer shown in the selected window.
+Typed bytes are collected in `sent' and the windows Eat's scroll sync
+receives in `synced' (a list of lists, one per sync call)."
+  (declare (indent 0))
+  `(save-window-excursion
+     (with-temp-buffer
+       (switch-to-buffer (current-buffer))
+       (tmux-control--reset-buffer)
+       (let ((sent nil) (synced nil))
+         (ignore sent synced)
+         (cl-letf (((symbol-function 'tmux-control--send-input)
+                    (lambda (_terminal string) (push string sent)))
+                   ((symbol-function 'eat--synchronize-scroll)
+                    (lambda (windows) (push windows synced))))
+           (setq eat-terminal tmux-control--terminal)
+           (setf (eat-term-parameter eat-terminal 'input-function)
+                 #'tmux-control--send-input)
+           ,@body)))))
+
+(ert-deftest tmux-control-test-typing-skips-sync-of-following-window ()
+  ;; A window already showing the live cursor is left alone before a key is
+  ;; sent: syncing it forces a full relayout that the echo then waits behind.
+  ;; Point is still placed on the cursor (Eat's `buffer' entry), and the key
+  ;; is sent.
+  (tmux-control-test--with-typing-window
+    (tmux-control--write-terminal "$ ")
+    (let ((window (selected-window))
+          (cursor (eat-term-display-cursor tmux-control--terminal)))
+      (set-window-point window cursor)
+      (set-window-start window (eat-term-display-beginning
+                                tmux-control--terminal))
+      (setq synced nil)                 ; drop the prompt render's own sync
+      (cl-letf (((symbol-function 'pos-visible-in-window-p)
+                 (lambda (&rest _) t)))
+        (eat-self-input 1 ?a))
+      (should (equal sent '("a")))
+      (should (= (length synced) 1))
+      (should-not (memq window (car synced)))
+      (should (memq 'buffer (car synced))))))
+
+(ert-deftest tmux-control-test-typing-still-syncs-window-reading-history ()
+  ;; A window scrolled into history (starting above the live screen), one
+  ;; whose point is off the cursor, or one partway through a pixel scroll
+  ;; still jumps back to the cursor on the first key, as Eat does.
+  (tmux-control-test--with-typing-window
+    (tmux-control--write-terminal
+     (mapconcat (lambda (i) (format "line %d" i)) (number-sequence 1 80) "\r\n"))
+    (let* ((window (selected-window))
+           (cursor (eat-term-display-cursor tmux-control--terminal))
+           (top (eat-term-display-beginning tmux-control--terminal)))
+      (should (> top (point-min)))
+      (cl-letf (((symbol-function 'pos-visible-in-window-p)
+                 (lambda (&rest _) t)))
+        ;; Reading history: the window starts above the live screen.
+        (set-window-point window cursor)
+        (set-window-start window (point-min))
+        (eat-self-input 1 ?a)
+        (should (memq window (car synced)))
+        ;; Point moved off the cursor.
+        (set-window-start window top)
+        (set-window-point window top)
+        (eat-self-input 1 ?b)
+        (should (memq window (car synced)))
+        ;; Following: skipped.
+        (set-window-point window cursor)
+        (eat-self-input 1 ?c)
+        (should-not (memq window (car synced))))
+      ;; The cursor line is not visible in the window.
+      (cl-letf (((symbol-function 'pos-visible-in-window-p)
+                 (lambda (&rest _) nil)))
+        (eat-self-input 1 ?d)
+        (should (memq window (car synced))))
+      (should (equal sent '("d" "c" "b" "a"))))))
+
+(ert-deftest tmux-control-test-typing-sync-advice-scope ()
+  ;; Mouse events and buffers outside tmux-control get Eat's own sync
+  ;; function, untouched.
+  (let ((seen nil))
+    (cl-flet ((orig (&rest _) (push eat--synchronize-scroll-function seen)))
+      (with-temp-buffer
+        (setq-local eat--synchronize-scroll-function 'eat-own)
+        ;; Not a tmux-control buffer.
+        (tmux-control--eat-input-sync-advice #'orig 1 ?a)
+        (should (eq (car seen) 'eat-own)))
+      (tmux-control-test--with-typing-window
+        (setq-local eat--synchronize-scroll-function 'eat-own)
+        (tmux-control--eat-input-sync-advice
+         #'orig 1 `(mouse-1 (,(selected-window) 1 (0 . 0) 0)))
+        (should (eq (car seen) 'eat-own))
+        (tmux-control--eat-input-sync-advice #'orig 1 'wheel-up)
+        (should (eq (car seen) 'eat-own))
+        (tmux-control--eat-input-sync-advice #'orig 1 ?a)
+        (should (functionp (car seen)))
+        (should-not (eq (car seen) 'eat-own))))))
 
 (ert-deftest tmux-control-test-alt-screen-sync-preserves-first-row ()
   (save-window-excursion

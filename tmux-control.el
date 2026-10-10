@@ -6836,6 +6836,59 @@ ORIG-FN is Eat's scroll synchronization."
 (advice-add #'eat--synchronize-scroll :around
             #'tmux-control--eat-synchronize-scroll-advice)
 
+(defun tmux-control--window-following-p (window cursor screen-top)
+  "Return non-nil when WINDOW already shows the live terminal cursor.
+CURSOR is the terminal cursor position and SCREEN-TOP the start of the
+terminal's current screen.  Such a window has point on the cursor, starts
+no higher than the screen (it is not reading history), is not partway
+through a pixel scroll, and shows the cursor line."
+  (and (window-live-p window)
+       (= (window-point window) cursor)
+       (>= (window-start window) screen-top)
+       (zerop (window-vscroll window t))
+       (pos-visible-in-window-p cursor window t)))
+
+(defun tmux-control--eat-input-sync-advice (orig-fn &rest args)
+  "Skip Eat's pre-input scroll sync for windows already following the cursor.
+Before sending a key, `eat-self-input' synchronizes every window showing
+the buffer with the terminal cursor: it sets point and calls `recenter',
+which makes the next redisplay lay out the whole window again -- even
+when nothing moved.  That relayout runs right after the key is sent, so
+the pane's echo arrives while Emacs is still busy and waits behind it:
+measured at about 6 ms of a 21 ms keystroke on a busy screen.
+
+A window that already shows the live cursor gains nothing from the sync,
+and the output the key produces syncs it again when it is rendered (see
+`tmux-control--flush-display').  So drop those windows from the list and
+keep the ones that need it: a window scrolled into history still jumps
+back to the cursor on the first key, as before.  Mouse events keep Eat's
+behavior unchanged.  ORIG-FN is `eat-self-input', called with ARGS."
+  (let ((event (nth 1 args)))
+    (if (not (and (derived-mode-p 'tmux-control-mode)
+                  eat-terminal
+                  (eat-term-live-p eat-terminal)
+                  (not (mouse-event-p event))
+                  (not (memq (event-basic-type event)
+                             '(mouse-movement wheel-up wheel-down
+                                              wheel-left wheel-right)))))
+        (apply orig-fn args)
+      (let* ((sync eat--synchronize-scroll-function)
+             (cursor (eat-term-display-cursor eat-terminal))
+             (top (eat-term-display-beginning eat-terminal))
+             (eat--synchronize-scroll-function
+              (lambda (windows)
+                (funcall sync
+                         (seq-remove
+                          (lambda (w)
+                            (and (windowp w)
+                                 (tmux-control--window-following-p
+                                  w cursor top)))
+                          windows)))))
+        (apply orig-fn args)))))
+
+(advice-remove #'eat-self-input #'tmux-control--eat-input-sync-advice)
+(advice-add #'eat-self-input :around #'tmux-control--eat-input-sync-advice)
+
 (defun tmux-control--write-terminal (output)
   "Process decoded terminal OUTPUT into Eat and redisplay immediately.
 For one-shot writes (screen seed, resize repaint) that are not part of a
@@ -9397,6 +9450,7 @@ also does its usual cleanup."
   (advice-remove 'eat--t-write #'tmux-control--eat-write-composed)
   (advice-remove #'eat--synchronize-scroll
                  #'tmux-control--eat-synchronize-scroll-advice)
+  (advice-remove #'eat-self-input #'tmux-control--eat-input-sync-advice)
   (remove-hook 'window-size-change-functions
                #'tmux-control--scrollback-follow-resize)
   (remove-hook 'window-size-change-functions #'tmux-control--on-frame-size-change)
