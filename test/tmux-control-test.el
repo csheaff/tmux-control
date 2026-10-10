@@ -4779,10 +4779,26 @@ receives in `synced' (a list of lists, one per sync call)."
         (should (functionp (car seen)))
         (should-not (eq (car seen) 'eat-own))))))
 
+(ert-deftest tmux-control-test-redisplay-copy-only-for-its-eat ()
+  ;; With an Eat whose redisplay differs, Eat's own function runs.
+  (let ((tmux-control--eat-redisplay-matches nil)
+        (called nil))
+    (with-temp-buffer
+      (tmux-control--reset-buffer)
+      (tmux-control--eat-redisplay-advice
+       (lambda (term) (setq called term)) tmux-control--terminal)
+      (should (eq called tmux-control--terminal))))
+  ;; A definition that does not hash to the copied one is not a match.
+  (let ((tmux-control--eat-redisplay-matches 'unknown)
+        (tmux-control--eat-redisplay-source-hash "0000"))
+    (should-not (tmux-control--eat-redisplay-matches-p))))
+
 ;; Eat's redisplay after a scroll bounds its line joining with a marker it
 ;; never detaches; chained until garbage collection, each one slows every
 ;; later change to the buffer.
 (ert-deftest tmux-control-test-redisplay-detaches-its-marker ()
+  ;; The copy applies only to the Eat it was made from.
+  (should (tmux-control--eat-redisplay-matches-p))
   (let ((made nil)
         (stream (mapconcat (lambda (i) (format "row %02d of a scrolling pane\r\n" i))
                            (number-sequence 1 30) "")))
