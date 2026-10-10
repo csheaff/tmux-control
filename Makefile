@@ -79,3 +79,20 @@ test-integration:
 	  -l tmux-control.el \
 	  -l test/tmux-control-integration.el \
 	  -f ert-run-tests-batch-and-exit
+
+# Terminal-emulation oracle: render each stream in test/vt-corpus.jsonl in a
+# real tmux pane and through tmux-control's output path, and compare.  Fails
+# on a regression or on a known divergence that now matches.  Needs tmux.
+#
+#   make test-vt-oracle
+.PHONY: test-vt-oracle
+test-vt-oracle:
+	EMACS="$(EMACS)" EAT_DIR="$(EAT_DIR)" $(PYTHON) test/vt-oracle.py corpus
+
+# Look for new divergences with random escape sequences; prints minimized,
+# corpus-ready lines.  Pass options through VT_FUZZ, e.g.
+#
+#   make vt-fuzz VT_FUZZ="--n 400 --seed 7 -s 20x8"
+.PHONY: vt-fuzz
+vt-fuzz:
+	EMACS="$(EMACS)" EAT_DIR="$(EAT_DIR)" $(PYTHON) test/vt-oracle.py fuzz $(VT_FUZZ)
