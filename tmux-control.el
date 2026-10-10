@@ -6553,7 +6553,10 @@ windows are excluded so they are not yanked to the bottom."
                                       (forward-line 1)
                                       (point)))
           (setq guard (1+ guard)))
-        (set-window-start window start t)))))
+        ;; Setting even the same start makes the next redisplay lay the
+        ;; whole window out again.
+        (unless (= start (window-start window))
+          (set-window-start window start t))))))
 
 (defvar tmux-control--suppress-responses nil
   "When non-nil, drop terminal replies Eat would send back to the pane.
@@ -7341,6 +7344,28 @@ redisplay is not the version copied here (see
                         (eat--t-disp-begin disp))))))))
 
 (advice-add 'eat-term-redisplay :around #'tmux-control--eat-redisplay-advice)
+(defun tmux-control--screen-window-start (window top)
+  "Return where Eat's scroll sync starts WINDOW for a screen beginning at TOP.
+Eat recenters so the whole terminal screen shows: from its top when the
+window has room for every row, otherwise with the rows that do not fit
+cut from the top.  Every terminal row is one line."
+  (let ((rows (cdr (eat-term-size tmux-control--terminal)))
+        (lines (floor (with-selected-window window (window-screen-lines)))))
+    (if (>= lines rows)
+        top
+      (save-excursion (goto-char top) (forward-line (- rows lines)) (point)))))
+
+(defun tmux-control--window-settled-p (window cursor top)
+  "Return non-nil when Eat's scroll sync would leave WINDOW where it is.
+That is, WINDOW already starts where the sync puts it for a screen at
+TOP (see `tmux-control--screen-window-start'), is not partway through a
+pixel scroll, and shows CURSOR.  A window that tall glyphs pushed off
+that start, or that the user scrolled, is not settled."
+  (and (windowp window)
+       (window-live-p window)
+       (zerop (window-vscroll window t))
+       (= (window-start window) (tmux-control--screen-window-start window top))
+       (tmux-control--cursor-visible-p window cursor top)))
 
 (defun tmux-control--flush-display (sync-windows)
   "Redisplay Eat once when output has been fed since the last flush.
@@ -7355,7 +7380,18 @@ cursor position and their cursor line is kept visible."
       (eat-term-redisplay tmux-control--terminal)
       (when (and sync-windows
                  (boundp 'eat--synchronize-scroll-function))
-        (funcall eat--synchronize-scroll-function sync-windows)
+        ;; A window already where Eat's sync would put it only needs its
+        ;; point moved; the sync's `recenter' would make the next
+        ;; redisplay lay the whole window out again, every chunk.
+        (let* ((cursor (eat-term-display-cursor tmux-control--terminal))
+               (top (eat-term-display-beginning tmux-control--terminal))
+               (settled (seq-filter
+                         (lambda (w) (tmux-control--window-settled-p w cursor top))
+                         sync-windows)))
+          (dolist (window settled)
+            (set-window-point window cursor))
+          (funcall eat--synchronize-scroll-function
+                   (seq-difference sync-windows settled)))
         ;; In a TILED pane only, anchor to the top of the current terminal
         ;; screen so a full-screen TUI (e.g. a Claude Code panel) shows from
         ;; its top instead of being scrolled with its top cut off when tall
@@ -7392,7 +7428,8 @@ behavior is preserved."
            (top (if (markerp beg) (marker-position beg) beg)))
       (when top
         (dolist (window windows)
-          (when (window-live-p window)
+          (when (and (window-live-p window)
+                     (/= (window-start window) top))
             (set-window-start window top t)))))))
 
 (defun tmux-control--eat-synchronize-scroll-advice (orig-fn windows)

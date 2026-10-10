@@ -3996,6 +3996,9 @@ output), :calls (side-effect invocations in order), :active-pane,
                (lambda (_) (cl-incf anchored)))
               ((symbol-function 'eat-term-redisplay) #'ignore)
               ((symbol-function 'eat-term-live-p) (lambda (_) t))
+              ((symbol-function 'eat-term-display-cursor) (lambda (_) 1))
+              ((symbol-function 'eat-term-display-beginning) (lambda (_) 1))
+              ((symbol-function 'tmux-control--window-settled-p) #'ignore)
               ((symbol-function 'tmux-control--keep-cursor-visible) #'ignore))
       (let ((ctrl (generate-new-buffer " *tc-anchor-ctrl*")))
         (unwind-protect
@@ -4869,6 +4872,74 @@ receives in `synced' (a list of lists, one per sync call)."
             (advice-add 'eat-term-redisplay :around
                         #'tmux-control--eat-redisplay-advice))
           (should (equal-including-properties ours (buffer-string))))))))
+;; Each flush synced every following window with Eat's `recenter', which
+;; makes the next redisplay lay the whole window out again even when the view
+;; does not change; a settled window now only has its point moved.
+(ert-deftest tmux-control-test-flush-skips-settled-windows ()
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (tmux-control--reset-buffer)
+      (let* ((window (selected-window))
+             (rows (min 10 (floor (window-screen-lines))))
+             (synced nil))
+        (eat-term-resize tmux-control--terminal 40 rows)
+        (tmux-control--write-terminal
+         (mapconcat (lambda (i) (format "line %d" i)) (number-sequence 1 30) "\r\n"))
+        (let ((top (eat-term-display-beginning tmux-control--terminal)))
+          (cl-letf (((symbol-function 'eat--synchronize-scroll)
+                     (lambda (windows) (push windows synced))))
+            ;; Settled: starts at the screen top, which fits.
+            (set-window-start window top)
+            (tmux-control--feed-terminal "\e[3;1Hmore")
+            (tmux-control--flush-display (list 'buffer window))
+            (should (equal (car synced) '(buffer)))
+            (should (= (window-point window)
+                       (eat-term-display-cursor tmux-control--terminal)))
+            ;; Reading history above the screen: synced as before.
+            (set-window-start window (point-min))
+            (tmux-control--feed-terminal "x")
+            (tmux-control--flush-display (list 'buffer window))
+            (should (equal (car synced) (list 'buffer window)))))))))
+
+(ert-deftest tmux-control-test-screen-window-start ()
+  ;; Where Eat's sync starts a window: the screen top when every row fits,
+  ;; otherwise as many rows lower as do not fit.
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (tmux-control--reset-buffer)
+      (let* ((window (selected-window))
+             (lines (floor (window-screen-lines))))
+        (eat-term-resize tmux-control--terminal 40 (+ lines 3))
+        (tmux-control--write-terminal
+         (mapconcat (lambda (i) (format "r%d" i)) (number-sequence 1 (+ lines 10)) "\r\n"))
+        (let ((top (marker-position (eat-term-display-beginning tmux-control--terminal))))
+          (should (= (tmux-control--screen-window-start window top)
+                     (save-excursion (goto-char top) (forward-line 3) (point))))
+          (eat-term-resize tmux-control--terminal 40 lines)
+          (let ((top (marker-position (eat-term-display-beginning tmux-control--terminal))))
+            (should (= (tmux-control--screen-window-start window top) top))))))))
+
+(ert-deftest tmux-control-test-unchanged-view-sets-no-window-start ()
+  ;; Setting even the same start makes the next redisplay lay the whole
+  ;; window out again; nothing is set when the view stays.
+  (save-window-excursion
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (tmux-control--reset-buffer)
+      (eat-term-resize tmux-control--terminal 40 5)
+      (tmux-control--write-terminal "one\r\ntwo\r\nthree")
+      (let ((window (selected-window))
+            (calls 0))
+        (set-window-start window (point-min))
+        (set-window-point window (eat-term-display-cursor tmux-control--terminal))
+        (cl-letf* ((orig (symbol-function 'set-window-start))
+                   ((symbol-function 'set-window-start)
+                    (lambda (&rest args) (cl-incf calls) (apply orig args))))
+          (tmux-control--keep-cursor-visible (list window))
+          (tmux-control--anchor-windows-to-screen-top (list window))
+          (should (= calls 0)))))))
 
 (ert-deftest tmux-control-test-terminal-buffers-keep-no-undo ()
   ;; Output only ever changes these buffers; recording undo for it piled up
