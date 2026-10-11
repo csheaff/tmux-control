@@ -861,6 +861,10 @@ single command queue and process.  nil in the controller buffer itself.")
   "Non-nil in a controller buffer whose window is rendered as tiled panes.")
 (defvar-local tmux-control--panes nil
   "In a tiled controller, an alist (PANE-ID . RENDER-BUFFER) in layout order.")
+(defvar-local tmux-control--tiled-focus-pane nil
+  "In a tiled controller, a pane to select once a re-tile shows it.
+Set when `tmux-control-select-pane' moves to another tmux window, whose
+panes have no Emacs windows until the tiling is rebuilt.")
 (defvar-local tmux-control--pane-buffers nil
   "All visited tiled pane buffers, including panes in background windows.
 These keep streaming and retain history until their pane or connection ends.")
@@ -3389,11 +3393,30 @@ available."
 Only the active pane is mirrored in the live terminal, so in a split-pane
 window -- for example a Claude Code agent team -- this steps to the next
 pane (the next teammate).  tmux reports the change with %window-pane-changed
-and the view repaints on the newly active pane.  Bound to \\`C-c C-o'.
-See `tmux-control-select-pane' to jump to a pane by name."
+and the view repaints on the newly active pane.  In a tiled view, where
+every pane has a window of its own, this selects the next pane's window.
+Bound to \\`C-c C-o'.  See `tmux-control-select-pane' to jump to a pane
+by name."
   (interactive)
   (tmux-control--ensure-live)
-  (tmux-control--send-command "select-pane -t :.+"))
+  (let* ((panes (and (tmux-control--tiled-mode-p)
+                     (buffer-local-value 'tmux-control--panes
+                                         (or tmux-control--controller (current-buffer)))))
+         (next (cadr (member tmux-control--active-pane
+                             (append (mapcar #'car panes) (list (caar panes)))))))
+    (if next
+        (tmux-control-select-pane next)
+      (tmux-control--send-command "select-pane -t :.+"))))
+
+(defun tmux-control--select-tiled-pane-window (pane)
+  "In a tiled view, select the window that shows PANE in the selected frame.
+Return that window, or nil when PANE has none."
+  (when-let* (((tmux-control--tiled-mode-p))
+              (buffer (cdr (assoc pane (buffer-local-value
+                                        'tmux-control--panes
+                                        (or tmux-control--controller (current-buffer))))))
+              (window (get-buffer-window buffer)))
+    (select-window window)))
 
 (defun tmux-control--read-pane ()
   "Read a pane id with completion over ALL of the session's panes.
@@ -3413,7 +3436,7 @@ fleet's panes are distinguishable across windows."
 Interactively, complete over the SESSION's panes -- an agent team shows
 each teammate as a pane, labelled by its command and title -- and focus
 the chosen one.  With PANE (a pane id) given non-interactively, switch
-to it directly.
+to it directly.  In a tiled view, its window is selected too.
 
 A pane in another window is a real jump: tmux's `select-pane' alone
 sets that window's active pane WITHOUT switching the session's current
@@ -3448,7 +3471,11 @@ unmapped pane falls back to the bare `select-pane'."
                (or (and current (not (equal idx current)))
                    (and wid viewed (not (equal wid viewed)))))
       (tmux-control--do-select-window idx))
-    (tmux-control--send-command (format "select-pane -t %s" pane))))
+    (tmux-control--send-command (format "select-pane -t %s" pane))
+    (unless (tmux-control--select-tiled-pane-window pane)
+      (when-let* ((controller (tmux-control--tiling-controller)))
+        (with-current-buffer controller
+          (setq tmux-control--tiled-focus-pane pane))))))
 
 (defun tmux-control--remote-file-method (host)
   "Return the TRAMP method to reach HOST, honoring the user's TRAMP config.
@@ -9604,7 +9631,17 @@ once the in-band window-state reply has been parsed."
                                tmux-control-pane-directory-mode
                                :local-directory
                                (tmux-control--pane-directory-local-fallback)))
-                   (focus-pane (tmux-control--selected-pane-id old-panes))
+                   ;; A pane asked for in another window, once it is shown;
+                   ;; else the pane that had focus, if it is still here.
+                   (focus-pane
+                    (if (and tmux-control--tiled-focus-pane
+                             (cl-some (lambda (leaf)
+                                        (equal (plist-get leaf :pane)
+                                               tmux-control--tiled-focus-pane))
+                                      leaves))
+                        (prog1 tmux-control--tiled-focus-pane
+                          (setq tmux-control--tiled-focus-pane nil))
+                      (tmux-control--selected-pane-id old-panes)))
                    (new-panes '())
                    ;; Only newly created or resized panes need a (synchronous,
                    ;; possibly remote) reseed; reused same-size panes keep
@@ -9719,6 +9756,7 @@ single-pane do that."
               tmux-control--tiled-layout nil
               tmux-control--retile-pending nil
               tmux-control--suppress-focus-follow nil
+              tmux-control--tiled-focus-pane nil
               ;; Cancel any in-flight build: clearing the active flag makes its
               ;; reply callback abort instead of rebuilding this torn-down view.
               tmux-control--tiling-build-active nil
