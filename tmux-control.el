@@ -861,6 +861,10 @@ single command queue and process.  nil in the controller buffer itself.")
   "Non-nil in a controller buffer whose window is rendered as tiled panes.")
 (defvar-local tmux-control--panes nil
   "In a tiled controller, an alist (PANE-ID . RENDER-BUFFER) in layout order.")
+(defvar-local tmux-control--tiled-focus-pane nil
+  "In a tiled controller, a pane to select once a re-tile shows it.
+Set when `tmux-control-select-pane' moves to another tmux window, whose
+panes have no Emacs windows until the tiling is rebuilt.")
 (defvar-local tmux-control--pane-buffers nil
   "All visited tiled pane buffers, including panes in background windows.
 These keep streaming and retain history until their pane or connection ends.")
@@ -3468,7 +3472,10 @@ unmapped pane falls back to the bare `select-pane'."
                    (and wid viewed (not (equal wid viewed)))))
       (tmux-control--do-select-window idx))
     (tmux-control--send-command (format "select-pane -t %s" pane))
-    (tmux-control--select-tiled-pane-window pane)))
+    (unless (tmux-control--select-tiled-pane-window pane)
+      (when-let* ((controller (tmux-control--tiling-controller)))
+        (with-current-buffer controller
+          (setq tmux-control--tiled-focus-pane pane))))))
 
 (defun tmux-control--remote-file-method (host)
   "Return the TRAMP method to reach HOST, honoring the user's TRAMP config.
@@ -9624,7 +9631,17 @@ once the in-band window-state reply has been parsed."
                                tmux-control-pane-directory-mode
                                :local-directory
                                (tmux-control--pane-directory-local-fallback)))
-                   (focus-pane (tmux-control--selected-pane-id old-panes))
+                   ;; A pane asked for in another window, once it is shown;
+                   ;; else the pane that had focus, if it is still here.
+                   (focus-pane
+                    (if (and tmux-control--tiled-focus-pane
+                             (cl-some (lambda (leaf)
+                                        (equal (plist-get leaf :pane)
+                                               tmux-control--tiled-focus-pane))
+                                      leaves))
+                        (prog1 tmux-control--tiled-focus-pane
+                          (setq tmux-control--tiled-focus-pane nil))
+                      (tmux-control--selected-pane-id old-panes)))
                    (new-panes '())
                    ;; Only newly created or resized panes need a (synchronous,
                    ;; possibly remote) reseed; reused same-size panes keep
@@ -9739,6 +9756,7 @@ single-pane do that."
               tmux-control--tiled-layout nil
               tmux-control--retile-pending nil
               tmux-control--suppress-focus-follow nil
+              tmux-control--tiled-focus-pane nil
               ;; Cancel any in-flight build: clearing the active flag makes its
               ;; reply callback abort instead of rebuilding this torn-down view.
               tmux-control--tiling-build-active nil

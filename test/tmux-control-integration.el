@@ -1156,6 +1156,29 @@ initial+extend instead of initial)."
           (tmux-control-other-pane)
           (should (eq (window-buffer (selected-window)) (cdr (assoc pane panes)))))))))
 
+(ert-deftest tmux-control-it-select-pane-in-another-window-focuses-it-once-tiled ()
+  ;; The pane's window has no Emacs windows until the view is re-tiled, so
+  ;; its window is selected then, not the first pane of the new layout.
+  (save-window-excursion
+    (delete-other-windows)
+    (set-frame-size (selected-frame) 120 35)
+    (tmux-control-it--with-session
+      (tmux-control-it--tmux "new-window" "-d" "-t" "t:1")
+      (tmux-control-it--tmux "split-window" "-h" "-d" "-t" "t:1")
+      (let ((target (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" "t:1.1" "#{pane_id}"))))
+        (tmux-control-it--pump 0.3)
+        (with-current-buffer controller (tmux-control-tile))
+        (should (tmux-control-it--settle-tiles controller 1))
+        (select-window (get-buffer-window (cdar (buffer-local-value 'tmux-control--panes controller))))
+        (tmux-control-select-pane target)
+        (should (tmux-control-it--pump-until
+                 8 (lambda ()
+                     (tmux-control-it--settle-tiles controller 2)
+                     (assoc target (buffer-local-value 'tmux-control--panes controller)))))
+        (should (eq (window-buffer (selected-window))
+                    (cdr (assoc target (buffer-local-value 'tmux-control--panes controller)))))
+        (should (equal target (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" "t" "#{pane_id}"))))))))
+
 (ert-deftest tmux-control-it-stalled-transport-refuses-input-and-recovers ()
   (tmux-control-it--with-session
     (let ((server-pid (string-to-number (string-trim (tmux-control-it--tmux "display-message" "-p" "#{pid}"))))
