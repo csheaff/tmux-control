@@ -3389,11 +3389,30 @@ available."
 Only the active pane is mirrored in the live terminal, so in a split-pane
 window -- for example a Claude Code agent team -- this steps to the next
 pane (the next teammate).  tmux reports the change with %window-pane-changed
-and the view repaints on the newly active pane.  Bound to \\`C-c C-o'.
-See `tmux-control-select-pane' to jump to a pane by name."
+and the view repaints on the newly active pane.  In a tiled view, where
+every pane has a window of its own, this selects the next pane's window.
+Bound to \\`C-c C-o'.  See `tmux-control-select-pane' to jump to a pane
+by name."
   (interactive)
   (tmux-control--ensure-live)
-  (tmux-control--send-command "select-pane -t :.+"))
+  (let* ((panes (and (tmux-control--tiled-mode-p)
+                     (buffer-local-value 'tmux-control--panes
+                                         (or tmux-control--controller (current-buffer)))))
+         (next (cadr (member tmux-control--active-pane
+                             (append (mapcar #'car panes) (list (caar panes)))))))
+    (if next
+        (tmux-control-select-pane next)
+      (tmux-control--send-command "select-pane -t :.+"))))
+
+(defun tmux-control--select-tiled-pane-window (pane)
+  "In a tiled view, select the window that shows PANE in the selected frame.
+Return that window, or nil when PANE has none."
+  (when-let* (((tmux-control--tiled-mode-p))
+              (buffer (cdr (assoc pane (buffer-local-value
+                                        'tmux-control--panes
+                                        (or tmux-control--controller (current-buffer))))))
+              (window (get-buffer-window buffer)))
+    (select-window window)))
 
 (defun tmux-control--read-pane ()
   "Read a pane id with completion over ALL of the session's panes.
@@ -3413,7 +3432,7 @@ fleet's panes are distinguishable across windows."
 Interactively, complete over the SESSION's panes -- an agent team shows
 each teammate as a pane, labelled by its command and title -- and focus
 the chosen one.  With PANE (a pane id) given non-interactively, switch
-to it directly.
+to it directly.  In a tiled view, its window is selected too.
 
 A pane in another window is a real jump: tmux's `select-pane' alone
 sets that window's active pane WITHOUT switching the session's current
@@ -3448,7 +3467,8 @@ unmapped pane falls back to the bare `select-pane'."
                (or (and current (not (equal idx current)))
                    (and wid viewed (not (equal wid viewed)))))
       (tmux-control--do-select-window idx))
-    (tmux-control--send-command (format "select-pane -t %s" pane))))
+    (tmux-control--send-command (format "select-pane -t %s" pane))
+    (tmux-control--select-tiled-pane-window pane)))
 
 (defun tmux-control--remote-file-method (host)
   "Return the TRAMP method to reach HOST, honoring the user's TRAMP config.

@@ -24,8 +24,8 @@ mode (`teammateMode: tmux`); [`@vanillagreen/pi-agents-tmux`](https://www.npmjs.
 `C-c C-t` (`tmux-control-toggle-tiling`) renders **every pane at once**, each in
 its own Emacs buffer, split to match tmux's layout — the iTerm "show every
 pane" view. Type into a pane to talk to that agent; the mode line labels each
-by id / command / title. Or stay single-pane and cycle through them with
-`C-c C-o`.
+by id / command / title, and `C-c C-o` moves to the next. Or stay
+single-pane and cycle through them with `C-c C-o`.
 
 ### One window per agent → window tabs + activity dots
 

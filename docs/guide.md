@@ -214,7 +214,8 @@ A tmux window can hold several panes at once (a split layout).  By default
 rendered cleanly (output from the other panes is not interleaved into the
 view).  Move between panes with:
 
-- `C-c C-o` (`tmux-control-other-pane`) — cycle to the next pane.
+- `C-c C-o` (`tmux-control-other-pane`) — cycle to the next pane.  In the
+  tiled view (below) this moves to the next pane's window.
 - `M-x tmux-control-select-pane` — jump to a pane by name, completing over
   the window's panes (each labelled by its index, command, and title).
 
