@@ -7408,6 +7408,20 @@ saw); a `completing-read' answers with `choice'."
       (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (push url opened))))
         (tmux-control-follow-hyperlink)
         (should (equal opened '("https://x.example/pull/22")))
+        ;; A click reads the link where it landed, in the clicked window's
+        ;; buffer, wherever point is and whichever buffer is current.
+        (let ((pane (current-buffer)))
+          (save-window-excursion
+            (set-window-buffer (selected-window) pane)
+            (goto-char (point-max))
+            (with-temp-buffer
+              (setq opened nil)
+              (tmux-control-follow-hyperlink
+               (list 'mouse-2 (list (selected-window) 3 '(0 . 0) 0 nil 3)))
+              (should (equal opened '("https://x.example/pull/22")))
+              (should-error (tmux-control-follow-hyperlink
+                             (list 'mouse-2 (list (selected-window) 7 '(0 . 0) 0 nil 7)))
+                            :type 'user-error))))
         (goto-char (point-max))
         (should-error (tmux-control-follow-hyperlink) :type 'user-error)))))
 
