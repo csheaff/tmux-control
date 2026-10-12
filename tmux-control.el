@@ -620,6 +620,11 @@ tmux can split a multibyte character across two %output messages; the
 per-message decoding leaves the halves as raw bytes, so the trailing
 incomplete bytes are carried here and prepended to the next chunk by
 `tmux-control--feed-terminal'.")
+(defvar-local tmux-control--hyperlink nil
+  "The URI of the OSC 8 hyperlink open in the pane's output, or nil.
+Text Eat writes while it is set links to it.")
+(defvar-local tmux-control--hyperlink-carry ""
+  "The start of an OSC 8 sequence held for the next feed to finish.")
 (defvar-local tmux-control--active-pane nil)
 (defvar-local tmux-control-pane-directory-mode nil
   "Non-nil when this buffer tracks its active pane's working directory.")
@@ -3425,52 +3430,149 @@ A closing bracket stays when the URL opened it, as in a Wikipedia title."
   url)
 
 (defun tmux-control--urls-in-text (text width)
-  "URLs in TEXT, a screen of rows WIDTH columns wide, lowest row first.
-Within a row they run left to right.  A URL longer than the rest of its
-row runs on to the next, which a TUI may indent, so a row that fills
-WIDTH is joined to the one below it without that row's leading blanks."
+  "URLs in TEXT, a screen of rows WIDTH columns wide, as (ROW . URL).
+ROW counts from 0 at the top and is the row the URL's line starts on.
+The lowest rows come first; within a row URLs run left to right.  A URL
+longer than the rest of its row runs on to the next, which a TUI may
+indent, so a row that fills WIDTH is joined to the one below it without
+that row's leading blanks."
   (let ((rows (split-string text "\n"))
+        (n 0)
         lines urls)
     (while rows
       (let* ((row (pop rows))
-             (line row))
+             (line row)
+             (first n))
+        (setq n (1+ n))
         (while (and rows (>= (string-width row) width))
           (setq row (pop rows)
+                n (1+ n)
                 line (concat line (string-trim-left row))))
-        (push line lines)))
+        (push (cons first line) lines)))
     (dolist (line lines)
       (let ((start 0) found)
-        (while (string-match "https?://[^ \t\n<>\"'`]+" line start)
+        (while (string-match "https?://[^ \t\n<>\"'`]+" (cdr line) start)
           (setq start (match-end 0))
-          (push (tmux-control--trim-url (match-string 0 line)) found))
+          (push (cons (car line) (tmux-control--trim-url (match-string 0 (cdr line))))
+                found))
         (setq urls (append urls (nreverse found)))))
-    (delete-dups urls)))
+    urls))
+
+(defun tmux-control--hyperlinks-in-region (beg end)
+  "OSC 8 hyperlinks between BEG and END, as (ROW URI . LABEL), lowest first.
+ROW counts lines from BEG, from 0, and is the row the link starts on.
+LABEL is the text the link shows, or nil when that is the URI itself.  A
+link that runs over rows, as a program closes and reopens it on each, is
+one link."
+  (let ((pos beg) (row 0) (counted beg) links)
+    (while (setq pos (text-property-not-all pos end 'tmux-control-hyperlink nil))
+      (let* ((uri (get-text-property pos 'tmux-control-hyperlink))
+             (stop (next-single-property-change pos 'tmux-control-hyperlink nil end))
+             (text (string-trim (buffer-substring-no-properties pos stop)))
+             (last (car links)))
+        (setq row (+ row (cl-count ?\n (buffer-substring-no-properties counted pos)))
+              counted pos)
+        (if (and last (equal (nth 1 last) uri)
+                 (string-blank-p (buffer-substring-no-properties (nth 3 last) pos)))
+            ;; Rejoin a link's rows: a URL broke mid-word, prose at a space.
+            (let ((joined (concat (nth 2 last) text)))
+              (setf (nth 2 last) (if (string-prefix-p joined uri)
+                                     joined
+                                   (concat (nth 2 last) " " text))
+                    (nth 3 last) stop))
+          (push (list row uri text stop) links))
+        (setq pos stop)))
+    (mapcar (lambda (link)
+              (cons (nth 0 link)
+                    (cons (nth 1 link)
+                          (unless (equal (nth 2 link) (nth 1 link)) (nth 2 link)))))
+            links)))
+
+(defun tmux-control--screen-links ()
+  "Links on the live screen as (URL . LABEL), the lowest first.
+They are the hyperlinks programs marked (OSC 8), with the text they
+show as LABEL, and the URLs shown as text, with a nil LABEL."
+  (let ((links
+         (append
+          (tmux-control--hyperlinks-in-region
+           (eat-term-display-beginning tmux-control--terminal)
+           (eat-term-end tmux-control--terminal))
+          (mapcar (lambda (url) (cons (car url) (cons (cdr url) nil)))
+                  (tmux-control--urls-in-text
+                   (string-join (tmux-control--visible-screen-lines (current-buffer)) "\n")
+                   (car (eat-term-size tmux-control--terminal))))))
+        result)
+    ;; `sort' is stable, so each row keeps the order found above.
+    (dolist (link (sort links (lambda (a b) (> (car a) (car b)))))
+      (let ((known (assoc (cadr link) result)))
+        (cond ((not known) (push (cdr link) result))
+              ((not (cdr known)) (setcdr known (cddr link))))))
+    (nreverse result)))
 
 ;;;###autoload
 (defun tmux-control-open-link (&optional copy)
-  "Open a URL shown on the live screen in the browser.
-With several, choose one, the lowest on the screen first.  With prefix
-argument COPY, put it on the kill ring instead.  Bound to \\`C-c C-u'.
-The terminal is not a place Emacs can click, so this reads the text
-the pane shows; a URL that a TUI wrapped over rows is joined again."
+  "Open a link on the live screen in the browser.
+A link is text a program marked as one (OSC 8), such as a pull request
+named by its number, or a URL shown as text.  With several, choose one,
+the lowest on the screen first, with the text a marked link shows beside
+it.  With prefix argument COPY, put it on the kill ring instead.  Bound
+to \\`C-c C-u'.  A URL that a TUI wrapped over rows is joined again."
   (interactive "P")
   (unless (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
     (user-error "No tmux-control terminal in this buffer"))
-  (let* ((urls (tmux-control--urls-in-text
-                (string-join (tmux-control--visible-screen-lines (current-buffer)) "\n")
-                (car (eat-term-size tmux-control--terminal))))
-         (url (cond ((null urls) (user-error "No link on the screen"))
-                    ((null (cdr urls)) (car urls))
-                    (t (completing-read (if copy "Copy link: " "Open link: ")
-                                        (lambda (string predicate action)
-                                          (if (eq action 'metadata)
-                                              '(metadata (display-sort-function . identity))
-                                            (complete-with-action action urls string predicate)))
-                                        nil t)))))
+  (let* ((links (tmux-control--screen-links))
+         (url (cond ((null links) (user-error "No link on the screen"))
+                    ((null (cdr links)) (caar links))
+                    (t (completing-read
+                        (if copy "Copy link: " "Open link: ")
+                        (lambda (string predicate action)
+                          (if (eq action 'metadata)
+                              `(metadata
+                                (display-sort-function . identity)
+                                (annotation-function
+                                 . ,(lambda (url)
+                                      (when-let* ((label (cdr (assoc url links))))
+                                        (concat "  " label)))))
+                            (complete-with-action action links string predicate)))
+                        nil t)))))
     (if copy
         (progn (kill-new url) (message "Copied %s" url))
       (browse-url url)
       (message "Opened %s" url))))
+
+(defvar tmux-control-hyperlink-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-2] #'tmux-control-follow-hyperlink)
+    (define-key map [follow-link] 'mouse-face)
+    map)
+  "Keymap on a hyperlink in a pane: a click opens it.
+It binds only the mouse, so keys typed on the live screen reach the pane.")
+
+(defvar tmux-control-scrollback-hyperlink-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map tmux-control-hyperlink-map)
+    (define-key map (kbd "RET") #'tmux-control-follow-hyperlink)
+    map)
+  "Keymap on a hyperlink in the scrollback buffer, where RET opens it too.")
+
+(defun tmux-control--hyperlink-properties (uri map)
+  "Text properties that make text a link to URI, with keymap MAP."
+  (list 'tmux-control-hyperlink uri 'mouse-face 'highlight 'help-echo uri
+        'keymap map))
+
+(defun tmux-control-follow-hyperlink (&optional event)
+  "Open the hyperlink clicked on with EVENT, or the one at point."
+  (interactive (list last-nonmenu-event))
+  (let* ((start (and (mouse-event-p event) (event-start event)))
+         (pos (if start (posn-point start) (point)))
+         (uri (and pos
+                   (get-text-property pos 'tmux-control-hyperlink
+                                      (if start (window-buffer (posn-window start))
+                                        (current-buffer))))))
+    (unless uri
+      (user-error "No link here"))
+    (browse-url uri)
+    (message "Opened %s" uri)))
 
 (defun tmux-control--select-tiled-pane-window (pane)
   "In a tiled view, select the window that shows PANE in the selected frame.
@@ -4808,7 +4910,9 @@ so the tmux-control keys get out of the way; the mode line shows
     (setq tmux-control--accumulator "")
     (setq tmux-control--display-dirty nil)
     (setq tmux-control--output-batch nil)
-    (setq tmux-control--utf8-carry "")
+    (setq tmux-control--utf8-carry ""
+          tmux-control--hyperlink nil
+          tmux-control--hyperlink-carry "")
     (setq tmux-control--capture-trailing-p nil)
     (setq tmux-control--active-pane nil)
     (setq tmux-control--alt-screen-honored t)
@@ -4956,14 +5060,32 @@ whose `default-directory' is remote."
   "Convert ANSI escapes in TEXT to face text properties.
 Apply colors across the whole multi-line string so SGR state
 carries correctly across line boundaries, then remove any
-remaining non-printing control sequences (for example OSC
-hyperlinks) that are not colors.  The result carries colors as
-text properties and contains no escape characters, so the
-scrollback compaction heuristics -- which compare characters and
-ignore text properties -- keep working unchanged."
+remaining non-printing control sequences that are not colors.
+OSC 8 hyperlinks become links first, which RET or a click opens.
+The result carries colors and links as text properties and contains
+no escape characters, so the scrollback compaction heuristics --
+which compare characters and ignore text properties -- keep working
+unchanged."
   (tmux-control--strip-ansi
    (let ((ansi-color-context nil))
-     (ansi-color-apply text))))
+     (ansi-color-apply (tmux-control--propertize-hyperlinks text)))))
+
+(defun tmux-control--propertize-hyperlinks (text)
+  "TEXT with its OSC 8 hyperlinks taken out and their text made links."
+  (if (not (string-search "\e]8;" text))
+      text
+    (let ((split (tmux-control--hyperlink-runs text))
+          uri pieces)
+      (dolist (run (car split))
+        (if (consp run)
+            (setq uri (cdr run))
+          (push (if uri
+                    (apply #'propertize run
+                           (tmux-control--hyperlink-properties
+                            uri tmux-control-scrollback-hyperlink-map))
+                  run)
+                pieces)))
+      (apply #'concat (nreverse (cons (cdr split) pieces))))))
 
 (defvar tmux-control--auto-frame-start nil
   "Auto-detected redraw frame-top marker (a trimmed line string), or nil.
@@ -6838,6 +6960,24 @@ ORIGINAL is `eat--t-write', which writes STRING from BEGIN to END."
 
 (advice-add 'eat--t-write :around #'tmux-control--eat-write-composed)
 
+(defun tmux-control--eat-write-hyperlink (original string &optional begin end)
+  "Make the text Eat writes a link while the pane's output has one open.
+Eat copies the text properties of what it writes, so the link stays with
+the cells: overwriting or erasing them removes it, as in a terminal.
+ORIGINAL is `eat--t-write', which writes STRING from BEGIN to END."
+  (if (not tmux-control--hyperlink)
+      (funcall original string begin end)
+    (let ((text (substring string (or begin 0) end)))
+      (add-text-properties 0 (length text)
+                           (tmux-control--hyperlink-properties
+                            tmux-control--hyperlink tmux-control-hyperlink-map)
+                           text)
+      (funcall original text))))
+
+;; Innermost, so the accents composed above are written as links too.
+(advice-add 'eat--t-write :around #'tmux-control--eat-write-hyperlink
+            '((depth . 90)))
+
 ;;;; Terminal emulation fixes
 
 ;; Eat departs from xterm and tmux in a few control functions that
@@ -7320,6 +7460,54 @@ SOS string is left alone; only an OSC also ends at BEL."
       (push (substring output start) pieces)
       (apply #'concat (nreverse pieces)))))
 
+(defconst tmux-control--hyperlink-regexp
+  (concat "\e]8;[^;\000-\037\177]*;\\([^\000-\037\177]*\\)"
+          "\\(?:\a\\|\e\\\\\\)")
+  "An OSC 8 sequence: it opens a hyperlink to the URI it holds, or closes
+one when that is empty.")
+
+(defconst tmux-control--hyperlink-start-regexp
+  "\e\\(?:]\\(?:8\\(?:;[^\000-\037\177]*\e?\\)?\\)?\\)?\\'"
+  "What could start an OSC 8 sequence, at the end of a chunk of output.")
+
+(defconst tmux-control--hyperlink-carry-limit 8192
+  "Characters of an unfinished OSC 8 sequence held for the next chunk.
+A longer one is not held: it is fed to Eat, which ignores it.")
+
+(defun tmux-control--hyperlink-runs (output)
+  "Split OUTPUT at the OSC 8 sequences that open and close hyperlinks.
+Return (RUNS . REST).  RUNS holds, in order, the text between the
+sequences and, for each sequence, (hyperlink . URI), with a nil URI when
+it closes the link.  REST is what may be an OSC 8 sequence cut off at the
+end of OUTPUT, held for the next chunk, or \"\".  Pure, for unit testing."
+  (let ((start 0) runs)
+    (while (string-match tmux-control--hyperlink-regexp output start)
+      (when (> (match-beginning 0) start)
+        (push (substring output start (match-beginning 0)) runs))
+      (let ((uri (match-string 1 output)))
+        (push (cons 'hyperlink (and (> (length uri) 0) uri)) runs))
+      (setq start (match-end 0)))
+    (let ((cut (and (string-match tmux-control--hyperlink-start-regexp output start)
+                    (< (- (length output) (match-beginning 0))
+                       tmux-control--hyperlink-carry-limit)
+                    (match-beginning 0))))
+      (when (> (or cut (length output)) start)
+        (push (substring output start cut) runs))
+      (cons (nreverse runs) (if cut (substring output cut) "")))))
+
+(defun tmux-control--feed-hyperlinked (output)
+  "Feed OUTPUT to Eat, following the hyperlinks it opens and closes.
+Eat ignores OSC 8, which would leave only a link's text, so the sequences
+are taken out here and set `tmux-control--hyperlink' for
+`tmux-control--eat-write-hyperlink'."
+  (let ((split (tmux-control--hyperlink-runs
+                (concat tmux-control--hyperlink-carry output))))
+    (setq tmux-control--hyperlink-carry (cdr split))
+    (dolist (run (car split))
+      (if (stringp run)
+          (eat-term-process-output tmux-control--terminal run)
+        (setq tmux-control--hyperlink (cdr run))))))
+
 (defun tmux-control--feed-terminal (output)
   "Process decoded terminal OUTPUT into Eat without redisplaying.
 
@@ -7359,10 +7547,14 @@ whole before they reach Eat."
                     tmux-control--utf8-carry output)))
           (setq tmux-control--utf8-carry (cdr res)
                 output (car res))))
-      (eat-term-process-output tmux-control--terminal
-                               (if tmux-control--vt-fixes
-                                   (tmux-control--bare-line-feeds-to-index output)
-                                 output))
+      (when tmux-control--vt-fixes
+        (setq output (tmux-control--bare-line-feeds-to-index output)))
+      ;; Fast path: nothing that opens, closes or begins a hyperlink.
+      (if (and (string-empty-p tmux-control--hyperlink-carry)
+               (not (string-search "\e]8" output))
+               (not (string-match-p "\e]?\\'" output)))
+          (eat-term-process-output tmux-control--terminal output)
+        (tmux-control--feed-hyperlinked output))
       (setq tmux-control--display-dirty t))))
 
 (defconst tmux-control--eat-redisplay-source-hash
@@ -7625,7 +7817,9 @@ flushed once per filter chunk."
   (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
     ;; A full repaint stands alone; drop any partial multibyte char carried
     ;; from streamed output so it cannot prefix the repaint.
-    (setq tmux-control--utf8-carry "")
+    (setq tmux-control--utf8-carry ""
+          tmux-control--hyperlink nil
+          tmux-control--hyperlink-carry "")
     (let ((sync-windows (tmux-control--current-sync-windows)))
       (tmux-control--feed-terminal output)
       (tmux-control--flush-display sync-windows))))
@@ -8659,6 +8853,8 @@ it asynchronously over the control connection."
               tmux-control--output-batch nil
               tmux-control--display-dirty nil
               tmux-control--utf8-carry ""
+              tmux-control--hyperlink nil
+              tmux-control--hyperlink-carry ""
               tmux-control--alt-screen-honored t
               tmux-control--seed-cursor nil
               tmux-control--seed-cursor-visible :unknown)
@@ -9158,6 +9354,8 @@ its own and routes commands through CONTROLLER."
             tmux-control--output-batch nil
             tmux-control--display-dirty nil
             tmux-control--utf8-carry ""
+            tmux-control--hyperlink nil
+            tmux-control--hyperlink-carry ""
             tmux-control--alt-screen-honored t
             tmux-control--seed-cursor nil
             tmux-control--seed-cursor-visible :unknown)
@@ -10187,6 +10385,7 @@ also does its usual cleanup."
   (advice-remove #'eat-semi-char-mode #'tmux-control--eat-semi-char-mode-advice)
   (advice-remove #'eat-char-mode #'tmux-control--eat-char-mode-advice)
   (advice-remove 'eat--t-write #'tmux-control--eat-write-composed)
+  (advice-remove 'eat--t-write #'tmux-control--eat-write-hyperlink)
   (advice-remove #'eat--synchronize-scroll
                  #'tmux-control--eat-synchronize-scroll-advice)
   (advice-remove #'eat-self-input #'tmux-control--eat-input-sync-advice)

@@ -297,10 +297,16 @@ view):
 
 - `C-c C-k` disconnects the Emacs control client.
 - `C-c C-r` reconnects it — see "Reconnecting" below.
-- `C-c C-u` (`tmux-control-open-link`) opens a URL shown on the screen in your
+- `C-c C-u` (`tmux-control-open-link`) opens a link on the screen in your
   browser, choosing among them when there are several, the lowest first.
-  `C-u C-c C-u` copies it instead. A URL a TUI wrapped over several rows is
-  joined again, which assumes the row it left runs to the window's edge.
+  `C-u C-c C-u` copies it instead. A link is a URL shown as text, or text a
+  program marked as a link (OSC 8), such as Claude Code naming a pull request
+  `#22`; the chooser shows that text beside its URL. A URL a TUI wrapped over
+  several rows is joined again, which assumes the row it left runs to the
+  window's edge.
+- Text a program marked as a link is a link in Emacs too: hovering shows its
+  URL, and a click opens it, here and in the scrollback view (where `RET` on it
+  does as well). tmux keeps these links in its own history from 3.4 on.
 - `C-c C-l` refreshes the live view from tmux's current visible screen without
   sending input to the pane.
 - `C-c M-o` clears the pane's scrollback — the Emacs-side history above the

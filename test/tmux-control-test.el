@@ -2375,7 +2375,7 @@ each wrapped in an evolving prompt line and a status bar.")
                 (`(add-hook ,hook ,function . ,_)
                  (push (list 'hook (eval hook t) (eval function t)) sites)))))
         (end-of-file nil)))
-    (should (= (length sites) 7))
+    (should (= (length sites) 8))
     ;; The emulation fixes are installed from a table rather than one
     ;; `advice-add' form each.
     (dolist (entry tmux-control--vt-advice)
@@ -7228,8 +7228,8 @@ The terminal is WIDTH x HEIGHT, 12x6 by default."
                           "  ng/path now\n"
                           "http://a.example/x")
                   30)
-                 '("http://a.example/x" "https://c.example/very/long/path"
-                   "http://b.example")))
+                 '((3 . "http://a.example/x") (1 . "https://c.example/very/long/path")
+                   (0 . "http://b.example"))))
   (should-not (tmux-control--urls-in-text "no links here\n" 80)))
 
 (ert-deftest tmux-control-test-urls-keep-their-own-brackets ()
@@ -7237,8 +7237,8 @@ The terminal is WIDTH x HEIGHT, 12x6 by default."
                   (concat "(see https://en.wikipedia.org/wiki/Function_(mathematics)), "
                           "or http://[::1]:8080/a. Then https://x.example/b?c=d;")
                   200)
-                 '("https://en.wikipedia.org/wiki/Function_(mathematics)"
-                   "http://[::1]:8080/a" "https://x.example/b?c=d"))))
+                 '((0 . "https://en.wikipedia.org/wiki/Function_(mathematics)")
+                   (0 . "http://[::1]:8080/a") (0 . "https://x.example/b?c=d")))))
 
 (defmacro tmux-control-test--with-screen (rows &rest body)
   "Run BODY in a buffer whose live screen is ROWS, recording what it does.
@@ -7251,6 +7251,8 @@ saw); a `completing-read' answers with `choice'."
        (cl-letf (((symbol-function 'eat-term-live-p) (lambda (_) t))
                  ((symbol-function 'eat-term-size) (lambda (_) '(80 . 24)))
                  ((symbol-function 'tmux-control--visible-screen-lines) (lambda (_) ,rows))
+                 ((symbol-function 'eat-term-display-beginning) (lambda (_) (point-min)))
+                 ((symbol-function 'eat-term-end) (lambda (_) (point-max)))
                  ((symbol-function 'browse-url) (lambda (url &rest _) (push url opened)))
                  ((symbol-function 'kill-new) (lambda (url &rest _) (push url copied)))
                  ((symbol-function 'completing-read)
@@ -7282,6 +7284,143 @@ saw); a `completing-read' answers with `choice'."
   (tmux-control-test--with-screen '("nothing here")
     (should-error (tmux-control-open-link) :type 'user-error)
     (should-not opened)))
+
+(ert-deftest tmux-control-test-hyperlink-runs ()
+  ;; OSC 8 opens a link with a URI (after optional parameters such as an
+  ;; id) and closes it with none, ended by BEL or by ST as `capture-pane'
+  ;; writes it.
+  (should (equal (tmux-control--hyperlink-runs
+                  "a\e]8;id=1;https://x.example/p\aPR #1\e]8;;\e\\b")
+                 '(("a" (hyperlink . "https://x.example/p") "PR #1" (hyperlink) "b")
+                   . "")))
+  ;; What may be a sequence cut off by the end of a chunk is held back,
+  ;; down to a lone ESC; another sequence is not.
+  (should (equal (tmux-control--hyperlink-runs "a\e]8;;https://x.ex")
+                 '(("a") . "\e]8;;https://x.ex")))
+  (should (equal (tmux-control--hyperlink-runs "a\e]8;;https://x.example\e")
+                 '(("a") . "\e]8;;https://x.example\e")))
+  (should (equal (tmux-control--hyperlink-runs "a\e") '(("a") . "\e")))
+  (should (equal (tmux-control--hyperlink-runs "a\e[0m\e]0;title\a")
+                 '(("a\e[0m\e]0;title\a") . ""))))
+
+(defmacro tmux-control-test--with-pane (width height &rest body)
+  "Run BODY in a tmux-control buffer with an Eat screen WIDTH by HEIGHT."
+  (declare (indent 2))
+  `(with-temp-buffer
+     (tmux-control-mode)
+     (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
+     (unwind-protect
+         (progn
+           (eat-term-resize tmux-control--terminal ,width ,height)
+           ,@body)
+       (let ((inhibit-read-only t))
+         (eat-term-delete tmux-control--terminal)))))
+
+(defun tmux-control-test--feed (&rest chunks)
+  "Feed CHUNKS to the pane in this buffer as separate output, and draw it."
+  (dolist (chunk chunks)
+    (tmux-control--feed-terminal chunk))
+  (let ((inhibit-read-only t))
+    (eat-term-redisplay tmux-control--terminal)))
+
+(defun tmux-control-test--link-at (string)
+  "The hyperlink on the first character of STRING in this buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (search-forward string)
+    (get-text-property (match-beginning 0) 'tmux-control-hyperlink)))
+
+(ert-deftest tmux-control-test-hyperlink-text-links-to-its-uri ()
+  ;; Eat ignores OSC 8, so a link showed only its text: Claude Code names a
+  ;; pull request "PR #22" and the URL was nowhere.  The sequence may be
+  ;; split across output chunks anywhere.
+  (tmux-control-test--with-pane 40 4
+    (tmux-control-test--feed "see \e]8;;https://git" "hub.com/o/r/pull/22\aPR"
+                             " #22\e" "]8;;\a done\r\n")
+    (should (string-prefix-p "see PR #22 done"
+                             (car (tmux-control--visible-screen-lines (current-buffer)))))
+    (should (equal (tmux-control-test--link-at "PR #22") "https://github.com/o/r/pull/22"))
+    (should (equal (tmux-control-test--link-at "#22") "https://github.com/o/r/pull/22"))
+    (should-not (tmux-control-test--link-at "see"))
+    (should-not (tmux-control-test--link-at "done"))
+    (should-not tmux-control--hyperlink)
+    (save-excursion
+      (goto-char (point-min))
+      (search-forward "PR")
+      (should (equal (get-text-property (match-beginning 0) 'help-echo)
+                     "https://github.com/o/r/pull/22"))
+      (should (eq (lookup-key (get-text-property (match-beginning 0) 'keymap) [mouse-2])
+                  #'tmux-control-follow-hyperlink)))
+    (should (equal (tmux-control--screen-links)
+                   '(("https://github.com/o/r/pull/22" . "PR #22"))))
+    ;; Writing over the cells takes the link away, as in a terminal.
+    (tmux-control-test--feed "\e[1;1Hplain text here")
+    (should-not (tmux-control-test--link-at "plain text here"))
+    (should-not (tmux-control--screen-links))))
+
+(ert-deftest tmux-control-test-hyperlink-from-a-capture ()
+  ;; A repaint from `capture-pane -e' ends its sequences with ST.
+  (tmux-control-test--with-pane 40 4
+    (tmux-control-test--feed "\e]8;;https://x.example/a\e\\link\e]8;;\e\\ after")
+    (should (equal (tmux-control-test--link-at "link") "https://x.example/a"))
+    (should-not (tmux-control-test--link-at "after"))))
+
+(ert-deftest tmux-control-test-hyperlink-over-rows-is-one-link ()
+  ;; A URL the terminal wraps is one link whose text is the URL itself; a
+  ;; label a program wraps, closing and reopening the link on each row,
+  ;; reads as one label.
+  (tmux-control-test--with-pane 20 6
+    (tmux-control-test--feed
+     "\e]8;;https://example.com/a/long/path\ahttps://example.com/a/long/path\e]8;;\a\r\n"
+     "\e]8;;https://x.example/22\aPull request\e]8;;\a\r\n"
+     "  \e]8;;https://x.example/22\a#22\e]8;;\a\r\n")
+    (should (equal (tmux-control--screen-links)
+                   '(("https://x.example/22" . "Pull request #22")
+                     ("https://example.com/a/long/path"))))))
+
+(ert-deftest tmux-control-test-open-link-offers-hyperlinks-by-their-text ()
+  ;; Marked links and URLs shown as text are offered together, the lowest
+  ;; first; a marked link shows its text beside it.
+  (tmux-control-test--with-screen '("Opened PR #22" "" "https://plain.example")
+    (insert "Opened "
+            (propertize "PR #22" 'tmux-control-hyperlink "https://x.example/pull/22")
+            "\n\nhttps://plain.example")
+    (let (annotation)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt collection &rest _)
+                   (setq asked (all-completions "" collection)
+                         annotation (alist-get 'annotation-function
+                                               (cdr (funcall collection "" nil 'metadata))))
+                   "https://x.example/pull/22")))
+        (tmux-control-open-link))
+      (should (equal asked '("https://plain.example" "https://x.example/pull/22")))
+      (should (equal (funcall annotation "https://x.example/pull/22") "  PR #22"))
+      (should-not (funcall annotation "https://plain.example"))
+      (should (equal opened '("https://x.example/pull/22"))))))
+
+(ert-deftest tmux-control-test-follow-hyperlink-at-point ()
+  (with-temp-buffer
+    (insert (apply #'propertize "PR #22"
+                   (tmux-control--hyperlink-properties
+                    "https://x.example/pull/22" tmux-control-hyperlink-map)))
+    (goto-char 2)
+    (let (opened)
+      (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (push url opened))))
+        (tmux-control-follow-hyperlink)
+        (should (equal opened '("https://x.example/pull/22")))
+        (goto-char (point-max))
+        (should-error (tmux-control-follow-hyperlink) :type 'user-error)))))
+
+(ert-deftest tmux-control-test-scrollback-keeps-hyperlinks ()
+  ;; The scrollback view strips escapes, which took links with them.
+  (let ((text (tmux-control--colorize-scrollback
+               "a \e]8;;https://x.example\e\\\e[34mlink\e[0m\e]8;;\e\\ b")))
+    (should (equal (substring-no-properties text) "a link b"))
+    (should (equal (get-text-property 2 'tmux-control-hyperlink text) "https://x.example"))
+    (should (get-text-property 2 'font-lock-face text))
+    (should-not (get-text-property 7 'tmux-control-hyperlink text))
+    (should (eq (lookup-key (get-text-property 2 'keymap text) (kbd "RET"))
+                #'tmux-control-follow-hyperlink))))
 
 (ert-deftest tmux-control-test-private-api-names-remain ()
   ;; Packages written against 0.6.0 call these directly.
