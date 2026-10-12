@@ -7221,16 +7221,24 @@ The terminal is WIDTH x HEIGHT, 12x6 by default."
 
 (ert-deftest tmux-control-test-urls-on-the-screen ()
   ;; A URL a TUI wrapped at the window's edge is joined, ignoring the
-  ;; indent of its next row; punctuation after one is not part of it.
+  ;; indent of its next row; the lowest row comes first.
   (should (equal (tmux-control--urls-in-text
-                  (concat "see http://a.example/x.\n"
-                          "open https://b.example/very/lo\n"
-                          "  ng/path (and https://c.example)\n"
+                  (concat "see http://b.example and\n"
+                          "open https://c.example/very/lo\n"
+                          "  ng/path now\n"
                           "http://a.example/x")
                   30)
-                 '("http://a.example/x" "https://c.example"
-                   "https://b.example/very/long/path")))
+                 '("http://a.example/x" "https://c.example/very/long/path"
+                   "http://b.example")))
   (should-not (tmux-control--urls-in-text "no links here\n" 80)))
+
+(ert-deftest tmux-control-test-urls-keep-their-own-brackets ()
+  (should (equal (tmux-control--urls-in-text
+                  (concat "(see https://en.wikipedia.org/wiki/Function_(mathematics)), "
+                          "or http://[::1]:8080/a. Then https://x.example/b?c=d;")
+                  200)
+                 '("https://en.wikipedia.org/wiki/Function_(mathematics)"
+                   "http://[::1]:8080/a" "https://x.example/b?c=d"))))
 
 (ert-deftest tmux-control-test-private-api-names-remain ()
   ;; Packages written against 0.6.0 call these directly.

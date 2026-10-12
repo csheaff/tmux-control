@@ -3409,26 +3409,41 @@ by name."
         (tmux-control-select-pane next)
       (tmux-control--send-command "select-pane -t :.+"))))
 
+(defun tmux-control--trim-url (url)
+  "URL without the punctuation after it that belongs to the prose.
+A closing bracket stays when the URL opened it, as in a Wikipedia title."
+  (let (done)
+    (while (and (not done) (> (length url) 0))
+      (let ((last (aref url (1- (length url)))))
+        (if (or (memq last '(?. ?, ?\; ?: ?! ??))
+                (and (memq last '(?\) ?\] ?}))
+                     (< (seq-count (apply-partially #'eq (pcase last (?\) ?\() (?\] ?\[) (_ ?{)))
+                                   url)
+                        (seq-count (apply-partially #'eq last) url))))
+            (setq url (substring url 0 -1))
+          (setq done t)))))
+  url)
+
 (defun tmux-control--urls-in-text (text width)
-  "URLs in TEXT, a screen of rows WIDTH columns wide, bottom-most first.
-A URL longer than the rest of its row runs on to the next, which a TUI
-may indent, so a row that fills WIDTH is joined to the one below it
-without that row's leading blanks.  Trailing punctuation is not part of
-a URL."
+  "URLs in TEXT, a screen of rows WIDTH columns wide, lowest row first.
+Within a row they run left to right.  A URL longer than the rest of its
+row runs on to the next, which a TUI may indent, so a row that fills
+WIDTH is joined to the one below it without that row's leading blanks."
   (let ((rows (split-string text "\n"))
         lines urls)
     (while rows
-      (let ((line (pop rows)))
-        (while (and rows (>= (string-width line) width))
-          (setq line (concat line (string-trim-left (pop rows)))))
+      (let* ((row (pop rows))
+             (line row))
+        (while (and rows (>= (string-width row) width))
+          (setq row (pop rows)
+                line (concat line (string-trim-left row))))
         (push line lines)))
     (dolist (line lines)
       (let ((start 0) found)
-        (while (string-match "https?://[^][ \t\n<>\"'`(){}]+" line start)
+        (while (string-match "https?://[^ \t\n<>\"'`]+" line start)
           (setq start (match-end 0))
-          (push (replace-regexp-in-string "[.,;:!?]+\\'" "" (match-string 0 line))
-                found))
-        (setq urls (append found urls))))
+          (push (tmux-control--trim-url (match-string 0 line)) found))
+        (setq urls (append urls (nreverse found)))))
     (delete-dups urls)))
 
 ;;;###autoload
@@ -3442,8 +3457,7 @@ the pane shows; a URL that a TUI wrapped over rows is joined again."
   (unless (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
     (user-error "No tmux-control terminal in this buffer"))
   (let* ((urls (tmux-control--urls-in-text
-                (buffer-substring-no-properties
-                 (eat-term-display-beginning tmux-control--terminal) (point-max))
+                (string-join (tmux-control--visible-screen-lines (current-buffer)) "\n")
                 (car (eat-term-size tmux-control--terminal))))
          (url (cond ((null urls) (user-error "No link on the screen"))
                     ((null (cdr urls)) (car urls))
