@@ -272,6 +272,58 @@ the full async pipeline (process filter -> batch -> Eat), not just the seed."
         (kill-buffer buf))
       (tmux-control-it--tmux-ok "kill-server"))))
 
+(defun tmux-control-it--link-on (buf text)
+  "The hyperlink on an occurrence of TEXT in BUF, or nil."
+  (with-current-buffer buf
+    (save-excursion
+      (goto-char (point-min))
+      (let (uri)
+        (while (and (not uri) (search-forward text nil t))
+          (setq uri (get-text-property (match-beginning 0) 'tmux-control-hyperlink)))
+        uri))))
+
+(defun tmux-control-it--print-link (uri label)
+  "Have the shell in pane t print LABEL as an OSC 8 link to URI.
+The label is printed in two halves, so the command line does not show it."
+  (let ((half (/ (length label) 2)))
+    (tmux-control-it--tmux
+     "send-keys" "-t" "t"
+     (format "printf '\\033]8;;%s\\007%%s%%s\\033]8;;\\007\\n' %s %s"
+             uri (substring label 0 half) (substring label half))
+     "Enter")))
+
+(ert-deftest tmux-control-it-hyperlinks-stay-links ()
+  "A program's OSC 8 links are links in the buffer, whether they stream in
+or are painted from tmux's capture on connecting, which keeps them from
+tmux 3.4 on."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-x" "80" "-y" "24")
+  (tmux-control-it--print-link "https://x.example/seed" "BEFORE_LINK")
+  (tmux-control-it--pump-until
+   5 (lambda () (string-match-p "BEFORE_LINK"
+                                (tmux-control-it--tmux "capture-pane" "-p" "-t" "t"))))
+  (let ((buf (tmux-control-connect nil tmux-control-it--socket "t"))
+        (version (version-to-list
+                  (replace-regexp-in-string
+                   "[^0-9.].*" "" (string-trim (string-remove-prefix
+                                                "tmux " (car (process-lines "tmux" "-V"))))))))
+    (unwind-protect
+        (progn
+          (when (version-list-<= '(3 4) version)
+            (should (equal (tmux-control-it--pump-until
+                            5 (lambda () (tmux-control-it--link-on buf "BEFORE_LINK")))
+                           "https://x.example/seed")))
+          (tmux-control-it--pump 1)
+          (tmux-control-it--print-link "https://x.example/stream" "AFTER_LINK")
+          (should (equal (tmux-control-it--pump-until
+                          5 (lambda () (tmux-control-it--link-on buf "AFTER_LINK")))
+                         "https://x.example/stream")))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf (ignore-errors (tmux-control-disconnect)))
+        (kill-buffer buf))
+      (tmux-control-it--tmux-ok "kill-server"))))
+
 (ert-deftest tmux-control-it-adopt-window-size-clears-warning ()
   "Adoption clears manual and inherited-size warnings in a sibling buffer.
 The Emacs dimensions stay unchanged throughout, exercising the cached-size
