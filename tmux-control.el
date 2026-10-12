@@ -917,6 +917,7 @@ kills, which are deliberate.")
     (define-key map (kbd "C-c C-l") #'tmux-control-clear-and-repaint)
     (define-key map (kbd "C-c M-o") #'tmux-control-clear-scrollback)
     (define-key map (kbd "C-c C-o") #'tmux-control-other-pane)
+    (define-key map (kbd "C-c C-u") #'tmux-control-open-link)
     (define-key map (kbd "C-c C-t") #'tmux-control-toggle-tiling)
     (define-key map (kbd "C-c C-n") #'tmux-control-next-window)
     (define-key map (kbd "C-c C-p") #'tmux-control-previous-window)
@@ -3407,6 +3408,55 @@ by name."
     (if next
         (tmux-control-select-pane next)
       (tmux-control--send-command "select-pane -t :.+"))))
+
+(defun tmux-control--urls-in-text (text width)
+  "URLs in TEXT, a screen of rows WIDTH columns wide, bottom-most first.
+A URL longer than the rest of its row runs on to the next, which a TUI
+may indent, so a row that fills WIDTH is joined to the one below it
+without that row's leading blanks.  Trailing punctuation is not part of
+a URL."
+  (let ((rows (split-string text "\n"))
+        lines urls)
+    (while rows
+      (let ((line (pop rows)))
+        (while (and rows (>= (string-width line) width))
+          (setq line (concat line (string-trim-left (pop rows)))))
+        (push line lines)))
+    (dolist (line lines)
+      (let ((start 0) found)
+        (while (string-match "https?://[^][ \t\n<>\"'`(){}]+" line start)
+          (setq start (match-end 0))
+          (push (replace-regexp-in-string "[.,;:!?]+\\'" "" (match-string 0 line))
+                found))
+        (setq urls (append found urls))))
+    (delete-dups urls)))
+
+;;;###autoload
+(defun tmux-control-open-link (&optional copy)
+  "Open a URL shown on the live screen in the browser.
+With several, choose one, the lowest on the screen first.  With prefix
+argument COPY, put it on the kill ring instead.  Bound to \\`C-c C-u'.
+The terminal is not a place Emacs can click, so this reads the text
+the pane shows; a URL that a TUI wrapped over rows is joined again."
+  (interactive "P")
+  (unless (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+    (user-error "No tmux-control terminal in this buffer"))
+  (let* ((urls (tmux-control--urls-in-text
+                (buffer-substring-no-properties
+                 (eat-term-display-beginning tmux-control--terminal) (point-max))
+                (car (eat-term-size tmux-control--terminal))))
+         (url (cond ((null urls) (user-error "No link on the screen"))
+                    ((null (cdr urls)) (car urls))
+                    (t (completing-read (if copy "Copy link: " "Open link: ")
+                                        (lambda (string predicate action)
+                                          (if (eq action 'metadata)
+                                              '(metadata (display-sort-function . identity))
+                                            (complete-with-action action urls string predicate)))
+                                        nil t)))))
+    (if copy
+        (progn (kill-new url) (message "Copied %s" url))
+      (browse-url url)
+      (message "Opened %s" url))))
 
 (defun tmux-control--select-tiled-pane-window (pane)
   "In a tiled view, select the window that shows PANE in the selected frame.

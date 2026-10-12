@@ -7219,6 +7219,19 @@ The terminal is WIDTH x HEIGHT, 12x6 by default."
     (should (equal (tmux-control-window-id) "@5"))
     (should-not tmux-control--window-id)))
 
+(ert-deftest tmux-control-test-urls-on-the-screen ()
+  ;; A URL a TUI wrapped at the window's edge is joined, ignoring the
+  ;; indent of its next row; punctuation after one is not part of it.
+  (should (equal (tmux-control--urls-in-text
+                  (concat "see http://a.example/x.\n"
+                          "open https://b.example/very/lo\n"
+                          "  ng/path (and https://c.example)\n"
+                          "http://a.example/x")
+                  30)
+                 '("http://a.example/x" "https://c.example"
+                   "https://b.example/very/long/path")))
+  (should-not (tmux-control--urls-in-text "no links here\n" 80)))
+
 (ert-deftest tmux-control-test-private-api-names-remain ()
   ;; Packages written against 0.6.0 call these directly.
   (dolist (fn '(tmux-control--connect-or-switch tmux-control--send-command
