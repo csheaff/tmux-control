@@ -7219,6 +7219,70 @@ The terminal is WIDTH x HEIGHT, 12x6 by default."
     (should (equal (tmux-control-window-id) "@5"))
     (should-not tmux-control--window-id)))
 
+(ert-deftest tmux-control-test-urls-on-the-screen ()
+  ;; A URL a TUI wrapped at the window's edge is joined, ignoring the
+  ;; indent of its next row; the lowest row comes first.
+  (should (equal (tmux-control--urls-in-text
+                  (concat "see http://b.example and\n"
+                          "open https://c.example/very/lo\n"
+                          "  ng/path now\n"
+                          "http://a.example/x")
+                  30)
+                 '("http://a.example/x" "https://c.example/very/long/path"
+                   "http://b.example")))
+  (should-not (tmux-control--urls-in-text "no links here\n" 80)))
+
+(ert-deftest tmux-control-test-urls-keep-their-own-brackets ()
+  (should (equal (tmux-control--urls-in-text
+                  (concat "(see https://en.wikipedia.org/wiki/Function_(mathematics)), "
+                          "or http://[::1]:8080/a. Then https://x.example/b?c=d;")
+                  200)
+                 '("https://en.wikipedia.org/wiki/Function_(mathematics)"
+                   "http://[::1]:8080/a" "https://x.example/b?c=d"))))
+
+(defmacro tmux-control-test--with-screen (rows &rest body)
+  "Run BODY in a buffer whose live screen is ROWS, recording what it does.
+Binds `opened', `copied' and `asked' (the candidates `completing-read'
+saw); a `completing-read' answers with `choice'."
+  (declare (indent 1))
+  `(with-temp-buffer
+     (let (opened copied asked choice)
+       (setq-local tmux-control--terminal 'terminal)
+       (cl-letf (((symbol-function 'eat-term-live-p) (lambda (_) t))
+                 ((symbol-function 'eat-term-size) (lambda (_) '(80 . 24)))
+                 ((symbol-function 'tmux-control--visible-screen-lines) (lambda (_) ,rows))
+                 ((symbol-function 'browse-url) (lambda (url &rest _) (push url opened)))
+                 ((symbol-function 'kill-new) (lambda (url &rest _) (push url copied)))
+                 ((symbol-function 'completing-read)
+                  (lambda (_prompt collection &rest _)
+                    (setq asked (all-completions "" collection))
+                    choice)))
+         ,@body))))
+
+(ert-deftest tmux-control-test-open-link-opens-the-only-link-without-asking ()
+  (tmux-control-test--with-screen '("visit https://a.example/x now")
+    (tmux-control-open-link)
+    (should (equal opened '("https://a.example/x")))
+    (should-not asked)))
+
+(ert-deftest tmux-control-test-open-link-asks-among-several-lowest-first ()
+  (tmux-control-test--with-screen '("https://top.example" "https://bottom.example")
+    (setq choice "https://top.example")
+    (tmux-control-open-link)
+    (should (equal asked '("https://bottom.example" "https://top.example")))
+    (should (equal opened '("https://top.example")))))
+
+(ert-deftest tmux-control-test-open-link-with-prefix-copies-instead ()
+  (tmux-control-test--with-screen '("https://a.example/x")
+    (tmux-control-open-link t)
+    (should (equal copied '("https://a.example/x")))
+    (should-not opened)))
+
+(ert-deftest tmux-control-test-open-link-without-a-link-says-so ()
+  (tmux-control-test--with-screen '("nothing here")
+    (should-error (tmux-control-open-link) :type 'user-error)
+    (should-not opened)))
+
 (ert-deftest tmux-control-test-private-api-names-remain ()
   ;; Packages written against 0.6.0 call these directly.
   (dolist (fn '(tmux-control--connect-or-switch tmux-control--send-command
