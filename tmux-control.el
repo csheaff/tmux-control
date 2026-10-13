@@ -1957,11 +1957,15 @@ The normal `bookmark-set' command (C-x r m) also works in live views."
   "Identity of the current report, used to reject stale live-query replies.")
 
 (defcustom tmux-control-pause-log-threshold 0.5
-  "Seconds Emacs must stop responding for `tmux-control-pause-log-mode' to note it."
+  "Seconds Emacs must stop responding for `tmux-control-pause-log-mode' to note it.
+A command, tmux reply or timer that takes this long is always noted.
+Other pauses, such as a slow redisplay, are seen between the mode's
+checks, four times a second, so one is noted once it lasts this long
+and up to a quarter of a second more."
   :type 'number
   :package-version '(tmux-control . "0.8.0"))
 
-(defconst tmux-control--pause-log-interval 0.5
+(defconst tmux-control--pause-log-interval 0.25
   "Seconds between the pause log's checks that Emacs responds.")
 
 (defconst tmux-control--pause-log-size 50
@@ -1990,8 +1994,8 @@ output, such as TRAMP's, most likely did.  A note
 also gives the time spent collecting garbage, and the buffer on screen:
 its mode, its size and whether its directory is remote.
 `tmux-control-diagnostics' lists the latest notes, to send with a
-report.  Global, off by default: while on, it checks twice a second and
-times each command, timer and tmux reply."
+report.  Global, off by default: while on, it checks four times a
+second and times each command, timer and tmux reply."
   :global t :group 'tmux-control
   (tmux-control--pause-log-stop)
   (when tmux-control-pause-log-mode
@@ -2037,7 +2041,10 @@ run while it waits, so it is only blamed for a pause it caused."
     (let ((command this-command))
       (tmux-control--pause-log-took
        tmux-control--pause-log-command
-       (lambda () (format "the command %s" (or command "(unknown)")))))
+       ;; Only a name: a lambda or keyboard macro would bring its text.
+       (lambda () (if (and command (symbolp command))
+                      (format "the command %s" command)
+                    "a command with no name"))))
     (setq tmux-control--pause-log-command nil)))
 
 (defun tmux-control--pause-log-filter (filter process chunk)
@@ -2065,9 +2072,13 @@ run while it waits, so it is only blamed for a pause it caused."
 (defun tmux-control--pause-log-check ()
   "Note a pause since the last check, then start counting again."
   (let* ((now (float-time))
-         (pause (- now tmux-control--pause-log-tick tmux-control--pause-log-interval)))
+         ;; How late this check is: the least the pause can have lasted,
+         ;; as it began at most an interval before the check was due.
+         (late (- now tmux-control--pause-log-tick tmux-control--pause-log-interval))
+         ;; Work that took longer counts whole, wherever it began.
+         (pause (max late (or (car tmux-control--pause-log-slowest) 0))))
     ;; Ten minutes is a computer asleep, not Emacs stuck.
-    (when (and (>= pause tmux-control-pause-log-threshold) (< pause 600))
+    (when (and (>= pause tmux-control-pause-log-threshold) (< late 600))
       (tmux-control--pause-log-note pause (- gc-elapsed tmux-control--pause-log-gc)))
     (setq tmux-control--pause-log-tick (float-time)
           tmux-control--pause-log-gc gc-elapsed
@@ -2078,8 +2089,6 @@ run while it waits, so it is only blamed for a pause it caused."
   (let* ((slowest tmux-control--pause-log-slowest)
          (buffer (window-buffer (selected-window)))
          (note
-          ;; The checks are an interval apart, so the pause began up to
-          ;; one interval before it was due.
           (format "%s  No response for at least %.2f s: %s; %.2f s collecting garbage; showing %s (%s, %d characters, %s directory)"
                   (format-time-string "%F %T")
                   pause

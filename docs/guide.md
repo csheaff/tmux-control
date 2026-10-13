@@ -771,13 +771,16 @@ A freeze that comes and goes is hard to catch in the act.
 `M-x tmux-control-pause-log-mode` notes each time Emacs stops responding for
 `tmux-control-pause-log-threshold` seconds (half a second by default), with
 the slowest work during it: a command, output from tmux, or a timer, by name.
+Work that takes that long is always noted; a pause the mode only sees
+between its checks, four times a second, is noted once it lasts up to a
+quarter of a second longer.
 When none of those took most of it, redisplay or another program's output,
 such as TRAMP's, most likely did. Each note also gives the time spent
 collecting garbage, and the buffer on screen: its mode, its size and whether
 its directory is remote. The diagnostics report lists the latest 50 notes
 under "Pauses", with your garbage collection settings. Leave the mode on until
-the freeze comes back, then run the report. It checks twice a second and times
-each command, timer and tmux reply while it is on.
+the freeze comes back, then run the report. It times each command, timer and
+tmux reply while it is on.
 
 For a freeze that is happening now, `M-x toggle-debug-on-quit` first, then
 `C-g` during the freeze opens a backtrace of what Emacs is doing. When `C-g`
