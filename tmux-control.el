@@ -8239,13 +8239,7 @@ is attached under `window-size latest').  `tmux-control--refresh-pane-size'
 then reconciles the Eat grid with the pane's real size so cursor-addressed
 redraws stay aligned."
   (let ((ctrl (tmux-control--wb-controller))
-        ;; tmux brings back into a taller pane the rows that making it
-        ;; shorter pushed into its history.  Eat keeps them in scrollback,
-        ;; so the view, grown, would show the pane's screen too high.
-        (grows (when-let* ((size (and tmux-control--terminal
-                                      (eat-term-live-p tmux-control--terminal)
-                                      (eat-term-size tmux-control--terminal))))
-                 (> height (cdr size)))))
+        (grows (tmux-control--grows-p height)))
     ;; The local grid resize is idempotent -- a no-op when the size is unchanged.
     (tmux-control--apply-eat-size width height)
     ;; The remote round trips -- `refresh-client -C' and the pane-size
@@ -8276,11 +8270,26 @@ redraws stay aligned."
                 (when (and (buffer-live-p buf)
                            (not (eq buf self)))
                   (with-current-buffer buf
-                    (tmux-control--apply-eat-size width height))))))))
+                    (let ((grows (tmux-control--grows-p height)))
+                      (tmux-control--apply-eat-size width height)
+                      ;; Queued after `refresh-client', as for this buffer.
+                      (when grows
+                        (tmux-control--seed-window-buffer buf (car entry)))))))))))
       (tmux-control--refresh-pane-size)
       ;; Painted from tmux once it has resized the pane: commands run in order.
-      (when (and grows (not (tmux-control--alt-screen-p)))
+      (when grows
         (tmux-control--seed-screen)))))
+
+(defun tmux-control--grows-p (height)
+  "Whether HEIGHT rows make this buffer's normal screen taller.
+tmux brings back into a taller pane the rows that making it shorter
+pushed into its history.  Eat keeps them in its scrollback, so a view
+grown without a repaint would show the pane's screen too high.  On the
+alternate screen, which has no history, the program repaints itself."
+  (when-let* ((size (and tmux-control--terminal
+                         (eat-term-live-p tmux-control--terminal)
+                         (eat-term-size tmux-control--terminal))))
+    (and (> height (cdr size)) (not (tmux-control--alt-screen-p)))))
 
 (defun tmux-control--drop-rows-below-cursor (rows)
   "Delete up to ROWS of the screen's rows below the cursor, the last first.
@@ -8309,9 +8318,7 @@ Return non-nil when a resize actually happened, so callers can repaint."
                    (= (car size) width)
                    (= (cdr size) height))
         (let ((inhibit-read-only t))
-          (when (and size (< height (cdr size))
-                     (not (and (fboundp 'eat-term-in-alternative-display-p)
-                               (eat-term-in-alternative-display-p tmux-control--terminal))))
+          (when (and size (< height (cdr size)) (not (tmux-control--alt-screen-p)))
             (tmux-control--drop-rows-below-cursor (- (cdr size) height)))
           (eat-term-resize tmux-control--terminal width height)
           (eat-term-redisplay tmux-control--terminal)

@@ -1496,5 +1496,45 @@ tmux brings them back as it grows again; so does the view."
     (should (tmux-control-it--resize-to controller pane 35))
     (should (equal (car (tmux-control-it--screen controller)) "27"))))
 
+(ert-deftest tmux-control-it-growing-repaints-the-other-windows-buffers ()
+  "With per-window buffers, a resize grows every window's buffer, and each
+one tmux grew back out of its history is painted again."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (let ((runner "stty -echo; while IFS= read -r line; do eval \"$line\"; done"))
+    (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-x" "100" "-y" "35" runner)
+    (tmux-control-it--tmux "new-window" "-t" "t:" runner))
+  (tmux-control-it--tmux "select-window" "-t" "t:0")
+  (let* ((tmux-control-window-buffers t)
+         (tmux-control-auto-reconnect nil)
+         (buf (tmux-control-connect nil tmux-control-it--socket "t"))
+         (other-pane (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" "t:1" "#{pane_id}")))
+         (other nil))
+    (unwind-protect
+        (progn
+          (should (tmux-control-it--ready buf))
+          (with-current-buffer buf (tmux-control--resize 100 35))
+          (should (tmux-control-it--ready buf))
+          ;; A buffer for the other window, then back to the first's.
+          (with-current-buffer buf (tmux-control-next-window))
+          (setq other (tmux-control-it--pump-until
+                       6 (lambda ()
+                           (with-current-buffer buf
+                             (cdr (cl-find-if (lambda (entry) (not (eq (cdr entry) buf)))
+                                              tmux-control--window-buffers))))))
+          (should (buffer-live-p other))
+          (tmux-control-it--tmux "select-window" "-t" "t:0")
+          (should (tmux-control-it--run other other-pane "seq 1 60"))
+          ;; Made shorter and taller again from the first window's buffer.
+          (with-current-buffer buf (tmux-control--resize 100 15))
+          (should (tmux-control-it--ready buf))
+          (with-current-buffer buf (tmux-control--resize 100 35))
+          (should (tmux-control-it--ready buf))
+          (should (tmux-control-it--shows-pane-p other other-pane)))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf (ignore-errors (tmux-control-disconnect)))
+        (kill-buffer buf))
+      (tmux-control-it--tmux-ok "kill-server"))))
+
 (provide 'tmux-control-integration)
 ;;; tmux-control-integration.el ends here
