@@ -7518,5 +7518,51 @@ saw); a `completing-read' answers with `choice'."
                  tmux-control--active-pane tmux-control--window-id))
     (should (local-variable-if-set-p var))))
 
+(ert-deftest tmux-control-test-a-repaint-starts-the-screen-on-its-own-line ()
+  ;; Eat can leave its screen starting partway into a line of history; the
+  ;; window then showed that history before the screen's first row.
+  (tmux-control-test--with-pane 10 2
+    (setq-local eat-terminal tmux-control--terminal)
+    (tmux-control-test--feed "one\r\ntwo\r\nthree")
+    ;; The join a resize can make across the screen's top.
+    (let ((start (marker-position (eat-term-display-beginning tmux-control--terminal)))
+          (inhibit-read-only t))
+      (should (eq (char-before start) ?\n))
+      (save-excursion (goto-char (1- start)) (delete-char 1)))
+    (tmux-control--paint-seed (current-buffer) "TWO\nTHREE" '(0 . 1) :visible)
+    (let ((inhibit-read-only t)) (eat-term-redisplay tmux-control--terminal))
+    (let ((start (eat-term-display-beginning tmux-control--terminal)))
+      (should (eq (char-before start) ?\n))
+      (should (equal (buffer-substring-no-properties start (min (point-max) (+ start 3))) "TWO"))
+      (should (string-prefix-p "one\n" (buffer-string))))))
+
+(ert-deftest tmux-control-test-a-repaint-from-the-alternate-screen-lines-up-the-main-one ()
+  ;; The mode replay can leave the alternate screen first: the screen it
+  ;; returns to is the one to start on a line of its own.
+  (tmux-control-test--with-pane 10 2
+    (setq-local eat-terminal tmux-control--terminal)
+    (tmux-control-test--feed "one\r\ntwo\r\nthree")
+    (let ((start (marker-position (eat-term-display-beginning tmux-control--terminal)))
+          (inhibit-read-only t))
+      (save-excursion (goto-char (1- start)) (delete-char 1)))
+    (tmux-control-test--feed "\e[?1049h")
+    (tmux-control--paint-seed (current-buffer) "TWO\nTHREE" '(0 . 1) :visible '(:alt-screen :off))
+    (let ((inhibit-read-only t)) (eat-term-redisplay tmux-control--terminal))
+    (should-not (eat-term-in-alternative-display-p tmux-control--terminal))
+    (let ((start (eat-term-display-beginning tmux-control--terminal)))
+      (should (eq (char-before start) ?\n))
+      (should (equal (buffer-substring-no-properties start (min (point-max) (+ start 3))) "TWO")))))
+
+(ert-deftest tmux-control-test-a-resize-starts-the-screen-on-its-own-line ()
+  ;; Widened, Eat joins a line wrapped across the screen's top back together
+  ;; and, with the screen not full, leaves the screen starting within it.
+  (tmux-control-test--with-pane 10 2
+    (setq-local eat-terminal tmux-control--terminal)
+    (tmux-control-test--feed "AAAAAAAAAABBBBB\r\nx")
+    (tmux-control--apply-eat-size 10 5)
+    (tmux-control--apply-eat-size 12 5)
+    (let ((start (eat-term-display-beginning tmux-control--terminal)))
+      (should (memq (char-before start) '(nil ?\n))))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
