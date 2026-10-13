@@ -2563,7 +2563,7 @@ each wrapped in an evolving prompt line and a status bar.")
                             (car tmux-control--pause-log)))
     ;; Work that took long is noted, though it began just after a check,
     ;; which therefore comes only a little late.
-    (setq tmux-control--pause-log-tick (- (float-time) 0.35))
+    (setq tmux-control--pause-log-tick (- (float-time) 0.65))
     (tmux-control--pause-log-took (- (float-time) 0.6) (lambda () "the command started-late"))
     (tmux-control--pause-log-check)
     (should (string-match-p "at least 0\\.6[0-9] s: the command started-late took"
@@ -2589,6 +2589,13 @@ each wrapped in an evolving prompt line and a status bar.")
     (tmux-control--pause-log-command-end)
     (should (equal (cdr tmux-control--pause-log-slowest)
                    "the command tmux-control-scrollback"))
+    ;; One that waited for input, the checks running meanwhile, counts
+    ;; only from the last check.
+    (setq tmux-control--pause-log-slowest nil
+          tmux-control--pause-log-command (- (float-time) 5))
+    (let ((tmux-control--pause-log-tick (- (float-time) 0.1)))
+      (tmux-control--pause-log-command-end))
+    (should (< (car tmux-control--pause-log-slowest) 0.5))
     ;; A command with no name is not written out.
     (let ((this-command (lambda () (interactive) "secret")))
       (setq tmux-control--pause-log-slowest nil

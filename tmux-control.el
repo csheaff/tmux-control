@@ -2023,9 +2023,11 @@ second and times each command, timer and tmux reply."
 
 (defun tmux-control--pause-log-took (start what)
   "Count work that started at START, a `float-time', as WHAT.
-WHAT is a function called with no arguments for its description, so
-the work that is not the slowest costs no string."
-  (let ((seconds (- (float-time) start)))
+Only since the last check, if that came later: Emacs responded then,
+as when a command waits for input and timers run meanwhile.  WHAT is a
+function called with no arguments for its description, so the work
+that is not the slowest costs no string."
+  (let ((seconds (- (float-time) (max start (or tmux-control--pause-log-tick start)))))
     (when (> seconds (or (car tmux-control--pause-log-slowest) 0))
       (setq tmux-control--pause-log-slowest (cons seconds (funcall what))))))
 
@@ -2035,8 +2037,8 @@ the work that is not the slowest costs no string."
 
 (defun tmux-control--pause-log-command-end ()
   "Count the command that just ended, for the pause log.
-One waiting for an answer in the minibuffer counts too, but the checks
-run while it waits, so it is only blamed for a pause it caused."
+One that waited for input counts only from the last check, which ran
+while it waited."
   (when tmux-control--pause-log-command
     (let ((command this-command))
       (tmux-control--pause-log-took
