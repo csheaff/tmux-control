@@ -1632,6 +1632,28 @@ each wrapped in an evolving prompt line and a status bar.")
             (should-not tmux-control--suppress-focus-follow))
         (delete-process proc)))))
 
+(ert-deftest tmux-control-test-untiling-a-closed-split-waits-for-newer-layouts ()
+  ;; The untile runs once the build that saw the split close is done.  A
+  ;; layout change since, such as a new split, asks for a newer build, which
+  ;; decides instead.
+  (with-temp-buffer
+    (let ((proc (make-pipe-process :name "tc-untile-test" :buffer (current-buffer)
+                                   :noquery t))
+          untiled)
+      (unwind-protect
+          (cl-letf (((symbol-function 'tmux-control-untile) (lambda () (setq untiled t))))
+            (setq-local tmux-control--process proc
+                        tmux-control--tiled t)
+            (dolist (state '((tmux-control--retile-pending . t)
+                             (tmux-control--tiling-build-active . t)))
+              (set (make-local-variable (car state)) (cdr state))
+              (tmux-control--untile-closed-split (current-buffer))
+              (should-not untiled)
+              (set (car state) nil))
+            (tmux-control--untile-closed-split (current-buffer))
+            (should untiled))
+        (delete-process proc)))))
+
 ;;; Window tab bar.
 
 (ert-deftest tmux-control-test-update-windows-parses-and-sorts ()

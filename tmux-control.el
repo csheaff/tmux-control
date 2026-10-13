@@ -9878,6 +9878,27 @@ and re-runs once when a retile was requested mid-build."
             (setq tmux-control--tiling-build-again nil)
             (tmux-control--build-tiling controller)))))))
 
+(defun tmux-control--split-closed-p (leaves)
+  "Whether LEAVES, the panes of the window being tiled, are one pane it had.
+That is a split of the tiled window closing, rather than a switch to
+another window with a single pane, or tiling a single pane on purpose."
+  (and leaves (null (cdr leaves))
+       (cdr tmux-control--panes)
+       (assoc (concat "%" (plist-get (car leaves) :id)) tmux-control--panes)
+       t))
+
+(defun tmux-control--untile-closed-split (controller)
+  "Return CONTROLLER's tiled view, its split closed, to a single pane.
+Unless the layout has changed since, as when the window was split again
+or switched: then the build that change asked for decides."
+  (when (buffer-live-p controller)
+    (with-current-buffer controller
+      (when (and tmux-control--tiled (process-live-p tmux-control--process)
+                 (not tmux-control--retile-pending)
+                 (not (timerp tmux-control--retile-timer))
+                 (not tmux-control--tiling-build-active))
+        (tmux-control-untile)))))
+
 (defun tmux-control--build-tiling-apply (controller layout geometry)
   "Reconcile and arrange CONTROLLER's tiled view from LAYOUT and GEOMETRY.
 The body of a tiling build, run from `tmux-control--build-tiling-callback'
@@ -9890,6 +9911,11 @@ once the in-band window-state reply has been parsed."
           (cond
            ((or (null tree) (null leaves) (null geometry))
             (tmux-control--message "tiling: could not read the window layout"))
+           ((tmux-control--split-closed-p leaves)
+            ;; With its split gone, tiling shows nothing more: back to the
+            ;; single-pane view, its tab bar and all, as before the split.
+            ;; Once this build is done, since untiling tears tiling down.
+            (run-at-time 0 nil #'tmux-control--untile-closed-split controller))
            ((and (equal layout tmux-control--tiled-layout)
                  tmux-control--panes
                  (cl-every (lambda (np)

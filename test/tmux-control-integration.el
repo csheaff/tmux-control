@@ -1184,8 +1184,37 @@ initial+extend instead of initial)."
         (should (eq cached (cdr (assoc pane (buffer-local-value 'tmux-control--panes controller)))))
         (tmux-control-it--tmux "kill-pane" "-t" pane)
         (tmux-control-it--pump 0.2)
-        (should (tmux-control-it--settle-tiles controller 1))
+        ;; With its split closed, the view goes back to a single pane.
+        (tmux-control-it--settle-tiles controller 0)
+        (should (tmux-control-it--pump-until
+                 8 (lambda () (not (buffer-local-value 'tmux-control--tiled controller)))))
         (should (tmux-control-it--pump-until 8 (lambda () (not (buffer-live-p cached)))))))))
+
+(ert-deftest tmux-control-it-closing-a-split-returns-to-one-pane ()
+  "A tiled window whose split closes goes back to the single-pane view, as
+before the split; switching, tiled, to a window of one pane stays tiled."
+  (save-window-excursion
+    (set-frame-size (selected-frame) 120 35)
+    (tmux-control-it--with-session
+      (tmux-control-it--tmux "split-window" "-h" "-t" pane)
+      (tmux-control-it--tmux "new-window" "-t" "t:")
+      (tmux-control-it--tmux "select-window" "-t" "t:0")
+      (tmux-control-it--pump 0.3)
+      (with-current-buffer controller (tmux-control-tile))
+      (should (tmux-control-it--settle-tiles controller 2))
+      (tmux-control-it--tmux "select-window" "-t" "t:1")
+      (should (tmux-control-it--settle-tiles controller 1))
+      (tmux-control-it--pump 0.3)
+      (should (buffer-local-value 'tmux-control--tiled controller))
+      (tmux-control-it--tmux "select-window" "-t" "t:0")
+      (should (tmux-control-it--settle-tiles controller 2))
+      (tmux-control-it--tmux "kill-pane" "-t" pane)
+      (tmux-control-it--pump 0.2)
+      (tmux-control-it--settle-tiles controller 0)
+      (should (tmux-control-it--pump-until
+               8 (lambda () (not (buffer-local-value 'tmux-control--tiled controller)))))
+      (should (tmux-control-it--ready controller))
+      (should (get-buffer-window controller)))))
 
 (ert-deftest tmux-control-it-other-pane-moves-focus-in-tiled-view ()
   ;; Tiled, each pane has a window of its own, so moving to the next pane
