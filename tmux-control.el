@@ -1567,11 +1567,10 @@ even when `tmux-control-connect' would otherwise pop a new window."
                                  (tmux-control--wb-controller)))))
       (tmux-control--collapse-tile-windows (selected-window)))
     (if buffer
-        (progn
-          ;; Show the session as it currently is: its current window's render
-          ;; buffer when per-window buffers are on, not necessarily the
-          ;; controller.
-          (pop-to-buffer (tmux-control--session-display-buffer buffer))
+        ;; Show the session as it currently is: its current window's render
+        ;; buffer when per-window buffers are on, not necessarily the
+        ;; controller.
+        (prog1 (pop-to-buffer (tmux-control--session-display-buffer buffer))
           ;; And split into its panes again, when it is.
           (when (buffer-local-value 'tmux-control--tiled buffer)
             (tmux-control--build-tiling buffer)))

@@ -7186,7 +7186,8 @@ lays them out again."
                 (tmux-control--connect-or-switch nil "main" "a")
                 (should (window-live-p right))
                 ;; Another: it replaces both, and the foreign window stays.
-                (tmux-control--connect-or-switch nil "main" "b")
+                ;; The buffer shown is the value, as before.
+                (should (eq (tmux-control--connect-or-switch nil "main" "b") b))
                 (should-not (window-live-p right))
                 (should (eq (window-buffer (selected-window)) b))
                 (should (eq (window-buffer foreign-window) foreign))
