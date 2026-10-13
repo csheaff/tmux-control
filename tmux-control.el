@@ -9984,7 +9984,14 @@ once the in-band window-state reply has been parsed."
                                       leaves))
                         (prog1 tmux-control--tiled-focus-pane
                           (setq tmux-control--tiled-focus-pane nil))
-                      (tmux-control--selected-pane-id old-panes)))
+                      (or (tmux-control--selected-pane-id old-panes)
+                          ;; A new tiling keeps you on the pane you were
+                          ;; looking at, tmux's active one, rather than
+                          ;; whichever window it arranges first, which your
+                          ;; typing would otherwise go to.
+                          (and (null old-panes)
+                               (car (cl-find-if (lambda (pane) (plist-get (cdr pane) :active))
+                                                geometry))))))
                    (new-panes '())
                    ;; Only newly created or resized panes need a (synchronous,
                    ;; possibly remote) reseed; reused same-size panes keep
