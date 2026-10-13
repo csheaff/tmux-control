@@ -8273,11 +8273,37 @@ redraws stay aligned."
                       (tmux-control--apply-eat-size width height)
                       ;; Queued after `refresh-client', as for this buffer.
                       (when repaint
-                        (tmux-control--seed-window-buffer buf (car entry)))))))))))
+                        (tmux-control--repaint-once-resized buf (car entry)))))))))))
       (tmux-control--refresh-pane-size)
       ;; Painted from tmux once it has resized the pane: commands run in order.
       (when repaint
-        (tmux-control--seed-screen)))))
+        (tmux-control--repaint-once-resized (current-buffer))))))
+
+(defvar-local tmux-control--resize-repaint-timer nil
+  "Timer for the repaint a resize asked for.
+See `tmux-control--repaint-once-resized'.")
+
+(defun tmux-control--repaint-once-resized (buffer &optional window-id)
+  "Repaint BUFFER from tmux once its window stops changing size.
+A drag resizes the window for every column it passes, and only the size
+it stops at needs painting; each repaint is a few queries on the one
+control connection, over SSH too.  The capture is queued after the last
+size's `refresh-client', so it sees the pane at that size.  WINDOW-ID,
+for a window render buffer, is its tmux window."
+  (with-current-buffer buffer
+    (when (timerp tmux-control--resize-repaint-timer)
+      (cancel-timer tmux-control--resize-repaint-timer))
+    (setq tmux-control--resize-repaint-timer
+          (run-at-time
+           0.1 nil
+           (lambda ()
+             (when (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (setq tmux-control--resize-repaint-timer nil)
+                 (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+                   (if window-id
+                       (tmux-control--seed-window-buffer buffer window-id)
+                     (tmux-control--seed-screen))))))))))
 
 (defun tmux-control--repaint-after-resize-p (width height)
   "Whether resizing this buffer's normal screen to WIDTH by HEIGHT needs a repaint.
