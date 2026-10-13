@@ -7563,6 +7563,23 @@ saw); a `completing-read' answers with `choice'."
     (tmux-control--apply-eat-size 12 5)
     (let ((start (eat-term-display-beginning tmux-control--terminal)))
       (should (memq (char-before start) '(nil ?\n))))))
+(ert-deftest tmux-control-test-a-drag-repaints-once-it-stops ()
+  ;; A drag resizes the window for every column it passes; only the size it
+  ;; stops at is painted.
+  (tmux-control-test--with-pane 80 24
+    (let ((seeds 0))
+      (cl-letf (((symbol-function 'tmux-control--seed-screen) (lambda () (cl-incf seeds))))
+        (dolist (width '(79 78 77 76))
+          (tmux-control--repaint-once-resized (current-buffer)))
+        (should (= seeds 0))
+        (sleep-for 0.2)
+        (should (= seeds 1))
+        ;; Not on the alternate screen, which its program repaints, though
+        ;; entered only once the repaint was asked for.
+        (tmux-control--repaint-once-resized (current-buffer))
+        (cl-letf (((symbol-function 'tmux-control--alt-screen-p) (lambda () t)))
+          (sleep-for 0.2))
+        (should (= seeds 1))))))
 
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

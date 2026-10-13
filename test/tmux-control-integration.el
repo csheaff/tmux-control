@@ -1512,9 +1512,9 @@ Binds `controller' and `pane'."
   (tmux-control-it--tmux "send-keys" "-t" pane "Enter")
   (tmux-control-it--shows-pane-p controller pane))
 
-(defun tmux-control-it--resize-to (controller pane height)
-  "Resize CONTROLLER's view to 100 by HEIGHT; whether it then shows PANE's screen."
-  (with-current-buffer controller (tmux-control--resize 100 height))
+(defun tmux-control-it--resize-to (controller pane height &optional width)
+  "Resize CONTROLLER's view to WIDTH (100) by HEIGHT; whether it then shows PANE's screen."
+  (with-current-buffer controller (tmux-control--resize (or width 100) height))
   (tmux-control-it--ready controller)
   (and (tmux-control-it--pump-until
         3 (lambda () (equal (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" pane "#{pane_height}"))
@@ -1543,6 +1543,16 @@ tmux brings them back as it grows again; so does the view."
     (should (tmux-control-it--resize-to controller pane 15))
     (should (tmux-control-it--resize-to controller pane 35))
     (should (equal (car (tmux-control-it--screen controller)) "27"))))
+
+(ert-deftest tmux-control-it-a-new-width-shows-lines-wrapped-as-tmux-has-them ()
+  "tmux rewraps long lines at a new width in its own way; the view shows
+them as tmux has them, rather than as Eat rewrapped them."
+  (tmux-control-it--with-runner
+    (should (tmux-control-it--resize-to controller pane 35))
+    (should (tmux-control-it--run controller pane
+                                  "for i in 1 2 3; do printf 'line %s ' $i; printf 'x%.0s' $(seq 1 130); echo; done"))
+    (should (tmux-control-it--resize-to controller pane 35 60))
+    (should (tmux-control-it--resize-to controller pane 35 100))))
 
 (ert-deftest tmux-control-it-growing-repaints-the-other-windows-buffers ()
   "With per-window buffers, a resize grows every window's buffer, and each
