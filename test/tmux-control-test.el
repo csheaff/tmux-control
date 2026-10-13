@@ -7157,8 +7157,8 @@ The terminal is WIDTH x HEIGHT, 12x6 by default."
 (ert-deftest tmux-control-test-switching-session-replaces-all-its-panes ()
   "Switching from a session split into panes shows the other session in place
 of all its pane windows, not beside the ones not selected; switching to the
-same session keeps its panes, and switching back to one split into panes
-lays them out again."
+same session changes nothing, the pane you are in included, and switching
+back to one split into panes lays them out again."
   (let ((a (generate-new-buffer " tc-test-a"))
         (a-pane (generate-new-buffer " tc-test-a-pane"))
         (b (generate-new-buffer " tc-test-b"))
@@ -7182,9 +7182,15 @@ lays them out again."
                          (lambda (controller) (push controller built)))
                         ((symbol-function 'tmux-control--session-live-buffer)
                          (lambda (_host session _socket) (if (equal session "a") a b))))
-                ;; The same session: its panes stay.
-                (tmux-control--connect-or-switch nil "main" "a")
-                (should (window-live-p right))
+                ;; The same session, from its second pane: nothing changes,
+                ;; that pane keeps its buffer and the focus.
+                (select-window right)
+                (should (eq (tmux-control--connect-or-switch nil "main" "a") a-pane))
+                (should (window-live-p left))
+                (should (eq (window-buffer right) a-pane))
+                (should (eq (selected-window) right))
+                (should-not built)
+                (select-window left)
                 ;; Another: it replaces both, and the foreign window stays.
                 ;; The buffer shown is the value, as before.
                 (should (eq (tmux-control--connect-or-switch nil "main" "b") b))
