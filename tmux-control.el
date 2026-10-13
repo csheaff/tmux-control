@@ -1462,23 +1462,26 @@ session (tmux attaches if it exists, otherwise creates it)."
       (add-hook 'kill-buffer-hook #'tmux-control--kill-process nil t))
     (pop-to-buffer buffer)
     (with-current-buffer buffer
-      (tmux-control--resize-to-window)
-      ;; Learn the server version first so the screen seed knows whether it
-      ;; can ask `capture-pane' to preserve trailing background cells (-N,
-      ;; tmux 3.1+).  The reply lands before the :pane-id reply that seeds.
-      (tmux-control--send-command "display-message -p '#{version}'" :version)
-      (tmux-control--send-command "display-message -p '#{pane_id}'" :pane-id)
       ;; Tab bar: track the session's windows and which window holds each pane,
       ;; so the header line can show tabs and flag background activity.
       ;; Header line: the window tab bar and/or the cross-session activity
       ;; strip (independent features sharing one row).  Both must ignore the
-      ;; connect seed's repaint burst, so quiet activity for either.
+      ;; connect seed's repaint burst, so quiet activity for either.  Set
+      ;; before tmux is sized to the window: the header line takes a row, and
+      ;; a reconnect, which leaves the buffer in its window, doesn't size it
+      ;; again once the line is back.
       (when (or tmux-control-scroll-position-indicator
                 tmux-control-window-tab-bar tmux-control-session-activity
                 tmux-control-session-label)
         (setq-local header-line-format '(:eval (tmux-control--header-line)))
         ;; The connect seed repaints every pane; don't let that flag everything.
         (tmux-control--quiet-activity 1.5))
+      (tmux-control--resize-to-window)
+      ;; Learn the server version first so the screen seed knows whether it
+      ;; can ask `capture-pane' to preserve trailing background cells (-N,
+      ;; tmux 3.1+).  The reply lands before the :pane-id reply that seeds.
+      (tmux-control--send-command "display-message -p '#{version}'" :version)
+      (tmux-control--send-command "display-message -p '#{pane_id}'" :pane-id)
       (tmux-control--use-mode-line-window-name)
       (when tmux-control-window-tab-bar
         (setq tmux-control--activity (make-hash-table :test 'equal)))

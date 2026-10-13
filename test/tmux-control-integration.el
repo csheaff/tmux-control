@@ -1134,6 +1134,23 @@ initial+extend instead of initial)."
         (when (buffer-live-p other) (kill-buffer other))
         (call-process "tmux" nil nil nil "-L" other-socket "kill-server")))))
 
+(ert-deftest tmux-control-it-reconnect-fits-the-window-with-its-header-line ()
+  "A reconnect in place sized tmux before the header line was back, one row
+taller than the window, so the view's top row was out of sight."
+  (tmux-control-it--with-session
+    (let ((rows (lambda ()
+                  (floor (with-selected-window (get-buffer-window controller t)
+                           (window-screen-lines))))))
+      (with-current-buffer controller
+        (should header-line-format)
+        (tmux-control-reconnect)
+        (should (tmux-control-it--ready controller))
+        (should header-line-format)
+        (should (= (cdr (eat-term-size tmux-control--terminal)) (funcall rows)))
+        (should (equal (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" "t"
+                                                           "#{pane_height}"))
+                       (number-to-string (funcall rows))))))))
+
 (defun tmux-control-it--settle-tiles (controller count)
   "Run batch idle re-tiles until COUNT panes are placed and queries drain."
   (tmux-control-it--pump-until
