@@ -8320,6 +8320,7 @@ Return non-nil when a resize actually happened, so callers can repaint."
           (when (and size (< height (cdr size)) (not (tmux-control--alt-screen-p)))
             (tmux-control--drop-rows-below-cursor (- (cdr size) height)))
           (eat-term-resize tmux-control--terminal width height)
+          (tmux-control--screen-on-its-own-line)
           (eat-term-redisplay tmux-control--terminal)
           (when (fboundp 'eat--synchronize-scroll-windows)
             (tmux-control--keep-cursor-visible
@@ -9560,11 +9561,12 @@ TRAILING keeps trailing blanks (`-N').  Rides the control connection via
           (format " -t %s" pane)))
 
 (defun tmux-control--screen-on-its-own-line ()
-  "Start this buffer's live screen on a line of its own, before a repaint.
+  "Start this buffer's live screen on a line of its own.
 Resized narrower and wider again, Eat can join a line it wrapped across
 the top of the screen, leaving the screen to start partway into a line
 of history.  The window then showed that history before the screen's
-first row, on the same row, scrolled up a line to do it."
+first row, on the same row, scrolled up a line to do it.  Run after a
+resize, and before a repaint."
   (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
     (let ((start (eat-term-display-beginning tmux-control--terminal)))
       (unless (memq (char-before start) '(nil ?\n))
@@ -10011,7 +10013,8 @@ once the in-band window-state reply has been parsed."
                               (unless tmux-control--pane-fed-live
                                 (setq seed t))
                               (let ((inhibit-read-only t))
-                                (eat-term-resize tmux-control--terminal w h)))))
+                                (eat-term-resize tmux-control--terminal w h))
+                              (tmux-control--screen-on-its-own-line))))
                         ;; The fed-live skip is for the opening placement only.
                         ;; Clear it now so a LATER resize reseeds normally: by
                         ;; then the pane is quiescent (no seed/stream race), and

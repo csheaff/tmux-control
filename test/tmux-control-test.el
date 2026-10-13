@@ -7531,5 +7531,18 @@ saw); a `completing-read' answers with `choice'."
       (should (eq (char-before start) ?\n))
       (should (equal (buffer-substring-no-properties start (min (point-max) (+ start 3))) "TWO")))))
 
+(ert-deftest tmux-control-test-a-resize-starts-the-screen-on-its-own-line ()
+  ;; A resize is where Eat joins a line across the screen's top, and output
+  ;; may come before any repaint does.
+  (tmux-control-test--with-pane 10 2
+    (setq-local eat-terminal tmux-control--terminal)
+    (tmux-control-test--feed "one\r\ntwo\r\nthree")
+    (let ((start (marker-position (eat-term-display-beginning tmux-control--terminal)))
+          (inhibit-read-only t))
+      (save-excursion (goto-char (1- start)) (delete-char 1)))
+    (tmux-control--apply-eat-size 12 2)
+    (let ((start (eat-term-display-beginning tmux-control--terminal)))
+      (should (memq (char-before start) '(nil ?\n))))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
