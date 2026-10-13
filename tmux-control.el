@@ -8238,9 +8238,16 @@ may keep the pane at another size (for example when another, larger client
 is attached under `window-size latest').  `tmux-control--refresh-pane-size'
 then reconciles the Eat grid with the pane's real size so cursor-addressed
 redraws stay aligned."
-  ;; The local grid resize is idempotent -- a no-op when the size is unchanged.
-  (tmux-control--apply-eat-size width height)
-  (let ((ctrl (tmux-control--wb-controller)))
+  (let ((ctrl (tmux-control--wb-controller))
+        ;; tmux brings back into a taller pane the rows that making it
+        ;; shorter pushed into its history.  Eat keeps them in scrollback,
+        ;; so the view, grown, would show the pane's screen too high.
+        (grows (when-let* ((size (and tmux-control--terminal
+                                      (eat-term-live-p tmux-control--terminal)
+                                      (eat-term-size tmux-control--terminal))))
+                 (> height (cdr size)))))
+    ;; The local grid resize is idempotent -- a no-op when the size is unchanged.
+    (tmux-control--apply-eat-size width height)
     ;; The remote round trips -- `refresh-client -C' and the pane-size
     ;; reconciliation query -- only when the requested CLIENT size actually
     ;; changed.  Emacs core invokes the window-size hook on many redisplays
@@ -8270,7 +8277,28 @@ redraws stay aligned."
                            (not (eq buf self)))
                   (with-current-buffer buf
                     (tmux-control--apply-eat-size width height))))))))
-      (tmux-control--refresh-pane-size))))
+      (tmux-control--refresh-pane-size)
+      ;; Painted from tmux once it has resized the pane: commands run in order.
+      (when (and grows (not (tmux-control--alt-screen-p)))
+        (tmux-control--seed-screen)))))
+
+(defun tmux-control--drop-rows-below-cursor (rows)
+  "Delete up to ROWS of the screen's rows below the cursor, the last first.
+tmux does this to a pane that gets shorter, so what is above the cursor
+stays on screen.  Eat, resized with those rows in place, would push the
+screen's top into its scrollback instead, leaving the view blank where
+tmux still shows text."
+  (let ((term tmux-control--terminal)
+        (inhibit-read-only t))
+    (save-excursion
+      (goto-char (eat-term-display-cursor term))
+      (let* ((below (line-end-position))
+             (end (eat-term-end term))
+             (start end))
+        (goto-char end)
+        (while (and (> rows 0) (search-backward "\n" below t))
+          (setq start (point) rows (1- rows)))
+        (delete-region start end)))))
 
 (defun tmux-control--apply-eat-size (width height)
   "Resize the Eat grid to WIDTH by HEIGHT when it differs from the current.
@@ -8281,6 +8309,10 @@ Return non-nil when a resize actually happened, so callers can repaint."
                    (= (car size) width)
                    (= (cdr size) height))
         (let ((inhibit-read-only t))
+          (when (and size (< height (cdr size))
+                     (not (and (fboundp 'eat-term-in-alternative-display-p)
+                               (eat-term-in-alternative-display-p tmux-control--terminal))))
+            (tmux-control--drop-rows-below-cursor (- (cdr size) height)))
           (eat-term-resize tmux-control--terminal width height)
           (eat-term-redisplay tmux-control--terminal)
           (when (fboundp 'eat--synchronize-scroll-windows)
