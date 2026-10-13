@@ -2389,6 +2389,18 @@ each wrapped in an evolving prompt line and a status bar.")
               (tmux-control--quiet-activity 5))))   ; must not error
       (kill-buffer ctrl) (kill-buffer render))))
 
+(ert-deftest tmux-control-test-quiet-activity-keeps-the-longer-period ()
+  ;; A connect asks for 1.5 s, then sizes tmux, which asks for 0.8 s: the
+  ;; second must not cut the first short.
+  (with-temp-buffer
+    (setq-local tmux-control--activity-quiet-until 0)
+    (tmux-control--quiet-activity 1.5)
+    (let ((long tmux-control--activity-quiet-until))
+      (tmux-control--quiet-activity)
+      (should (= tmux-control--activity-quiet-until long))
+      (tmux-control--quiet-activity 5)
+      (should (> tmux-control--activity-quiet-until long)))))
+
 (ert-deftest tmux-control-test-unload-function-undoes-load-time-advice-and-hooks ()
   ;; Every top-level `advice-add' and `add-hook' in tmux-control.el, and the
   ;; global hooks its buffers add, must be undone by
