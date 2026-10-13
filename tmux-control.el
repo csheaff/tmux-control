@@ -8320,8 +8320,8 @@ Return non-nil when a resize actually happened, so callers can repaint."
           (when (and size (< height (cdr size)) (not (tmux-control--alt-screen-p)))
             (tmux-control--drop-rows-below-cursor (- (cdr size) height)))
           (eat-term-resize tmux-control--terminal width height)
-          (tmux-control--screen-on-its-own-line)
           (eat-term-redisplay tmux-control--terminal)
+          (tmux-control--screen-on-its-own-line)
           (when (fboundp 'eat--synchronize-scroll-windows)
             (tmux-control--keep-cursor-visible
              (eat--synchronize-scroll-windows))))
