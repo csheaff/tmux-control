@@ -1273,7 +1273,11 @@ tmux's active one, so typing goes on to it."
                      (assoc target (buffer-local-value 'tmux-control--panes controller)))))
         (should (eq (window-buffer (selected-window))
                     (cdr (assoc target (buffer-local-value 'tmux-control--panes controller)))))
-        (should (equal target (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" "t" "#{pane_id}"))))))))
+        ;; tmux follows the selection over the connection, once it gets there.
+        (should (tmux-control-it--pump-until
+                 3 (lambda ()
+                     (equal target (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" "t"
+                                                                       "#{pane_id}"))))))))))
 
 (ert-deftest tmux-control-it-stalled-transport-refuses-input-and-recovers ()
   (tmux-control-it--with-session
