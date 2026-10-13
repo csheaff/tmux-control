@@ -256,10 +256,14 @@ In the tiled view:
 - Type into a pane to send input to it; selecting a pane's Emacs
   window makes it tmux's active pane too (other clients follow).
 - Splitting (`C-c |` / `C-c -`, or from tmux), resizing, or closing a pane
-  re-tiles automatically, and the mode line labels each pane by its id,
-  command, and title.  Set `tmux-control-tiled-hide-mode-line` non-nil to
-  drop those per-pane mode lines so the cells sit flush (a gapless,
-  iTerm-style grid) at the cost of the labels.
+  re-tiles automatically.  Each pane's mode line names the host and window,
+  then the pane by its id, command, and title, where other windows show the
+  buffer name; the rest of your mode line stays.  Set
+  `tmux-control-tiled-hide-mode-line` non-nil to drop those per-pane mode
+  lines so the cells sit flush (a gapless, iTerm-style grid) at the cost of
+  the labels.
+- The header line, with the session and its window tabs, sits over the
+  top-left pane, and tmux lays the panes out one row shorter to make room.
 - Resizing the Emacs frame re-divides the tmux window to match, so the
   panes re-fit instead of clipping.
 - Each pane is a normal `tmux-control` buffer, so `C-c C-e` scrollback and

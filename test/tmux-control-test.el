@@ -1704,7 +1704,7 @@ each wrapped in an evolving prompt line and a status bar.")
 
 (ert-deftest tmux-control-test-window-tab-bar-renders ()
   ;; The bar shows every window, marks the busy one, and faces each tab by
-  ;; state; a tiled view shows no bar.
+  ;; state, over a tiled view too.
   (with-temp-buffer
     (setq-local tmux-control--tiled nil)
     (setq-local tmux-control--windows
@@ -1729,7 +1729,7 @@ each wrapped in an evolving prompt line and a status bar.")
         (should-not (get-text-property (string-match "0:alpha" plain)
                                        'keymap plain))))
     (setq-local tmux-control--tiled t)
-    (should (equal (tmux-control--window-tab-bar) ""))))
+    (should (string-match-p "1:beta" (tmux-control--window-tab-bar)))))
 
 (ert-deftest tmux-control-test-note-pane-activity ()
   ;; Output in a background window flags it; output in the current window, or
@@ -1750,7 +1750,13 @@ each wrapped in an evolving prompt line and a status bar.")
       (clrhash tmux-control--activity)
       (setq-local tmux-control--activity-quiet-until (+ (float-time) 100))
       (tmux-control--note-pane-activity "%1")
-      (should-not (gethash "1" tmux-control--activity)))
+      (should-not (gethash "1" tmux-control--activity))
+      ;; A tiled view has the tabs over its panes, so it flags them too.
+      (setq-local tmux-control--activity-quiet-until 0
+                  tmux-control--tiled t)
+      (tmux-control--note-pane-activity "%1")
+      (should (gethash "1" tmux-control--activity))
+      (setq-local tmux-control--tiled nil))
     ;; With the tab bar disabled the hot path is a no-op (its only consumer).
     (let ((tmux-control-window-tab-bar nil))
       (clrhash tmux-control--activity)
@@ -1852,17 +1858,20 @@ each wrapped in an evolving prompt line and a status bar.")
 
 (ert-deftest tmux-control-test-session-window-changed-tiled-retiles ()
   ;; In tiling mode the notification re-tiles to the new window's panes rather
-  ;; than reseeding a single pane.
+  ;; than reseeding a single pane, and the tabs over them follow the switch.
   (with-temp-buffer
     (setq-local tmux-control--tiled t)
     (setq-local tmux-control--retile-pending nil)
-    (let ((reseeds 0))
+    (let ((reseeds 0) (refreshes 0))
       (cl-letf (((symbol-function 'tmux-control--flush-output-batch) #'ignore)
                 ((symbol-function 'tmux-control--refresh-active-pane)
-                 (lambda (&optional _self) (cl-incf reseeds))))
+                 (lambda (&optional _self) (cl-incf reseeds)))
+                ((symbol-function 'tmux-control--refresh-windows)
+                 (lambda () (cl-incf refreshes))))
         (tmux-control--handle-line "%session-window-changed $0 @2")
         (should tmux-control--retile-pending)
-        (should (= reseeds 0))))))
+        (should (= reseeds 0))
+        (should (= refreshes 1))))))
 
 (ert-deftest tmux-control-test-eager-register-new-panes ()
   ;; A %layout-change that introduces a new pane registers a render buffer for
@@ -5047,6 +5056,116 @@ receives in `synced' (a list of lists, one per sync call)."
                   (should (= (window-total-width window)
                              (+ pane-width (if (eq leaf (car (last leaves))) 0 1)))))))
           (dolist (entry panes) (tmux-control--forget-pane-buffer (car entry))))))))
+(ert-deftest tmux-control-test-tiles-put-the-tabs-over-the-top-row ()
+  ;; A pane beside another over a third: the top-left window has the header
+  ;; line with the tabs, the one beside it a blank one to stay in line, and
+  ;; the one below none.  tmux lays the panes out one row shorter, for the
+  ;; header line, so each window's body still fits its pane.
+  (save-window-excursion
+    (delete-other-windows)
+    (with-temp-buffer
+      (tmux-control-mode)
+      (let* ((root (selected-window))
+             (columns (window-total-width root))
+             (rows (1- (window-body-height root)))
+             (top (/ (1- rows) 2))
+             (bottom (- rows top 1))
+             (left (/ (1- columns) 2))
+             (right (- columns left 1))
+             (layout (tmux-control--parse-layout
+                      (format "%dx%d,0,0[%dx%d,0,0{%dx%d,0,0,1,%dx%d,%d,0,2},%dx%d,0,%d,3]"
+                              columns rows columns top left top right top
+                              (1+ left) columns bottom (1+ top))))
+             (leaves (tmux-control--layout-leaves layout))
+             panes placed)
+        (unwind-protect
+            (progn
+              (dolist (leaf leaves)
+                (let ((pane (concat "%" (plist-get leaf :id))))
+                  (plist-put leaf :pane pane)
+                  (push (cons pane (tmux-control--make-pane-buffer
+                                   pane leaf (current-buffer)
+                                   (list :local-directory default-directory)))
+                        panes)))
+              (tmux-control--tile-arrange-node
+               layout root panes (lambda (pane window) (push (cons pane window) placed))
+               'tabs)
+              (let ((one (cdr (assoc "%1" placed)))
+                    (two (cdr (assoc "%2" placed)))
+                    (three (cdr (assoc "%3" placed))))
+                (should (equal (window-parameter one 'header-line-format)
+                               '(:eval (tmux-control--tiled-header-line))))
+                (should (equal (window-parameter two 'header-line-format) ""))
+                (should-not (window-parameter three 'header-line-format))
+                (should (= (window-body-height one) top))
+                (should (= (window-body-height two) top))
+                (should (= (window-body-height three) bottom))
+                ;; Untiling leaves the window it keeps without the header.
+                (tmux-control--collapse-tile-windows one)
+                (should-not (window-parameter one 'header-line-format))))
+          (dolist (entry panes) (tmux-control--forget-pane-buffer (car entry))))))))
+
+(ert-deftest tmux-control-test-tiled-header-line-names-the-session-and-tabs ()
+  ;; Over a tiled view, the header line is the single-pane view's, from the
+  ;; top-left pane's buffer; a buffer outside the tiling keeps its own.
+  (let ((ctrl (generate-new-buffer " tc-test-ctrl")))
+    (unwind-protect
+        (let ((tmux-control-session-label t)
+              (tmux-control-window-tab-bar t)
+              (tmux-control-session-activity nil))
+          (with-current-buffer ctrl
+            (setq-local tmux-control--tiled t
+                        tmux-control--host "aurora"
+                        tmux-control--session "work"
+                        tmux-control--windows
+                        '((:index "0" :name "alpha" :active t)
+                          (:index "1" :name "beta" :active nil))))
+          (with-temp-buffer
+            (setq-local tmux-control--controller ctrl
+                        tmux-control--host "aurora"
+                        tmux-control--session "work")
+            (let ((header (tmux-control--tiled-header-line)))
+              (should (string-match-p "aurora:work" header))
+              (should (string-match-p "0:alpha" header))
+              (should (string-match-p "1:beta" header))))
+          (with-temp-buffer
+            (setq-local header-line-format "own")
+            (should (equal (tmux-control--tiled-header-line) "own")))
+          (let ((tmux-control-session-label nil)
+                (tmux-control-window-tab-bar nil))
+            (should-not (tmux-control--tiled-header-p))))
+      (kill-buffer ctrl))))
+
+(ert-deftest tmux-control-test-tiled-pane-keeps-the-mode-line ()
+  ;; A tiled pane has the mode line every other window has, so what the user
+  ;; put there stays in view; the pane's name takes the buffer name's place.
+  (with-temp-buffer
+    (tmux-control-mode)
+    (let ((pane (tmux-control--make-pane-buffer
+                 "%4" '(:w 40 :h 10) (current-buffer)
+                 (list :local-directory default-directory))))
+      (unwind-protect
+          (with-current-buffer pane
+            (should-not (local-variable-p 'mode-line-format))
+            (should (equal mode-line-buffer-identification
+                           '((:eval (tmux-control--pane-mode-line)))))
+            (should-not (member ":%s" mode-line-process))
+            (setq-local tmux-control--pane-info '(:cmd "zsh"))
+            (let ((tmux-control-mode-line-window-name t))
+              (should (string-match-p "local › .*\\[%%4\\] zsh"
+                                      (tmux-control--pane-mode-line))))
+            (let ((tmux-control-mode-line-window-name nil))
+              (should (string-prefix-p "[%%4] zsh"
+                                       (tmux-control--pane-mode-line)))))
+        (tmux-control--forget-pane-buffer "%4")))
+    (let* ((tmux-control-tiled-hide-mode-line t)
+           (pane (tmux-control--make-pane-buffer
+                   "%5" '(:w 40 :h 10) (current-buffer)
+                  (list :local-directory default-directory))))
+      (unwind-protect
+          (should-not (buffer-local-value 'mode-line-format pane))
+        (tmux-control--forget-pane-buffer "%5")))))
+
 (ert-deftest tmux-control-test-live-buffer-rejects-direct-edits ()
   ;; The buffer text is Eat's model of the pane.  An Emacs editing command
   ;; that changed it (field report: a xah-fly-keys command-mode delete on

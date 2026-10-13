@@ -508,8 +508,8 @@ local session where copying pane output to the system clipboard is wanted."
 
 (defcustom tmux-control-tiled-hide-mode-line nil
   "Non-nil hides the per-pane mode line in the tiled view.
-Each tiled pane is an ordinary buffer, so by default it shows its mode line
-\(\"[%id] cmd — title\"), which labels the pane but also leaves a one-row gap
+Each tiled pane is an ordinary buffer, so by default it shows its mode line,
+naming the pane (\"[%id] cmd — title\"), which also leaves a one-row gap
 between stacked panes.  Set this non-nil to drop that mode line so tiled
 panes sit flush -- a cleaner, iTerm-style cell-for-cell grid -- at the cost
 of the per-pane label.  Off by default (labels kept)."
@@ -2930,7 +2930,6 @@ A no-op when the tab bar is disabled (its only consumer), so the hot %output
 path costs nothing then, and during the quiet period after a full repaint
 \(see `tmux-control--quiet-activity')."
   (when (and tmux-control-window-tab-bar
-             (not tmux-control--tiled)
              tmux-control--current-window
              (> (float-time) tmux-control--activity-quiet-until)
              (hash-table-p tmux-control--pane-window))
@@ -3185,8 +3184,7 @@ switcher."
 
 (defun tmux-control--window-tab-bar (&optional no-keymap)
   "Return the header-line string of the session's windows as tabs.
-Empty in a tiled view (each pane already carries its own mode-line label) and
-before the first window list arrives.  With NO-KEYMAP the tabs are not
+Empty before the first window list arrives.  With NO-KEYMAP the tabs are not
 clickable -- used for the read-only scrollback header, which renders the live
 buffer's tabs purely for orientation.  In a per-window render buffer the
 window list and activity state live on the controller; render from there."
@@ -3195,7 +3193,7 @@ window list and activity state live on the controller; render from there."
            (null tmux-control--windows))
       (with-current-buffer tmux-control--controller
         (tmux-control--window-tab-bar no-keymap))
-    (if (or tmux-control--tiled (null tmux-control--windows))
+    (if (null tmux-control--windows)
         ""
     (mapconcat
      (lambda (w)
@@ -3331,7 +3329,7 @@ unchanged header does not repeatedly scan retained history."
                                    "Rows above the live screen; click to return to live output")
                       'keymap tmux-control--scroll-position-map))))))
 
-(defun tmux-control--header-line ()
+(defun tmux-control--header-line (&optional tiled-view)
   "Compose the live buffer's header line: \"here\" left, \"elsewhere\" right.
 LEFT: the current connection (host:session) and its window tabs, bound by a
 dim connector -- everything about the session you are looking at.  RIGHT
@@ -3339,7 +3337,8 @@ CORNER (right-aligned): other connected sessions that have unseen output,
 named and grouped by server, so you can see WHICH one wants you, not merely
 that something does.  The corner is empty when nothing elsewhere needs you,
 and collapses to a bright count when it would not fit the window.  Each part
-self-gates on its option."
+self-gates on its option.  TILED-VIEW leaves out the scroll position, for the
+header line over a tiled view, whose panes each show theirs in the mode line."
   (when (and tmux-control-session-activity (not tmux-control--tiled))
     (tmux-control--clear-self-activity))
   (let* ((label (if (and tmux-control-session-label
@@ -3351,7 +3350,7 @@ self-gates on its option."
          (connector (if (and (> (length label) 0) (> (length tabs) 0))
                         (propertize " ›" 'face 'tmux-control-tab-inactive)
                       ""))
-         (left (concat (tmux-control--scroll-position-indicator)
+         (left (concat (if tiled-view "" (tmux-control--scroll-position-indicator))
                        label connector tabs))
          (others (if (and tmux-control-session-activity (not tmux-control--tiled))
                      (tmux-control--flagged-other-session-buffers)
@@ -3366,6 +3365,24 @@ self-gates on its option."
                 (propertize " " 'display
                             `(space :align-to (- right ,(+ 1 (string-width corner)))))
                 corner " ")))))
+
+(defun tmux-control--tiled-header-p ()
+  "Whether a tiled view has a header line over its panes.
+It has one when the single-pane view's header line would show more than
+the scroll position, which each tiled pane shows in its mode line."
+  (and (or tmux-control-window-tab-bar tmux-control-session-label
+           tmux-control-session-activity)
+       t))
+
+(defun tmux-control--tiled-header-line ()
+  "Return the header line over a tiled view: its session and window tabs.
+It sits on the view's top-left window, from a window parameter that
+`tmux-control--tile-arrange-node' sets, so the panes keep the tabs the
+single-pane view has.  A window that has since been given a buffer outside
+the tiling shows that buffer's own header line."
+  (if (tmux-control--tiling-controller)
+      (tmux-control--header-line t)
+    header-line-format))
 
 (defun tmux-control--scrollback-header ()
   "Header line for the scrollback view.
@@ -5933,6 +5950,8 @@ the matching pane's render buffer instead, so every pane updates at once."
   (if tmux-control--tiled
       (let ((buf (and (not (assoc pane tmux-control--pane-buffers))
                       (cdr (assoc pane tmux-control--panes)))))
+        ;; The tabs over the tiled view flag the other windows' output too.
+        (tmux-control--note-pane-activity pane)
         (when (buffer-live-p buf)
           (let ((decoded (tmux-control--decode-output payload)))
             (with-current-buffer buf
@@ -6153,9 +6172,9 @@ backing off to the cap."
         (tmux-control--refresh-pane-window-map)))
      ((string-prefix-p "%session-window-changed " line)
       ;; The session's active window changed (switched here or by another
-      ;; client).  In tiling mode re-tile to the new window's panes.  In
-      ;; single-pane mode always refresh the tab bar so its highlight and
-      ;; unseen-output markers track the new current window -- and reseed the
+      ;; client).  Refresh the tab bar so its highlight and unseen-output
+      ;; markers track the new current window.  In tiling mode re-tile to
+      ;; the new window's panes.  In single-pane mode reseed the
       ;; live view onto the new window's active pane, UNLESS this client just
       ;; initiated the switch itself (in which case `--refresh-active-pane'
       ;; already reseeded; reseeding again would double-paint).  One pending
@@ -6165,9 +6184,9 @@ backing off to the cap."
       ;; *external* switch here keeps the live view -- and scrollback, which
       ;; captures `--active-pane' -- on the window the tab bar shows, rather
       ;; than stranding on the previous pane.
+      (tmux-control--refresh-windows)
       (if tmux-control--tiled
           (setq tmux-control--retile-pending t)
-        (tmux-control--refresh-windows)
         (if (and tmux-control-window-buffers
                  (string-match "\\`%session-window-changed [^ ]+ \\(@[0-9]+\\)\\'"
                                line))
@@ -9387,9 +9406,12 @@ quiescent, so the seed cannot race output, and a reseed keeps it cell-exact
 where Eat's own reflow could have drifted from tmux's grid.")
 
 (defun tmux-control--pane-mode-line ()
-  "Return a concise mode-line string for a tiled pane render buffer.
-Leads with the pane id (so teammates in a split window are easy to tell
-apart), then the running command and, when distinct, the pane title."
+  "Return the name of a tiled pane for its mode line.
+That is the host and window, as the single-pane view's mode line names them
+\(see `tmux-control-mode-line-window-name'), then the pane id, so panes side
+by side are easy to tell apart, then the running command and, when
+distinct, the pane title.  It stands in for the buffer name in the mode
+line, which keeps the rest of `mode-line-format'."
   (let* ((info tmux-control--pane-info)
          ;; The pane id (always contains "%"), the running command, and the
          ;; pane title (an app sets it freely via OSC 2) all reach the mode
@@ -9398,7 +9420,9 @@ apart), then the running command and, when distinct, the pane title."
          (pane (tmux-control--mode-line-safe (or tmux-control--active-pane "?")))
          (cmd (tmux-control--mode-line-safe (plist-get info :cmd)))
          (title (tmux-control--mode-line-safe (plist-get info :title))))
-    (concat (tmux-control--scroll-position-indicator) " "
+    (concat (tmux-control--scroll-position-indicator)
+            (when tmux-control-mode-line-window-name
+              (concat (tmux-control--mode-line-identification) " "))
             (propertize (format "[%s]" pane) 'face 'mode-line-emphasis)
             (when (and cmd (not (string-empty-p cmd))) (concat " " cmd))
             (when (and title (not (string-empty-p title)) (not (equal title cmd)))
@@ -9465,9 +9489,15 @@ its own and routes commands through CONTROLLER."
       (setf (eat-term-parameter tmux-control--terminal 'eat--process) process)
       (setf (eat-term-parameter tmux-control--terminal 'eat--input-process) process)
       (setf (eat-term-parameter tmux-control--terminal 'eat--output-process) process)
-      (setq-local mode-line-format
-                  (unless tmux-control-tiled-hide-mode-line
-                    '(:eval (tmux-control--pane-mode-line))))
+      ;; The pane's name stands in for the buffer name, in the mode line
+      ;; every other window has, so what you put there stays in view.
+      (setq-local mode-line-buffer-identification
+                  '((:eval (tmux-control--pane-mode-line))))
+      ;; This buffer owns no process (the controller does), so Eat's ":%s"
+      ;; status would read "no process"; keep the rest.
+      (setq mode-line-process (remove ":%s" mode-line-process))
+      (when tmux-control-tiled-hide-mode-line
+        (setq-local mode-line-format nil))
       ;; Fringes and a scroll bar would steal columns from the body, so the
       ;; Eat grid (sized to the tmux pane) would not fit and full-width TUI
       ;; borders (e.g. a Claude Code panel) would clip.  Drop them so the
@@ -9703,20 +9733,21 @@ is a foreign window -- a user's non-tmux buffer the tiling must not consume."
 (defun tmux-control--tiled-region-size (frame controller)
   "Return (COLS . ROWS): the size tmux should lay CONTROLLER's panes out in.
 ROWS is how many terminal rows actually fit below the tiling: FRAME's inner
-pixel height less the minibuffer and one mode line, divided by the line
-height.  Measuring the mode line in PIXELS is the point -- it is commonly a
-hair taller than a text row (a larger mode-line face), so any fixed
-`frame-text-lines' row offset over-counts and the bottom pane's last row --
-a full-screen TUI's bottom border -- clips.  The grids are sized to the tmux
-pane heights this size produces, and `tmux-control--tile-arrange-node'
-budgets each stacked pane's mode line, so making the total match the real
-body keeps every pane's grid within its window.  This is the same height the
-single-pane path derives from `window-screen-lines' (the real body), so the
-two paths agree.  Reduced by any foreign window sharing the frame: a
-full-height neighbor steals columns, a full-width one steals rows.  Computed
-from frame-level measures (stable across the split, whether called before
-tiling from the controller's window or while tiled from a pane window), so
-the size never disagrees with itself and never forces a spurious re-tile."
+pixel height less the minibuffer, one mode line and the header line over the
+top panes, divided by the line height.  Measuring the mode line in PIXELS is
+the point -- it is commonly a hair taller than a text row (a larger mode-line
+face), so any fixed `frame-text-lines' row offset over-counts and the bottom
+pane's last row -- a full-screen TUI's bottom border -- clips.  The grids are
+sized to the tmux pane heights this size produces, and
+`tmux-control--tile-arrange-node' budgets each stacked pane's mode line, so
+making the total match the real body keeps every pane's grid within its
+window.  This is the same height the single-pane path derives from
+`window-screen-lines' (the real body), so the two paths agree.  Reduced by any
+foreign window sharing the frame: a full-height neighbor steals columns, a
+full-width one steals rows.  Computed from frame-level measures (stable across
+the split, whether called before tiling from the controller's window or while
+tiled from a pane window), so the size never disagrees with itself and never
+forces a spurious re-tile."
   (let* ((char-h (max 1 (frame-char-height frame)))
          (windows (window-list frame 'no-mini))
          ;; The mode line's real pixel height, read from one of our own
@@ -9725,6 +9756,15 @@ the size never disagrees with itself and never forces a spurious re-tile."
                 (lambda (w) (tmux-control--our-tiling-window-p w controller))
                 windows))
          (ml-h (if ours (window-mode-line-height (car ours)) char-h))
+         ;; The tiled view's header line, measured where one shows: the
+         ;; single-pane view's window, or the tiling's top-left one.
+         (hl-h (if (tmux-control--tiled-header-p)
+                   (or (cl-some (lambda (w)
+                                  (let ((h (window-header-line-height w)))
+                                    (and (> h 0) h)))
+                                ours)
+                       char-h)
+                 0))
          (mini-h (window-pixel-height (minibuffer-window frame)))
          ;; Full non-minibuffer height in rows: the threshold for "full-height
          ;; side column" (steals columns) vs "top/bottom band" (steals rows).
@@ -9734,7 +9774,7 @@ the size never disagrees with itself and never forces a spurious re-tile."
          (usable-rows (- (frame-text-lines frame)
                          (window-total-height (minibuffer-window frame))))
          (cols (frame-text-cols frame))
-         (rows (max 1 (floor (- (frame-inner-height frame) mini-h ml-h)
+         (rows (max 1 (floor (- (frame-inner-height frame) mini-h ml-h hl-h)
                              char-h))))
     (dolist (w windows)
       (unless (tmux-control--our-tiling-window-p w controller)
@@ -9752,8 +9792,8 @@ reclaims the tiling's rectangle back into KEEP without disturbing any
 foreign (non-tmux) window sharing the frame -- the whole point, so switching
 windows or untiling no longer wipes a user's other buffer.  When the tiling
 owned the whole frame this deletes every other window, exactly as the old
-`delete-other-windows' did.  KEEP loses its own pane marker so it reads as a
-plain window afterwards."
+`delete-other-windows' did.  KEEP loses its own pane marker and the header
+line it held as a top pane, so it reads as a plain window afterwards."
   (when (window-live-p keep)
     (let ((frame (window-frame keep))
           (owner (with-current-buffer (window-buffer keep)
@@ -9766,14 +9806,19 @@ plain window afterwards."
                      (eq (tmux-control--wb-controller) owner))
                    (> (length (window-list frame 'no-mini)) 1))
           (ignore-errors (delete-window w)))))
-    (set-window-parameter keep 'tmux-control-pane nil)))
+    (set-window-parameter keep 'tmux-control-pane nil)
+    (set-window-parameter keep 'header-line-format nil)))
 
-(defun tmux-control--tile-arrange-node (node window panes collect)
+(defun tmux-control--tile-arrange-node (node window panes collect
+                                             &optional header)
   "Subdivide WINDOW to match layout NODE, assigning PANES buffers to leaves.
 COLLECT is called as (PANE-ID WINDOW) for each leaf placed.  Splits follow
 tmux's geometry: a row (`:dir h') splits side by side, a column (`:dir v')
 stacks; each non-last child is given its tmux char size and the last child
-takes the remaining window."
+takes the remaining window.  HEADER is non-nil when NODE is on the view's
+top row, whose windows have a header line: `tabs' for the one that shows
+`tmux-control--tiled-header-line', the top-left, and `blank' for the
+others, which keep their rows in line with it."
   (pcase (plist-get node :type)
     ('leaf
      (let* ((pane (plist-get node :pane))
@@ -9781,6 +9826,10 @@ takes the remaining window."
        (when (and (window-live-p window) (buffer-live-p buf))
          (set-window-buffer window buf t)
          (set-window-parameter window 'tmux-control-pane pane)
+         (set-window-parameter window 'header-line-format
+                               (pcase header
+                                 ('tabs '(:eval (tmux-control--tiled-header-line)))
+                                 ('blank "")))
          ;; Reclaim every column for the terminal: no margins, fringes, or
          ;; scroll bar, so the window body matches the tmux pane width and
          ;; full-width TUI borders are not clipped.
@@ -9795,7 +9844,8 @@ takes the remaining window."
     ('split
      (let ((dir (plist-get node :dir))
            (kids (plist-get node :children))
-           (win window))
+           (win window)
+           (head header))
        (while (cdr kids)
          (let* ((child (car kids))
                 (size (if (eq dir 'h)
@@ -9805,12 +9855,16 @@ takes the remaining window."
                           ;; replaces the last terminal cell with `$'.
                           (max window-min-width (1+ (plist-get child :w)))
                         ;; +1 row for the child window's mode line, so its
-                        ;; body height ends up near the tmux pane height.
-                        (max window-min-height (1+ (plist-get child :h)))))
+                        ;; body height ends up near the tmux pane height,
+                        ;; and +1 for a header line over the top row.
+                        (max window-min-height
+                             (+ (plist-get child :h) (if head 2 1)))))
                 (new (split-window win size (if (eq dir 'h) 'right 'below))))
-           (tmux-control--tile-arrange-node child win panes collect)
+           (tmux-control--tile-arrange-node child win panes collect head)
+           ;; Side by side, the rest are on the same row; stacked, below it.
+           (setq head (and (eq dir 'h) head 'blank))
            (setq win new kids (cdr kids))))
-       (tmux-control--tile-arrange-node (car kids) win panes collect)))))
+       (tmux-control--tile-arrange-node (car kids) win panes collect head)))))
 
 (defun tmux-control--tile-arrange (controller tree panes)
   "Tile CONTROLLER's window region to match layout TREE, showing PANES buffers.
@@ -9850,7 +9904,8 @@ the windows could not be built."
           (let ((acc '()))
             (tmux-control--tile-arrange-node
              tree (selected-window) panes
-             (lambda (pane win) (push (cons pane win) acc)))
+             (lambda (pane win) (push (cons pane win) acc))
+             (and (tmux-control--tiled-header-p) 'tabs))
             (nreverse acc)))
       (error
        (tmux-control--message
