@@ -1956,6 +1956,163 @@ The normal `bookmark-set' command (C-x r m) also works in live views."
 (defvar-local tmux-control--diagnostics-token nil
   "Identity of the current report, used to reject stale live-query replies.")
 
+(defcustom tmux-control-pause-log-threshold 0.5
+  "Seconds Emacs must stop responding for `tmux-control-pause-log-mode' to note it."
+  :type 'number
+  :package-version '(tmux-control . "0.8.0"))
+
+(defconst tmux-control--pause-log-interval 0.5
+  "Seconds between the pause log's checks that Emacs responds.")
+
+(defconst tmux-control--pause-log-size 50
+  "How many of the latest pauses the pause log keeps.")
+
+(defvar tmux-control--pause-log nil
+  "Pauses noted by `tmux-control-pause-log-mode', latest first, as strings.")
+(defvar tmux-control--pause-log-timer nil
+  "The repeating timer that checks Emacs responds.")
+(defvar tmux-control--pause-log-tick nil
+  "When the pause log last checked, as a `float-time'.")
+(defvar tmux-control--pause-log-gc nil
+  "`gc-elapsed' when the pause log last checked.")
+(defvar tmux-control--pause-log-slowest nil
+  "The slowest work since the last check, as (SECONDS . WHAT), or nil.")
+(defvar tmux-control--pause-log-command nil
+  "When the running command started, as a `float-time', or nil.")
+
+;;;###autoload
+(define-minor-mode tmux-control-pause-log-mode
+  "Note each time Emacs stops responding, and what it was doing.
+A pause of `tmux-control-pause-log-threshold' seconds or more is noted
+with the slowest work in it: a command, output from tmux, or a timer.
+When none of those took most of it, redisplay or another program's
+output, such as TRAMP's, most likely did.  A note
+also gives the time spent collecting garbage, and the buffer on screen:
+its mode, its size and whether its directory is remote.
+`tmux-control-diagnostics' lists the latest notes, to send with a
+report.  Global, off by default: while on, it checks twice a second and
+times each command, timer and tmux reply."
+  :global t :group 'tmux-control
+  (tmux-control--pause-log-stop)
+  (when tmux-control-pause-log-mode
+    (setq tmux-control--pause-log-tick (float-time)
+          tmux-control--pause-log-gc gc-elapsed
+          tmux-control--pause-log-slowest nil)
+    (add-hook 'pre-command-hook #'tmux-control--pause-log-command-start)
+    (add-hook 'post-command-hook #'tmux-control--pause-log-command-end)
+    (advice-add 'tmux-control--filter :around #'tmux-control--pause-log-filter)
+    (advice-add 'timer-event-handler :around #'tmux-control--pause-log-timer-handler)
+    (setq tmux-control--pause-log-timer
+          (run-at-time tmux-control--pause-log-interval tmux-control--pause-log-interval
+                       #'tmux-control--pause-log-check))))
+
+(defun tmux-control--pause-log-stop ()
+  "Remove the pause log's timer, hooks and advice, keeping its notes."
+  (when (timerp tmux-control--pause-log-timer)
+    (cancel-timer tmux-control--pause-log-timer))
+  (setq tmux-control--pause-log-timer nil
+        tmux-control--pause-log-command nil)
+  (remove-hook 'pre-command-hook #'tmux-control--pause-log-command-start)
+  (remove-hook 'post-command-hook #'tmux-control--pause-log-command-end)
+  (advice-remove 'tmux-control--filter #'tmux-control--pause-log-filter)
+  (advice-remove 'timer-event-handler #'tmux-control--pause-log-timer-handler))
+
+(defun tmux-control--pause-log-took (start what)
+  "Count work that started at START, a `float-time', as WHAT.
+WHAT is a function called with no arguments for its description, so
+the work that is not the slowest costs no string."
+  (let ((seconds (- (float-time) start)))
+    (when (> seconds (or (car tmux-control--pause-log-slowest) 0))
+      (setq tmux-control--pause-log-slowest (cons seconds (funcall what))))))
+
+(defun tmux-control--pause-log-command-start ()
+  "Note when a command starts, for the pause log."
+  (setq tmux-control--pause-log-command (float-time)))
+
+(defun tmux-control--pause-log-command-end ()
+  "Count the command that just ended, for the pause log.
+One waiting for an answer in the minibuffer counts too, but the checks
+run while it waits, so it is only blamed for a pause it caused."
+  (when tmux-control--pause-log-command
+    (let ((command this-command))
+      (tmux-control--pause-log-took
+       tmux-control--pause-log-command
+       (lambda () (format "the command %s" (or command "(unknown)")))))
+    (setq tmux-control--pause-log-command nil)))
+
+(defun tmux-control--pause-log-filter (filter process chunk)
+  "Time FILTER on PROCESS's CHUNK of tmux output, for the pause log."
+  (let ((start (float-time)))
+    (unwind-protect
+        (funcall filter process chunk)
+      (tmux-control--pause-log-took
+       start (lambda ()
+               (format "%d bytes of output from tmux for %s"
+                       (string-bytes chunk) (process-buffer process)))))))
+
+(defun tmux-control--pause-log-timer-handler (handler timer)
+  "Time HANDLER running TIMER, for the pause log."
+  (let ((start (float-time)))
+    (unwind-protect
+        (funcall handler timer)
+      (unless (eq timer tmux-control--pause-log-timer)
+        (tmux-control--pause-log-took
+         start (lambda ()
+                 (let ((function (timer--function timer)))
+                   (format "a timer running %s"
+                           (if (symbolp function) function "a lambda")))))))))
+
+(defun tmux-control--pause-log-check ()
+  "Note a pause since the last check, then start counting again."
+  (let* ((now (float-time))
+         (pause (- now tmux-control--pause-log-tick tmux-control--pause-log-interval)))
+    ;; Ten minutes is a computer asleep, not Emacs stuck.
+    (when (and (>= pause tmux-control-pause-log-threshold) (< pause 600))
+      (tmux-control--pause-log-note pause (- gc-elapsed tmux-control--pause-log-gc)))
+    (setq tmux-control--pause-log-tick (float-time)
+          tmux-control--pause-log-gc gc-elapsed
+          tmux-control--pause-log-slowest nil)))
+
+(defun tmux-control--pause-log-note (pause gc)
+  "Note a PAUSE of so many seconds, GC of them collecting garbage."
+  (let* ((slowest tmux-control--pause-log-slowest)
+         (buffer (window-buffer (selected-window)))
+         (note
+          ;; The checks are an interval apart, so the pause began up to
+          ;; one interval before it was due.
+          (format "%s  No response for at least %.2f s: %s; %.2f s collecting garbage; showing %s (%s, %d characters, %s directory)"
+                  (format-time-string "%F %T")
+                  pause
+                  (if (and slowest (>= (car slowest) (/ pause 2)))
+                      (format "%s took %.2f s" (cdr slowest) (car slowest))
+                    (concat "most likely redisplay or another program's output"
+                            (if (and slowest (>= (car slowest) 0.1))
+                                (format ", as the slowest command, tmux output or timer, %s, took %.2f s"
+                                        (cdr slowest) (car slowest))
+                              ", as no command, tmux output or timer took long")))
+                  gc
+                  (buffer-name buffer)
+                  (buffer-local-value 'major-mode buffer)
+                  (buffer-size buffer)
+                  (if (file-remote-p (buffer-local-value 'default-directory buffer))
+                      "a remote" "a local"))))
+    (push note tmux-control--pause-log)
+    (when-let* ((last (nthcdr (1- tmux-control--pause-log-size) tmux-control--pause-log)))
+      (setcdr last nil))))
+
+(defun tmux-control--pause-log-report ()
+  "The pause log and garbage collection settings, for a report."
+  (concat
+   (format "\nPauses (tmux-control-pause-log-mode %s; gc-cons-threshold %d, gc-cons-percentage %s; %d collections took %.2f s):\n"
+           (if tmux-control-pause-log-mode "on" "off")
+           gc-cons-threshold gc-cons-percentage gcs-done gc-elapsed)
+   (if tmux-control--pause-log
+       (mapconcat #'identity (reverse tmux-control--pause-log) "\n")
+     (if tmux-control-pause-log-mode
+         "None yet."
+       "Turn on tmux-control-pause-log-mode to note them."))
+   "\n"))
+
 (defun tmux-control--eat-version ()
   "Read Eat's version header when its source library is available."
   (let ((file (locate-library "eat.el")))
@@ -2034,12 +2191,18 @@ Pane contents, input text, titles, directories and SSH options are omitted."
         (with-current-buffer source
           (let ((text (concat "\nOptions:\n"
                               (mapconcat
-                               (lambda (option) (format "%s: %S" option (symbol-value option)))
+                               (lambda (option)
+                                 (format "%s: %S" option
+                                         (if (boundp option) (symbol-value option) 'unbound)))
                                '(tmux-control-auto-reconnect tmux-control-command-timeout
                                  tmux-control-auto-heal-drift tmux-control-pause-after
                                  tmux-control-window-buffers tmux-control-live-scrollback-size
                                  tmux-control-wheel-scrolls-live-history
-                                 tmux-control-pane-directory-mode) "\n") "\n")))
+                                 tmux-control-pane-directory-mode tmux-control-idle-gc-mode
+                                 pixel-scroll-precision-mode)
+                               "\n")
+                              "\n"
+                              (tmux-control--pause-log-report))))
             (with-current-buffer report (insert text))))
         (insert (if (process-live-p process)
                     "\nLive server queries pending; results append below.\n"
@@ -10518,12 +10681,14 @@ is unknown, or when the current buffer is not a tmux-control buffer."
   "Undo what loading tmux-control set up, for `unload-feature'.
 Remove its advice on Eat and on its own pager command, its global
 window hooks and its Evil initial state, and turn off
-`tmux-control-idle-gc-mode'.  Close
+`tmux-control-idle-gc-mode' and `tmux-control-pause-log-mode'.  Close
 tmux-control buffers first: their connections and buffer-local hooks
 still call tmux-control's functions.  Return nil, so `unload-feature'
 also does its usual cleanup."
   (when (bound-and-true-p tmux-control-idle-gc-mode)
     (tmux-control-idle-gc-mode -1))
+  (when (bound-and-true-p tmux-control-pause-log-mode)
+    (tmux-control-pause-log-mode -1))
   (advice-remove #'tmux-control-scrollback-mode
                  #'tmux-control--guard-scrollback-mode-command)
   (advice-remove #'eat-semi-char-mode #'tmux-control--eat-semi-char-mode-advice)

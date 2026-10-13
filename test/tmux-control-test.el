@@ -2520,6 +2520,81 @@ each wrapped in an evolving prompt line and a status bar.")
   ;; against an accidental default flip.
   (should (eq (default-value 'tmux-control-tiled-hide-mode-line) nil)))
 
+(ert-deftest tmux-control-test-pause-log-mode-adds-and-removes-its-hooks ()
+  (let ((tmux-control--pause-log nil))
+    (unwind-protect
+        (progn
+          (tmux-control-pause-log-mode 1)
+          (should (timerp tmux-control--pause-log-timer))
+          (should (memq #'tmux-control--pause-log-command-end post-command-hook))
+          (should (advice-member-p #'tmux-control--pause-log-filter 'tmux-control--filter))
+          (should (advice-member-p #'tmux-control--pause-log-timer-handler 'timer-event-handler)))
+      (tmux-control-pause-log-mode -1))
+    (should-not tmux-control--pause-log-timer)
+    (should-not (memq #'tmux-control--pause-log-command-start pre-command-hook))
+    (should-not (memq #'tmux-control--pause-log-command-end post-command-hook))
+    (should-not (advice-member-p #'tmux-control--pause-log-filter 'tmux-control--filter))
+    (should-not (advice-member-p #'tmux-control--pause-log-timer-handler 'timer-event-handler))))
+
+(ert-deftest tmux-control-test-pause-log-blames-the-slowest-work ()
+  ;; A pause is noted with the work that took most of it; one that no
+  ;; command, tmux output or timer took is put down to redisplay.
+  (let ((tmux-control--pause-log nil)
+        (tmux-control-pause-log-threshold 0.5)
+        (tmux-control--pause-log-gc gc-elapsed))
+    (setq tmux-control--pause-log-tick (- (float-time) 2.5)
+          tmux-control--pause-log-slowest nil)
+    (tmux-control--pause-log-took (- (float-time) 0.1) (lambda () "the command quick"))
+    (tmux-control--pause-log-took (- (float-time) 1.8) (lambda () "the command slow"))
+    (tmux-control--pause-log-took (- (float-time) 0.2) (lambda () "the command other"))
+    (should (equal (cdr tmux-control--pause-log-slowest) "the command slow"))
+    (tmux-control--pause-log-check)
+    (should (= (length tmux-control--pause-log) 1))
+    (should (string-match-p "No response for at least 2\\.[0-9]+ s: the command slow took 1\\.8[0-9] s"
+                            (car tmux-control--pause-log)))
+    (should (string-match-p "local directory)\\'" (car tmux-control--pause-log)))
+    ;; The check starts counting again.
+    (should-not tmux-control--pause-log-slowest)
+    (tmux-control--pause-log-check)
+    (should (= (length tmux-control--pause-log) 1))
+    (setq tmux-control--pause-log-tick (- (float-time) 1.5))
+    (tmux-control--pause-log-check)
+    (should (string-match-p "most likely redisplay or another program's output, as no command, tmux output or timer took long"
+                            (car tmux-control--pause-log)))
+    ;; A computer asleep is not a pause, and the log keeps the latest only.
+    (setq tmux-control--pause-log-tick (- (float-time) 3600))
+    (tmux-control--pause-log-check)
+    (should (= (length tmux-control--pause-log) 2))
+    (dotimes (_ 60)
+      (setq tmux-control--pause-log-tick (- (float-time) 1.5))
+      (tmux-control--pause-log-check))
+    (should (= (length tmux-control--pause-log) tmux-control--pause-log-size))
+    (should (string-match-p "Pauses (tmux-control-pause-log-mode off; gc-cons-threshold"
+                            (tmux-control--pause-log-report)))))
+
+(ert-deftest tmux-control-test-pause-log-times-filters-commands-and-timers ()
+  (let ((tmux-control--pause-log-slowest nil)
+        (this-command 'tmux-control-scrollback))
+    (setq tmux-control--pause-log-command (- (float-time) 1))
+    (tmux-control--pause-log-command-end)
+    (should (equal (cdr tmux-control--pause-log-slowest)
+                   "the command tmux-control-scrollback"))
+    (should-not tmux-control--pause-log-command)
+    (setq tmux-control--pause-log-slowest nil)
+    (with-temp-buffer
+      (let ((process (make-pipe-process :name "tc-test-pause" :buffer (current-buffer) :noquery t)))
+        (unwind-protect
+            (progn
+              (tmux-control--pause-log-filter
+               (lambda (_process _chunk) (sleep-for 0.05)) process "abc")
+              (should (string-match-p "\\`3 bytes of output from tmux for"
+                                      (cdr tmux-control--pause-log-slowest))))
+          (delete-process process))))
+    (setq tmux-control--pause-log-slowest nil)
+    (tmux-control--pause-log-timer-handler
+     (lambda (_timer) (sleep-for 0.05)) (timer-create))
+    (should (string-match-p "\\`a timer running" (cdr tmux-control--pause-log-slowest)))))
+
 (ert-deftest tmux-control-test-any-frame-flocked-p ()
   ;; Observe only our own frame, so an unrelated flocked frame (e.g. running
   ;; ERT interactively) cannot skew the result.
