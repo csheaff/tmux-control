@@ -6320,6 +6320,7 @@ swallowed as content and the reply queue would desynchronize."
        (setq tmux-control--seed-modes
              (tmux-control--parse-pane-modes output)))
       (:capture
+       (tmux-control--screen-on-its-own-line)
        (tmux-control--write-terminal
         (concat
          ;; Mode replay first: entering the alternate display clears it,
@@ -9021,6 +9022,7 @@ screen, prefixed by the mode replay (see
                 (lambda (cap-lines)
                   (when (and cap-lines (buffer-live-p buffer))
                     (with-current-buffer buffer
+                      (tmux-control--screen-on-its-own-line)
                       (tmux-control--write-terminal
                        (concat
                         (tmux-control--mode-seed-sequence modes)
@@ -9561,6 +9563,20 @@ TRAILING keeps trailing blanks (`-N').  Rides the control connection via
           (when trailing " -N")
           (format " -t %s" pane)))
 
+(defun tmux-control--screen-on-its-own-line ()
+  "Start this buffer's live screen on a line of its own, before a repaint.
+Resized narrower and wider again, Eat can join a line it wrapped across
+the top of the screen, leaving the screen to start partway into a line
+of history.  The window then showed that history before the screen's
+first row, on the same row, scrolled up a line to do it."
+  (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+    (let ((start (eat-term-display-beginning tmux-control--terminal)))
+      (unless (memq (char-before start) '(nil ?\n))
+        (let ((inhibit-read-only t))
+          (save-excursion
+            (goto-char start)
+            (insert-before-markers "\n")))))))
+
 (defun tmux-control--paint-seed (buffer text cursor cursor-visible
                                         &optional modes)
   "Paint BUFFER's terminal from screen TEXT with CURSOR / CURSOR-VISIBLE.
@@ -9574,6 +9590,7 @@ Used by the in-band pane seed path."
         (setq tmux-control--seed-cursor-visible (or cursor-visible :unknown))
         ;; Repaint only the live screen.  Clearing history here made every
         ;; resize/reseed discard output the user had already accumulated.
+        (tmux-control--screen-on-its-own-line)
         (tmux-control--write-terminal
          (concat (tmux-control--mode-seed-sequence modes)
                  (tmux-control--screen-seed-sequence
