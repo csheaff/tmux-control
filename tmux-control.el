@@ -9888,10 +9888,15 @@ another window with a single pane, or tiling a single pane on purpose."
        t))
 
 (defun tmux-control--untile-closed-split (controller)
-  "Return CONTROLLER's tiled view, its split closed, to a single pane."
+  "Return CONTROLLER's tiled view, its split closed, to a single pane.
+Unless the layout has changed since, as when the window was split again
+or switched: then the build that change asked for decides."
   (when (buffer-live-p controller)
     (with-current-buffer controller
-      (when (and tmux-control--tiled (process-live-p tmux-control--process))
+      (when (and tmux-control--tiled (process-live-p tmux-control--process)
+                 (not tmux-control--retile-pending)
+                 (not (timerp tmux-control--retile-timer))
+                 (not tmux-control--tiling-build-active))
         (tmux-control-untile)))))
 
 (defun tmux-control--build-tiling-apply (controller layout geometry)
