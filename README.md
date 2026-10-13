@@ -92,7 +92,9 @@ attaches, typing a new name creates it.
 - **Named connections** — save host/socket/session with
   `M-x tmux-control-bookmark-set`, then return using Emacs bookmarks (`C-x r b`).
 - **Diagnostics** — `M-x tmux-control-diagnostics` produces a copyable report
-  of versions, sizing, terminal modes, bindings, and connection health.
+  of versions, sizing, terminal modes, bindings, and connection health;
+  `tmux-control-pause-log-mode` adds what Emacs was doing each time it
+  stopped responding.
 - **Split a pane from Emacs** — `C-c |` (side by side) or `C-c -` (stacked)
   opens a second terminal beside the current one, tiled so both show at once.
 - **Persistent & remote** — the session lives on the server and outlives Emacs;
