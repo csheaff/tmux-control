@@ -3099,7 +3099,11 @@ was meant to suppress would flag windows anyway."
   (let ((ctrl (tmux-control--wb-controller)))
     (when (buffer-live-p ctrl)
       (with-current-buffer ctrl
-        (setq tmux-control--activity-quiet-until (+ (float-time) (or secs 0.8)))))))
+        ;; Never shorter than one already running: a connect's longer quiet
+        ;; period outlasts the resize it makes.
+        (setq tmux-control--activity-quiet-until
+              (max tmux-control--activity-quiet-until
+                   (+ (float-time) (or secs 0.8))))))))
 
 (defun tmux-control--note-pane-activity (pane)
   "Flag PANE's window as having unseen output when it is not the current one.
