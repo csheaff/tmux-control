@@ -1216,6 +1216,21 @@ before the split; switching, tiled, to a window of one pane stays tiled."
       (should (tmux-control-it--ready controller))
       (should (get-buffer-window controller)))))
 
+(ert-deftest tmux-control-it-tiling-keeps-the-pane-in-view ()
+  "Tiling a split window selects the pane the single-pane view showed,
+tmux's active one, so typing goes on to it."
+  (save-window-excursion
+    (set-frame-size (selected-frame) 120 35)
+    (tmux-control-it--with-session
+      (tmux-control-it--tmux "split-window" "-h" "-t" pane)
+      (let ((active (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" "t" "#{pane_id}"))))
+        (should-not (equal active pane))
+        (tmux-control-it--pump 0.3)
+        (with-current-buffer controller (tmux-control-tile))
+        (should (tmux-control-it--settle-tiles controller 2))
+        (should (eq (window-buffer (selected-window))
+                    (cdr (assoc active (buffer-local-value 'tmux-control--panes controller)))))))))
+
 (ert-deftest tmux-control-it-other-pane-moves-focus-in-tiled-view ()
   ;; Tiled, each pane has a window of its own, so moving to the next pane
   ;; has to select that window; tmux's active pane alone changes nothing
