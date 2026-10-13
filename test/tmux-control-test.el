@@ -2570,7 +2570,9 @@ each wrapped in an evolving prompt line and a status bar.")
       (tmux-control--pause-log-check))
     (should (= (length tmux-control--pause-log) tmux-control--pause-log-size))
     (should (string-match-p "Pauses (tmux-control-pause-log-mode off; gc-cons-threshold"
-                            (tmux-control--pause-log-report)))))
+                            (tmux-control--pause-log-report)))
+    ;; Reporting the log leaves it whole.
+    (should (= (length tmux-control--pause-log) tmux-control--pause-log-size))))
 
 (ert-deftest tmux-control-test-pause-log-times-filters-commands-and-timers ()
   (let ((tmux-control--pause-log-slowest nil)
