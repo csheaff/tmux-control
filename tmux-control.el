@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026  Clay Sheaff
 
 ;; Author: Clay Sheaff
-;; Version: 0.7.2
+;; Version: 0.8.0
 ;; Package-Requires: ((emacs "29.1") (eat "0.9.4"))
 ;; Keywords: terminals, tmux
 ;; URL: https://github.com/csheaff/tmux-control
@@ -60,7 +60,7 @@
 (require 'ucs-normalize)
 (require 'eat)
 
-(defconst tmux-control-version "0.7.2"
+(defconst tmux-control-version "0.8.0"
   "Version of tmux-control, included in diagnostic reports.")
 
 ;; Optional: `consult' drives the per-candidate preview for the `inline'
@@ -541,7 +541,7 @@ the mode line reads \"dev › build\", the window's tmux name, so it names
 what you are looking at in the space it has.  The buffer name shows on
 hover.  Set to nil to keep the buffer name."
   :type 'boolean
-  :package-version '(tmux-control . "0.7.3"))
+  :package-version '(tmux-control . "0.8.0"))
 
 (defface tmux-control-tab-session
   '((t))
