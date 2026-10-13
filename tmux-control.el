@@ -8311,12 +8311,14 @@ tmux brings back into a taller pane the rows that making it shorter
 pushed into its history, and rewraps long lines at a new width in its
 own way.  Eat keeps those rows in its scrollback, and rewraps lines
 differently, so without a repaint the view would show the pane's screen
-too high, or lines broken where tmux has none.  On the alternate screen,
-which has no history, the program repaints itself."
+too high, or lines broken where tmux has none.  A shorter screen is
+repainted too: a repaint captured before it, at the old size, can land
+after it.  On the alternate screen, which has no history, the program
+repaints itself."
   (when-let* ((size (and tmux-control--terminal
                          (eat-term-live-p tmux-control--terminal)
                          (eat-term-size tmux-control--terminal))))
-    (and (or (> height (cdr size)) (/= width (car size)))
+    (and (not (equal size (cons width height)))
          (not (tmux-control--alt-screen-p)))))
 
 (defun tmux-control--drop-rows-below-cursor (rows)
