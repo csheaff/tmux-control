@@ -7154,6 +7154,50 @@ The terminal is WIDTH x HEIGHT, 12x6 by default."
           (should (eq shown live))
           (should-not connected))))))
 
+(ert-deftest tmux-control-test-switching-session-replaces-all-its-panes ()
+  "Switching from a session split into panes shows the other session in place
+of all its pane windows, not beside the ones not selected; switching to the
+same session keeps its panes, and switching back to one split into panes
+lays them out again."
+  (let ((a (generate-new-buffer " tc-test-a"))
+        (a-pane (generate-new-buffer " tc-test-a-pane"))
+        (b (generate-new-buffer " tc-test-b"))
+        (foreign (generate-new-buffer " tc-test-foreign")))
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer a-pane (setq-local tmux-control--controller a))
+          (delete-other-windows)
+          (let* ((left (selected-window))
+                 (foreign-window (split-window left nil 'left))
+                 (right (split-window left nil 'right)))
+            (set-window-buffer foreign-window foreign)
+            (set-window-buffer left a)
+            (set-window-buffer right a-pane)
+            (set-window-parameter left 'tmux-control-pane "%1")
+            (set-window-parameter right 'tmux-control-pane "%2")
+            (select-window left)
+            (let (built)
+              (cl-letf (((symbol-function 'tmux-control--session-display-buffer) #'identity)
+                        ((symbol-function 'tmux-control--build-tiling)
+                         (lambda (controller) (push controller built)))
+                        ((symbol-function 'tmux-control--session-live-buffer)
+                         (lambda (_host session _socket) (if (equal session "a") a b))))
+                ;; The same session: its panes stay.
+                (tmux-control--connect-or-switch nil "main" "a")
+                (should (window-live-p right))
+                ;; Another: it replaces both, and the foreign window stays.
+                (tmux-control--connect-or-switch nil "main" "b")
+                (should-not (window-live-p right))
+                (should (eq (window-buffer (selected-window)) b))
+                (should (eq (window-buffer foreign-window) foreign))
+                (should-not built)
+                ;; Back to the first, which tmux still has split: its panes
+                ;; are laid out again.
+                (with-current-buffer a (setq-local tmux-control--tiled t))
+                (tmux-control--connect-or-switch nil "main" "a")
+                (should (equal built (list a)))))))
+      (mapc #'kill-buffer (list a a-pane b foreign)))))
+
 (ert-deftest tmux-control-test-public-tiled-p ()
   (with-temp-buffer
     (should-not (tmux-control-tiled-p))

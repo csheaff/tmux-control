@@ -1559,11 +1559,22 @@ selected window (like flipping a terminal tab) instead of splitting the frame,
 even when `tmux-control-connect' would otherwise pop a new window."
   (let ((buffer (tmux-control--session-live-buffer host session socket-name))
         (display-buffer-overriding-action '((display-buffer-same-window))))
+    ;; A session split into panes shows each in a window of its own.  Another
+    ;; session takes the place of all of them, not only the selected one, or
+    ;; the panes left beside it would show the session it replaced.
+    (when (and (window-parameter (selected-window) 'tmux-control-pane)
+               (not (eq buffer (with-current-buffer (window-buffer (selected-window))
+                                 (tmux-control--wb-controller)))))
+      (tmux-control--collapse-tile-windows (selected-window)))
     (if buffer
-        ;; Show the session as it currently is: its current window's render
-        ;; buffer when per-window buffers are on, not necessarily the
-        ;; controller.
-        (pop-to-buffer (tmux-control--session-display-buffer buffer))
+        (progn
+          ;; Show the session as it currently is: its current window's render
+          ;; buffer when per-window buffers are on, not necessarily the
+          ;; controller.
+          (pop-to-buffer (tmux-control--session-display-buffer buffer))
+          ;; And split into its panes again, when it is.
+          (when (buffer-local-value 'tmux-control--tiled buffer)
+            (tmux-control--build-tiling buffer)))
       (tmux-control-connect host socket-name session))))
 
 (defun tmux-control--select-session-inline (host socket sessions current)
