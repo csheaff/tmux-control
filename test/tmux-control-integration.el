@@ -1423,5 +1423,118 @@ initial+extend instead of initial)."
                   (should-not (string-match-p "Query failed" (buffer-string)))))
             (kill-buffer report)))))))
 
+;;; Resizing: the view keeps showing what tmux shows.
+
+(defmacro tmux-control-it--with-runner (&rest body)
+  "Run BODY connected to a session that runs, silently, each line sent to it.
+Binds `controller' and `pane'."
+  (declare (indent 0))
+  `(progn
+     (skip-unless (tmux-control-it--available-p))
+     (tmux-control-it--tmux-ok "kill-server")
+     (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-x" "100" "-y" "35"
+                            "stty -echo; while IFS= read -r line; do eval \"$line\"; done")
+     (let* ((pane (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" "t" "#{pane_id}")))
+            (tmux-control-auto-reconnect nil)
+            (controller (tmux-control-connect nil tmux-control-it--socket "t")))
+       (unwind-protect
+           (progn (should (tmux-control-it--ready controller)) ,@body)
+         (when (buffer-live-p controller)
+           (with-current-buffer controller (ignore-errors (tmux-control-disconnect)))
+           (kill-buffer controller))
+         (tmux-control-it--tmux-ok "kill-server")))))
+
+(defun tmux-control-it--screen (buffer)
+  "BUFFER's live screen, normalized like a capture."
+  (with-current-buffer buffer
+    (tmux-control-it--rtrim
+     (split-string (tmux-control-it--visible-text
+                    (eat-term-display-beginning tmux-control--terminal)
+                    (eat-term-end tmux-control--terminal))
+                   "\n"))))
+
+(defun tmux-control-it--shows-pane-p (controller pane)
+  "Whether CONTROLLER comes to show PANE's screen."
+  (tmux-control-it--pump-until
+   3 (lambda () (equal (tmux-control-it--screen controller) (tmux-control-it--capture-lines pane)))))
+
+(defun tmux-control-it--run (controller pane command)
+  "Have the runner in PANE run shell COMMAND; whether CONTROLLER then shows it."
+  (tmux-control-it--tmux "send-keys" "-t" pane "-l" command)
+  (tmux-control-it--tmux "send-keys" "-t" pane "Enter")
+  (tmux-control-it--shows-pane-p controller pane))
+
+(defun tmux-control-it--resize-to (controller pane height)
+  "Resize CONTROLLER's view to 100 by HEIGHT; whether it then shows PANE's screen."
+  (with-current-buffer controller (tmux-control--resize 100 height))
+  (tmux-control-it--ready controller)
+  (and (tmux-control-it--pump-until
+        3 (lambda () (equal (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" pane "#{pane_height}"))
+                            (number-to-string height))))
+       (tmux-control-it--shows-pane-p controller pane)))
+
+(ert-deftest tmux-control-it-shrinking-keeps-the-lines-above-the-cursor ()
+  "tmux drops a shorter pane's rows below the cursor; the view does too,
+rather than pushing the screen's top lines out of view."
+  (tmux-control-it--with-runner
+    (should (tmux-control-it--resize-to controller pane 35))
+    ;; Two lines, then something on the last row, as a repaint of the whole
+    ;; screen leaves, and the cursor back below the two.
+    (should (tmux-control-it--run controller pane
+                                  "printf 'TOP_ONE\\nTOP_TWO\\n\\033[35;1HLAST\\033[3;1H'"))
+    (should (member "LAST" (tmux-control-it--screen controller)))
+    (should (tmux-control-it--resize-to controller pane 15))
+    (should (equal (tmux-control-it--screen controller) '("TOP_ONE" "TOP_TWO")))))
+
+(ert-deftest tmux-control-it-growing-brings-back-what-shrinking-pushed-away ()
+  "A full pane pushes its top lines into history as it gets shorter, and
+tmux brings them back as it grows again; so does the view."
+  (tmux-control-it--with-runner
+    (should (tmux-control-it--resize-to controller pane 35))
+    (should (tmux-control-it--run controller pane "seq 1 60"))
+    (should (tmux-control-it--resize-to controller pane 15))
+    (should (tmux-control-it--resize-to controller pane 35))
+    (should (equal (car (tmux-control-it--screen controller)) "27"))))
+
+(ert-deftest tmux-control-it-growing-repaints-the-other-windows-buffers ()
+  "With per-window buffers, a resize grows every window's buffer, and each
+one tmux grew back out of its history is painted again."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (let ((runner "stty -echo; while IFS= read -r line; do eval \"$line\"; done"))
+    (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-x" "100" "-y" "35" runner)
+    (tmux-control-it--tmux "new-window" "-t" "t:" runner))
+  (tmux-control-it--tmux "select-window" "-t" "t:0")
+  (let* ((tmux-control-window-buffers t)
+         (tmux-control-auto-reconnect nil)
+         (buf (tmux-control-connect nil tmux-control-it--socket "t"))
+         (other-pane (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" "t:1" "#{pane_id}")))
+         (other nil))
+    (unwind-protect
+        (progn
+          (should (tmux-control-it--ready buf))
+          (with-current-buffer buf (tmux-control--resize 100 35))
+          (should (tmux-control-it--ready buf))
+          ;; A buffer for the other window, then back to the first's.
+          (with-current-buffer buf (tmux-control-next-window))
+          (setq other (tmux-control-it--pump-until
+                       6 (lambda ()
+                           (with-current-buffer buf
+                             (cdr (cl-find-if (lambda (entry) (not (eq (cdr entry) buf)))
+                                              tmux-control--window-buffers))))))
+          (should (buffer-live-p other))
+          (tmux-control-it--tmux "select-window" "-t" "t:0")
+          (should (tmux-control-it--run other other-pane "seq 1 60"))
+          ;; Made shorter and taller again from the first window's buffer.
+          (with-current-buffer buf (tmux-control--resize 100 15))
+          (should (tmux-control-it--ready buf))
+          (with-current-buffer buf (tmux-control--resize 100 35))
+          (should (tmux-control-it--ready buf))
+          (should (tmux-control-it--shows-pane-p other other-pane)))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf (ignore-errors (tmux-control-disconnect)))
+        (kill-buffer buf))
+      (tmux-control-it--tmux-ok "kill-server"))))
+
 (provide 'tmux-control-integration)
 ;;; tmux-control-integration.el ends here
