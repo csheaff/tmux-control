@@ -8300,7 +8300,9 @@ for a window render buffer, is its tmux window."
              (when (buffer-live-p buffer)
                (with-current-buffer buffer
                  (setq tmux-control--resize-repaint-timer nil)
-                 (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+                 ;; The program repaints the alternate screen, entered meanwhile.
+                 (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal)
+                            (not (tmux-control--alt-screen-p)))
                    (if window-id
                        (tmux-control--seed-window-buffer buffer window-id)
                      (tmux-control--seed-screen))))))))))

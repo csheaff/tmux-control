@@ -7573,6 +7573,12 @@ saw); a `completing-read' answers with `choice'."
           (tmux-control--repaint-once-resized (current-buffer)))
         (should (= seeds 0))
         (sleep-for 0.2)
+        (should (= seeds 1))
+        ;; Not on the alternate screen, which its program repaints, though
+        ;; entered only once the repaint was asked for.
+        (tmux-control--repaint-once-resized (current-buffer))
+        (cl-letf (((symbol-function 'tmux-control--alt-screen-p) (lambda () t)))
+          (sleep-for 0.2))
         (should (= seeds 1))))))
 
 (provide 'tmux-control-test)
