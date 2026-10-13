@@ -3,8 +3,8 @@
 ## Names
 
 - The mode line names the host and tmux window, such as "dev › build", in
-  place of the buffer name, and the terminal's mode reads "tmux".
-  `tmux-control-mode-line-window-name` keeps the buffer name instead.
+  place of the buffer name, and the terminal's mode reads "tmux". Set
+  `tmux-control-mode-line-window-name` to nil to keep the buffer name.
 - Buffers are named "\*tmux HOST:SESSION\*", "local" for the local server.
   Update anything in your configuration that matches the old names.
 
