@@ -7088,9 +7088,13 @@ its point sitting on the cursor.
 Runs from `window-buffer-change-functions' (buffer-local), so EVERY way
 a live buffer reaches a window -- the window-switch swap, returning from
 the scrollback pager, `switch-to-buffer', a window-configuration
-restore -- self-heals, with no per-call-site bookkeeping.  Tiled pane
-buffers are skipped: the tiling layer anchors its own windows
-\\(`tmux-control--anchor-windows-to-screen-top')."
+restore -- self-heals, with no per-call-site bookkeeping.  A tiled
+pane's window is also anchored to the top of its screen, as the tiling
+layer anchors its windows on output
+\\(`tmux-control--anchor-windows-to-screen-top'): a window-configuration
+restore, such as perspective.el's, brings back the start the window had
+when last shown, inside scrollback once the pane has scrolled since, and
+it stayed there until the pane's next output."
   (let ((buffer (window-buffer window)))
     (when (and (buffer-live-p buffer)
                ;; The buffer-local hook also fires for windows whose buffer
@@ -7103,22 +7107,26 @@ buffers are skipped: the tiling layer anchors its own windows
         (when (and (derived-mode-p 'tmux-control-mode)
                    tmux-control--terminal
                    (eat-term-live-p tmux-control--terminal)
-                   (not (and tmux-control--controller
-                             (buffer-live-p tmux-control--controller)
-                             (buffer-local-value 'tmux-control--tiled
-                                                 tmux-control--controller)))
                    (fboundp 'eat--synchronize-scroll))
           (let ((eat-terminal tmux-control--terminal))
             (eat--synchronize-scroll (list window)))
-          ;; Snapping to the live screen shows whatever the background stream
-          ;; left in this buffer -- and over a long incremental stream Eat can
-          ;; accumulate a row of divergence from the pane's true screen
-          ;; (upstream: emacs-eat#263).  Nothing repaints a buffer that is
-          ;; merely switched to, since that is exactly what preserves its
-          ;; scrollback, so the drift used to survive every arrival and stay
-          ;; for the rest of the session.  Verify here, where every arrival
-          ;; route already converges, and repaint only on a real difference.
-          (tmux-control--heal-on-arrival buffer))))))
+          (if (and tmux-control--controller
+                   (buffer-live-p tmux-control--controller)
+                   (buffer-local-value 'tmux-control--tiled
+                                       tmux-control--controller))
+              (progn
+                (tmux-control--anchor-windows-to-screen-top (list window))
+                (tmux-control--keep-cursor-visible (list window)))
+            ;; Snapping to the live screen shows whatever the background
+            ;; stream left in this buffer -- and over a long incremental
+            ;; stream Eat can accumulate a row of divergence from the pane's
+            ;; true screen (upstream: emacs-eat#263).  Nothing repaints a
+            ;; buffer that is merely switched to, since that is exactly what
+            ;; preserves its scrollback, so the drift used to survive every
+            ;; arrival and stay for the rest of the session.  Verify here,
+            ;; where every arrival route already converges, and repaint only
+            ;; on a real difference.
+            (tmux-control--heal-on-arrival buffer)))))))
 
 (defconst tmux-control--combining-accent-regexp "[̀-ͯ]"
   "Common combining accents affected by Eat 0.9.4's zero-width omission.")
