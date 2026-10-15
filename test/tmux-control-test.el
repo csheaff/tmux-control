@@ -5338,16 +5338,24 @@ receives in `synced' (a list of lists, one per sync call)."
           (tmux-control--snap-to-live-screen (selected-window))
           (should (equal synced (list (list (selected-window))))))))))
 
-(ert-deftest tmux-control-test-snap-skips-unchanged-and-tiled ()
+(ert-deftest tmux-control-test-snap-skips-unchanged-and-anchors-tiled ()
   ;; The buffer-local `window-buffer-change-functions' hook also fires
   ;; for windows whose buffer did NOT change (any change on the frame
   ;; triggers it); those windows -- e.g. a live view the user scrolled
-  ;; up on purpose -- must not be yanked back to the bottom.  Tiled pane
-  ;; buffers are anchored by the tiling layer and are skipped too.
-  (let ((synced 0))
+  ;; up on purpose -- must not be yanked back to the bottom.  A tiled
+  ;; pane's window arriving is anchored to its screen's top, as the
+  ;; tiling layer anchors on output: restored by a window configuration,
+  ;; as perspective.el's, it came back with its old start, inside the
+  ;; scrollback the pane had grown since, until the pane's next output.
+  (let ((synced 0) anchored healed)
     (cl-letf (((symbol-function 'eat--synchronize-scroll)
                (lambda (_) (cl-incf synced)))
-              ((symbol-function 'eat-term-live-p) (lambda (_) t)))
+              ((symbol-function 'eat-term-live-p) (lambda (_) t))
+              ((symbol-function 'tmux-control--anchor-windows-to-screen-top)
+               (lambda (windows) (setq anchored windows)))
+              ((symbol-function 'tmux-control--keep-cursor-visible) #'ignore)
+              ((symbol-function 'tmux-control--heal-on-arrival)
+               (lambda (buffer) (push buffer healed))))
       ;; Same buffer as last redisplay: no snap.
       (cl-letf (((symbol-function 'window-old-buffer)
                  (lambda (w) (window-buffer w))))
@@ -5358,7 +5366,8 @@ receives in `synced' (a list of lists, one per sync call)."
             (set-window-buffer (selected-window) (current-buffer))
             (tmux-control--snap-to-live-screen (selected-window))
             (should (= synced 0)))))
-      ;; Tiled pane buffer: tiling owns the arrangement.
+      ;; Tiled pane buffer arriving: synced and anchored to its screen's
+      ;; top, as on output; the arrival check is for untiled buffers.
       (cl-letf (((symbol-function 'window-old-buffer) (lambda (_) nil)))
         (let ((ctrl (generate-new-buffer " *tc-snap-ctrl*")))
           (unwind-protect
@@ -5372,7 +5381,9 @@ receives in `synced' (a list of lists, one per sync call)."
                                 tmux-control--controller ctrl)
                     (set-window-buffer (selected-window) (current-buffer))
                     (tmux-control--snap-to-live-screen (selected-window))
-                    (should (= synced 0)))))
+                    (should (= synced 1))
+                    (should (equal anchored (list (selected-window))))
+                    (should-not healed))))
             (kill-buffer ctrl)))))))
 
 (ert-deftest tmux-control-test-scrollback-wheel-down-exits-at-bottom ()
