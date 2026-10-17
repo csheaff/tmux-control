@@ -8033,6 +8033,65 @@ behavior unchanged.  ORIG-FN is `eat-self-input', called with ARGS."
 (advice-remove #'eat-self-input #'tmux-control--eat-input-sync-advice)
 (advice-add #'eat-self-input :around #'tmux-control--eat-input-sync-advice)
 
+(defun tmux-control--eat-mouse-up (&optional button)
+  "Forget that mouse BUTTON is down, as Eat does when it sees it go up.
+BUTTON is a basic event type, such as `mouse-1'; nil forgets every
+button.  With no button left down, leave the keymap Eat holds while one
+is."
+  (setq eat--mouse-pressed-buttons
+        (and button (delq button eat--mouse-pressed-buttons)))
+  (unless eat--mouse-pressed-buttons
+    (setq eat--mouse-last-position nil)
+    (when-let* ((exit eat--mouse-drag-transient-map-exit))
+      (setq eat--mouse-drag-transient-map-exit nil)
+      ;; It restores `track-mouse' in the buffer of the press, which can
+      ;; have been killed since; the keymap is gone either way.
+      (ignore-errors (funcall exit)))))
+
+(defun tmux-control--eat-mouse-on-screen-p (event)
+  "Return non-nil when mouse EVENT starts on the screen of a live terminal."
+  (let* ((posn (event-start event))
+         (window (posn-window posn)))
+    (and (windowp window)
+         (window-live-p window)
+         (not (posn-area posn))
+         (let ((terminal (buffer-local-value 'eat-terminal
+                                             (window-buffer window))))
+           (and terminal (eat-term-live-p terminal))))))
+
+(defun tmux-control--eat-mouse-advice (orig-fn &rest args)
+  "Keep Eat's mouse drag from outlasting the button that started it.
+A button pressed in a terminal makes Eat hold a keymap that sends every
+mouse event to `eat-self-input', until it sees every button go up.  A
+release it never finished -- tmux not replying refuses the input, the
+window shows another buffer by then, a question asked meanwhile read the
+event -- left the keymap in place, and every click elsewhere, on a list
+or a link, went nowhere until a click in a terminal let go.
+
+So a button is forgotten once its release is handled, whatever happened
+while handling it, and a press off any terminal's screen while the
+keymap is held lets go of it and goes to its own binding.  ORIG-FN is
+`eat-self-input', called with ARGS."
+  (let* ((event (nth 1 args))
+         (button (and (consp event) (event-basic-type event)))
+         (modifiers (and button (event-modifiers event))))
+    (cond
+     ((not (memq button '(mouse-1 mouse-2 mouse-3)))
+      (apply orig-fn args))
+     ((memq 'down modifiers)
+      (if (or (not eat--mouse-drag-transient-map-exit)
+              (tmux-control--eat-mouse-on-screen-p event))
+          (apply orig-fn args)
+        (tmux-control--eat-mouse-up)
+        (push (cons 'no-record event) unread-command-events)))
+     ((or (memq 'click modifiers) (memq 'drag modifiers))
+      (unwind-protect (apply orig-fn args)
+        (tmux-control--eat-mouse-up button)))
+     (t (apply orig-fn args)))))
+
+(advice-remove #'eat-self-input #'tmux-control--eat-mouse-advice)
+(advice-add #'eat-self-input :around #'tmux-control--eat-mouse-advice)
+
 (defun tmux-control--write-terminal (output)
   "Process decoded terminal OUTPUT into Eat and redisplay immediately.
 For one-shot writes (screen seed, resize repaint) that are not part of a
@@ -10780,6 +10839,7 @@ also does its usual cleanup."
   (advice-remove #'eat--synchronize-scroll
                  #'tmux-control--eat-synchronize-scroll-advice)
   (advice-remove #'eat-self-input #'tmux-control--eat-input-sync-advice)
+  (advice-remove #'eat-self-input #'tmux-control--eat-mouse-advice)
   (dolist (entry tmux-control--vt-advice)
     (advice-remove (car entry) (cdr entry)))
   (advice-remove 'eat-term-redisplay #'tmux-control--eat-redisplay-advice)

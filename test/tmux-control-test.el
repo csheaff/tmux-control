@@ -2418,7 +2418,7 @@ each wrapped in an evolving prompt line and a status bar.")
                 (`(add-hook ,hook ,function . ,_)
                  (push (list 'hook (eval hook t) (eval function t)) sites)))))
         (end-of-file nil)))
-    (should (= (length sites) 8))
+    (should (= (length sites) 9))
     ;; The emulation fixes are installed from a table rather than one
     ;; `advice-add' form each.
     (dolist (entry tmux-control--vt-advice)
@@ -4967,6 +4967,98 @@ receives in `synced' (a list of lists, one per sync call)."
         (tmux-control--eat-input-sync-advice #'orig 1 ?a)
         (should (functionp (car seen)))
         (should-not (eq (car seen) 'eat-own))))))
+
+;; A pane that grabs the mouse, as tmux does with `mouse on': Eat holds a
+;; keymap for every mouse event while a button is down in it.
+
+(defmacro tmux-control-test--with-mouse-terminal (&rest body)
+  "Run BODY in a typing window whose pane grabs the mouse.
+Leave no button down afterwards: Eat keeps that state globally."
+  (declare (indent 0))
+  `(tmux-control-test--with-typing-window
+     (unwind-protect
+         (progn
+           (tmux-control--write-terminal "\e[?1002h\e[?1006h$ ")
+           (should (eq eat--mouse-grabbing-type :drag))
+           ,@body)
+       (setq unread-command-events nil)
+       (tmux-control--eat-mouse-up))))
+
+(defun tmux-control-test--mouse (type window)
+  "Return a mouse event of TYPE on the first cell of WINDOW.
+Batch Emacs lays out no window, so `posn-at-point' can't make one."
+  (let ((pos (window-start window)))
+    (list type (list window pos '(0 . 0) 0 nil pos '(0 . 0) nil '(0 . 0) '(1 . 1)))))
+
+(ert-deftest tmux-control-test-mouse-release-refused-still-lets-go ()
+  ;; tmux not replying refuses the release.  Eat stopped before noting it,
+  ;; and its keymap then took every later click anywhere in Emacs.
+  (tmux-control-test--with-mouse-terminal
+    (let ((window (selected-window)))
+      (eat-self-input 1 (tmux-control-test--mouse 'down-mouse-1 window))
+      (should (equal eat--mouse-pressed-buttons '(mouse-1)))
+      (should eat--mouse-drag-transient-map-exit)
+      (with-temp-buffer
+        (should (eq (key-binding [mouse-1]) #'eat-self-input)))
+      (cl-letf (((symbol-function 'tmux-control--send-input)
+                 (lambda (&rest _)
+                   (user-error "tmux is not replying; C-c C-r reconnects. Input was not sent"))))
+        (should-error (eat-self-input 1 (tmux-control-test--mouse 'mouse-1 window))
+                      :type 'user-error))
+      (should-not eat--mouse-pressed-buttons)
+      (should-not eat--mouse-drag-transient-map-exit)
+      (with-temp-buffer
+        (should-not (eq (key-binding [mouse-1]) #'eat-self-input)))
+      ;; The press went to the pane; the release could not.
+      (should (equal (length sent) 1)))))
+
+(ert-deftest tmux-control-test-mouse-release-elsewhere-lets-go ()
+  ;; By the release, the window of the press shows another buffer, such as
+  ;; the next task opened there: no terminal took the release.
+  (tmux-control-test--with-mouse-terminal
+    (let ((window (selected-window))
+          (terminal (current-buffer)))
+      (eat-self-input 1 (tmux-control-test--mouse 'down-mouse-1 window))
+      (with-temp-buffer
+        (set-window-buffer window (current-buffer))
+        (eat-self-input 1 (tmux-control-test--mouse 'mouse-1 window))
+        (should-not eat--mouse-pressed-buttons)
+        (should-not eat--mouse-drag-transient-map-exit)
+        (set-window-buffer window terminal))))
+  ;; A release Eat sees itself leaves nothing more to do.
+  (tmux-control-test--with-mouse-terminal
+    (let ((window (selected-window)))
+      (eat-self-input 1 (tmux-control-test--mouse 'down-mouse-1 window))
+      (eat-self-input 1 (tmux-control-test--mouse 'mouse-1 window))
+      (should-not eat--mouse-pressed-buttons)
+      (should-not eat--mouse-drag-transient-map-exit)
+      (should (equal (length sent) 2)))))
+
+(ert-deftest tmux-control-test-mouse-press-elsewhere-goes-to-its-binding ()
+  ;; A release that never arrived, as when a question asked meanwhile read
+  ;; it, leaves the keymap held.  A press outside the terminal then lets go
+  ;; and is read again, for the binding where it landed.
+  (tmux-control-test--with-mouse-terminal
+    (let* ((terminal-window (selected-window))
+           (other (split-window terminal-window)))
+      (eat-self-input 1 (tmux-control-test--mouse 'down-mouse-1 terminal-window))
+      (with-temp-buffer
+        (set-window-buffer other (current-buffer))
+        (let ((press (tmux-control-test--mouse 'down-mouse-1 other)))
+          (eat-self-input 1 press)
+          (should-not eat--mouse-pressed-buttons)
+          (should-not eat--mouse-drag-transient-map-exit)
+          (should (equal unread-command-events (list (cons 'no-record press))))
+          (should (eq (selected-window) terminal-window))
+          (should (equal (length sent) 1))))
+      (setq unread-command-events nil)
+      ;; With the keymap held, a press in the terminal is the terminal's:
+      ;; the second button of a drag, say.
+      (eat-self-input 1 (tmux-control-test--mouse 'down-mouse-1 terminal-window))
+      (eat-self-input 1 (tmux-control-test--mouse 'down-mouse-3 terminal-window))
+      (should (equal eat--mouse-pressed-buttons '(mouse-3 mouse-1)))
+      (should-not unread-command-events)
+      (should (equal (length sent) 3)))))
 
 (ert-deftest tmux-control-test-redisplay-copy-only-for-its-eat ()
   ;; With an Eat whose redisplay differs, Eat's own function runs.
