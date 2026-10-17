@@ -7686,8 +7686,8 @@ SOS string is left alone; only an OSC also ends at BEL."
 (defconst tmux-control--hyperlink-regexp
   (concat "\e]8;[^;\000-\037\177]*;\\([^\000-\037\177]*\\)"
           "\\(?:\a\\|\e\\\\\\)")
-  "An OSC 8 sequence: it opens a hyperlink to the URI it holds, or closes
-one when that is empty.")
+  "An OSC 8 sequence, which opens or closes a hyperlink.
+It opens one to the URI it holds, and closes one when that is empty.")
 
 (defconst tmux-control--hyperlink-start-regexp
   "\e\\(?:]\\(?:8\\(?:;[^\000-\037\177]*\e?\\)?\\)?\\)?\\'"
@@ -7782,9 +7782,10 @@ whole before they reach Eat."
 
 (defconst tmux-control--eat-redisplay-source-hash
   "1d810829041592444f3882afa7e03b1a718aa409"
-  "`sha1' of `eat-term-redisplay' as read from eat.el, the version that
-`tmux-control--eat-redisplay-advice' reproduces (Eat 0.9.4 and its
-development head).  Another version keeps Eat's own function.")
+  "`sha1' of the `eat-term-redisplay' that tmux-control reproduces.
+That is its definition in eat.el, read and printed, in Eat 0.9.4 and its
+development head, which `tmux-control--eat-redisplay-advice' copies.
+Another version keeps Eat's own function.")
 
 (defvar tmux-control--eat-redisplay-matches 'unknown
   "Whether this Eat's `eat-term-redisplay' is the one tmux-control copies.
