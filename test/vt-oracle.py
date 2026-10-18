@@ -23,6 +23,7 @@ EAT_DIR are taken from the environment (the Makefile sets them).
 """
 import argparse
 import base64
+import functools
 import json
 import os
 import random
@@ -88,7 +89,8 @@ class Tmux:
         return {"rows": rows, "cx": cx + 1, "cy": cy + 1}
 
     def cell_columns(self, session, width, last, n):
-        """Return {row: [column, ...]} where each cell starts, rows 0 to LAST.
+        """Return {row: [column, ...]} where each cell starts, then where the
+row ends, for rows 0 to LAST.
 `capture-pane' prints a tab tmux kept in its grid as one TAB, though the tab
 spans as many columns as it moved the cursor, and those depend on the tab
 stops, which HTS and TBC change.  Copy mode's cursor steps from cell to cell,
@@ -127,6 +129,8 @@ MODIFIER_BASES = frozenset((
     0x1F64F, 0x1F6B4, 0x1F6B5, 0x1F6B6, 0x1F926, 0x1F937, 0x1F938, 0x1F939,
     0x1F93D, 0x1F93E, 0x1F9B5, 0x1F9B6, 0x1F9B8, 0x1F9B9, 0x1F9CD, 0x1F9CE,
     0x1F9CF, *range(0x1F9D1, 0x1F9E0)))
+# The most UTF-8 bytes a cell holds in tmux 3.6a (UTF8_SIZE).
+CELL_BYTES = 32
 
 
 def char_width(ch):
@@ -145,9 +149,10 @@ macOS); a tmux using the C library's measure may differ on rare characters."""
 def joins(cell, ch):
     """Whether tmux adds CH to CELL, the text of the cell before it.
 Return "wide" when that makes a one-column CELL two columns wide.  This
-follows tmux 3.6a's `screen_write_combine'."""
+follows tmux 3.6a's `screen_write_combine', which starts a new cell rather
+than grow one past CELL_BYTES."""
     cp, first = ord(ch), ord(cell[0])
-    if cp < 0x80 or cell == "\t":
+    if cp < 0x80 or cell == "\t" or len((cell + ch).encode()) > CELL_BYTES:
         return False
     if ch == "\ufe0f":
         return "wide"
@@ -162,7 +167,7 @@ follows tmux 3.6a's `screen_write_combine'."""
 
 
 def clusters(row):
-    """Split ROW, as `capture-pane' prints it, into tmux's cells.
+    """Split ROW, as `capture-pane' prints it, into tmux's cells by its text.
 Return [(text, columns)].  A cell prints every character tmux joined into it:
 an emoji and its VS16, skin tone or ZWJ sequence, regional indicators, and
 zero-width characters such as combining marks."""
@@ -177,11 +182,59 @@ zero-width characters such as combining marks."""
     return cells
 
 
+def fit_cells(row, starts):
+    """Split ROW into the cells STARTS measured; None if no split fits.
+STARTS lists the columns where the row's cells start, then where it ends
+(`Tmux.cell_columns').  Characters printed side by side need not share a
+cell: tmux joins a character to the cell left of the cursor, so a skin tone
+or regional indicator written there after moving the cursor stays apart.  And
+a cell holding all CELL_BYTES prints nothing, since tmux 3.6a's grid keeps a
+cell's size in five bits; it is taken as blank.  Of the splits that fit, one
+with the fewest blank cells wins.  Where the columns cannot tell, a blank
+comes first, as a full cell comes before the character it refused, and
+characters join.  Return [(text, columns)], as `clusters' does."""
+    @functools.lru_cache(maxsize=None)
+    def fit(i, k):
+        # ROW[I:] in the cells from K on: (blank cells, [(text, columns)]).
+        if k == len(starts) - 1:
+            return (0, []) if i == len(row) else None
+        columns = starts[k + 1] - starts[k]
+        options = [(" " * columns, i)] if columns <= 2 else []  # a blank cell
+        if row[i:i + 1] == "\t":
+            options.append(("\t", i + 1))
+        elif i < len(row) and char_width(row[i]):
+            cells, text, w = [], row[i], char_width(row[i])
+            for j in range(i + 1, len(row) + 1):
+                if w == columns:
+                    cells.append((text, j))
+                join = j < len(row) and joins(text, row[j])
+                if not join:
+                    break
+                text, w = text + row[j], 2 if join == "wide" else w
+            options += reversed(cells)          # the longest cell first
+        best = None
+        for text, j in options:
+            rest = fit(j, k + 1)
+            if rest is not None and (best is None or rest[0] + (j == i) < best[0]):
+                best = (rest[0] + (j == i), [(text, columns)] + rest[1])
+        return best
+    found = fit(0, 0)
+    return found[1] if found else None
+
+
 def expand_tabs(row, width, cells=None):
     """Expand the TABs `capture-pane' keeps, as the terminal laid them out.
 CELLS lists the columns where the row's cells start (`Tmux.cell_columns'): a
-tab reaches the next.  Without them a tab moves to the next multiple of 8,
-but never past the last column, as with the default tab stops."""
+tab spans its own cell, and `fit_cells' places the characters in theirs.
+Without them, or if they fit none of the row's splits, the cells are read
+from the text and a tab moves to the next cell start, or else to the next
+multiple of 8 but never past the last column, as with the default tab stops."""
+    if "\t" not in row:
+        return row
+    fitted = fit_cells(row, cells) if cells else None
+    if fitted is not None:
+        return "".join(" " * columns if text == "\t" else text
+                       for text, columns in fitted)
     out, col = [], 0
     for text, columns in clusters(row):
         if text == "\t":
