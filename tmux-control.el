@@ -928,13 +928,13 @@ kills, which are deliberate.")
 ;; `tmux-control--term-' functions act on the current buffer's terminal,
 ;; `tmux-control--terminal' (which `tmux-control--term-make' also makes
 ;; the buffer's `eat-terminal', the one Eat's own commands act on), and
-;; the advice here adapts Eat's own commands to tmux-control buffers.  The only other code that uses Eat directly is
-;; the patch layer, which corrects Eat itself: the emulation fixes
-;; (`tmux-control--vt-advice'), the redisplay copy
-;; (`tmux-control--eat-redisplay-advice') and the write advice
-;; (`tmux-control--eat-write-composed', `tmux-control--eat-write-hyperlink').
-;; Much of this section uses Eat's private (`eat--') definitions, which a
-;; new Eat version can change.
+;; the advice here adapts Eat's own commands to tmux-control buffers.
+;; The only other code that uses Eat directly is the patch layer, which
+;; corrects Eat itself: the emulation fixes (`tmux-control--vt-advice'),
+;; the redisplay copy (`tmux-control--eat-redisplay-advice') and the
+;; write advice (`tmux-control--eat-write-composed',
+;; `tmux-control--eat-write-hyperlink').  Much of this section uses Eat's
+;; private (`eat--') definitions, which a new Eat version can change.
 
 (require 'eat)
 
@@ -1157,26 +1157,26 @@ BASE is a list from `tmux-control--term-following-windows'; whether it
 has the buffer's own point follow the cursor is kept."
   (append (and (memq 'buffer base) '(buffer)) windows))
 
-(defun tmux-control--term-scroll-function ()
+(defun tmux-control--term-scroll-function (&optional output)
   "Return the function that scrolls windows to the terminal's cursor, or nil.
-It is the buffer's `eat--synchronize-scroll-function', which
-`tmux-control--eat-input-sync-advice' narrows while a key is sent, or
-outside an Eat buffer Eat's own `eat--synchronize-scroll'."
-  (let ((function (or (bound-and-true-p eat--synchronize-scroll-function)
+With OUTPUT non-nil, the windows follow output the terminal just drew,
+and as on Eat's own output path that is the buffer's
+`eat--synchronize-scroll-function', which
+`tmux-control--eat-input-sync-advice' narrows while a key is sent.
+Otherwise -- a window arriving at the buffer, or going back to its live
+screen -- it is Eat's `eat--synchronize-scroll' itself.  Pass it to
+`tmux-control--term-sync-scroll'."
+  (let ((function (or (and output
+                           (bound-and-true-p eat--synchronize-scroll-function))
                       'eat--synchronize-scroll)))
     (and (functionp function) function)))
 
-(defun tmux-control--term-scroll-sync-p ()
-  "Return non-nil when the terminal can scroll windows to its cursor."
-  (and (tmux-control--term-scroll-function) t))
-
-(defun tmux-control--term-sync-scroll (windows)
-  "Scroll WINDOWS to the terminal's cursor and live screen.
-WINDOWS can include `buffer', for the buffer's own point.  Nothing
-happens when `tmux-control--term-scroll-sync-p' is nil."
-  (when-let* ((function (tmux-control--term-scroll-function)))
-    (let ((eat-terminal tmux-control--terminal))
-      (funcall function windows))))
+(defun tmux-control--term-sync-scroll (function windows)
+  "Scroll WINDOWS to the terminal's cursor and live screen with FUNCTION.
+FUNCTION is from `tmux-control--term-scroll-function'.  WINDOWS can
+include `buffer', for the buffer's own point."
+  (let ((eat-terminal tmux-control--terminal))
+    (funcall function windows)))
 
 ;; `tmux-control--flush-display' skips the sync for a window it would not
 ;; move, which takes knowing where Eat's sync puts a window.
@@ -3955,8 +3955,8 @@ KEY includes the buffer modification tick and the counted endpoints.")
       (when (and (derived-mode-p 'tmux-control-mode)
                  (tmux-control--term-live-p))
         (set-window-vscroll window 0 t)
-        (if (tmux-control--term-scroll-sync-p)
-            (tmux-control--term-sync-scroll (list window))
+        (if-let* ((sync (tmux-control--term-scroll-function)))
+            (tmux-control--term-sync-scroll sync (list window))
           ;; Eat's private helper is not a compatibility guarantee.  Keep
           ;; the button functional using its public cursor/screen accessors.
           (set-window-point window (tmux-control--term-cursor))
@@ -5475,18 +5475,19 @@ so the tmux-control keys get out of the way; the mode line shows
   (interactive)
   (tmux-control--term-char-mode))
 
-(defun tmux-control--init-render-buffer ()
-  "Set up the current buffer, just put in `tmux-control-mode', to render.
+(defun tmux-control--reset-render-state ()
+  "Start rendering afresh in the current buffer, just put in its mode.
 Its terminal rows are never re-wrapped, tmux-control's keymaps take
 precedence in it, starting from semi-char mode, and no partial output,
 open link or seed cursor is left from before.  The connect buffer
 \(`tmux-control--reset-buffer') and the window and pane render buffers
-all start this way."
+all start this way, after `tmux-control-mode' (for a render buffer,
+`tmux-control--initialize-render-buffer-mode')."
   (tmux-control--no-line-wrap)
   (setq-local emulation-mode-map-alists
-                (cons tmux-control--emulation-mode-map-alist
-                      (delq tmux-control--emulation-mode-map-alist
-                            emulation-mode-map-alists)))
+              (cons tmux-control--emulation-mode-map-alist
+                    (delq tmux-control--emulation-mode-map-alist
+                          emulation-mode-map-alists)))
   (setq tmux-control--keys-active t
         tmux-control--char-mode-keys nil
         tmux-control--accumulator ""
@@ -5541,7 +5542,7 @@ all start this way."
     (erase-buffer)
     (tmux-control-mode)
     (tmux-control--restore-pane-directory-mode-after-reset)
-    (tmux-control--init-render-buffer)
+    (tmux-control--reset-render-state)
     (setq tmux-control--capture-trailing-p nil)
     (setq tmux-control--active-pane nil)
     (setq tmux-control--command-queue nil)
@@ -7465,10 +7466,10 @@ it stayed there until the pane's next output."
                ;; the bottom by unrelated window traffic elsewhere.
                (not (eq (window-old-buffer window) buffer)))
       (with-current-buffer buffer
-        (when (and (derived-mode-p 'tmux-control-mode)
-                   (tmux-control--term-live-p)
-                   (tmux-control--term-scroll-sync-p))
-          (tmux-control--term-sync-scroll (list window))
+        (when-let* (((derived-mode-p 'tmux-control-mode))
+                    ((tmux-control--term-live-p))
+                    (sync (tmux-control--term-scroll-function)))
+          (tmux-control--term-sync-scroll sync (list window))
           (if (and tmux-control--controller
                    (buffer-live-p tmux-control--controller)
                    (buffer-local-value 'tmux-control--tiled
@@ -8220,8 +8221,8 @@ cursor position and their cursor line is kept visible."
     (setq tmux-control--display-dirty nil)
     (let ((inhibit-read-only t))
       (tmux-control--term-redisplay)
-      (when (and sync-windows
-                 (tmux-control--term-scroll-sync-p))
+      (when-let* ((sync (and sync-windows
+                             (tmux-control--term-scroll-function t))))
         ;; A window already where Eat's sync would put it only needs its
         ;; point moved; the sync's `recenter' would make the next
         ;; redisplay lay the whole window out again, every chunk.
@@ -8233,7 +8234,7 @@ cursor position and their cursor line is kept visible."
           (dolist (window settled)
             (set-window-point window cursor))
           (tmux-control--term-sync-scroll
-           (seq-difference sync-windows settled)))
+           sync (seq-difference sync-windows settled)))
         ;; In a TILED pane only, anchor to the top of the current terminal
         ;; screen so a full-screen TUI (e.g. a Claude Code panel) shows from
         ;; its top instead of being scrolled with its top cut off when tall
@@ -9398,7 +9399,7 @@ it asynchronously over the control connection."
         ;; can enable tracking, then mirror the controller's opt-in state.
         (tmux-control--initialize-render-buffer-mode
          track-directory local-directory)
-        (tmux-control--init-render-buffer)
+        (tmux-control--reset-render-state)
         (setq tmux-control--controller ctrl
               tmux-control--process process
               tmux-control--host host
@@ -9866,7 +9867,7 @@ its own and routes commands through CONTROLLER."
       (tmux-control--initialize-render-buffer-mode
        (plist-get meta :track-directory)
        (plist-get meta :local-directory))
-      (tmux-control--init-render-buffer)
+      (tmux-control--reset-render-state)
       (setq tmux-control--controller controller
             tmux-control--process process
             tmux-control--host host

@@ -7913,5 +7913,64 @@ saw); a `completing-read' answers with `choice'."
           (sleep-for 0.2))
         (should (= seeds 1))))))
 
+;;; The terminal interface's view of Eat
+
+(ert-deftest tmux-control-test-mode-builds-on-eat-mode ()
+  ;; `tmux-control-mode' reaches `eat-mode' through a plain function, not
+  ;; an alias: `derived-mode-p' must still see Eat's mode, Eat's hook must
+  ;; run before tmux-control's, and the function in between must stay out
+  ;; of M-x and of the mode's help.
+  (let* ((ran nil)
+         (eat-mode-hook (list (lambda () (push 'eat ran))))
+         (tmux-control-mode-hook (list (lambda () (push 'tmux-control ran)))))
+    (with-temp-buffer
+      (tmux-control-mode)
+      (should (eq major-mode 'tmux-control-mode))
+      (should (derived-mode-p 'eat-mode)))
+    (should (equal (reverse ran) '(eat tmux-control))))
+  (should (provided-mode-derived-p 'tmux-control-mode 'eat-mode))
+  (should-not (commandp 'tmux-control--term-mode))
+  (should-not (string-match-p "tmux-control--term-mode"
+                              (documentation 'tmux-control-mode))))
+
+(ert-deftest tmux-control-test-term-keymaps-build-on-eat ()
+  ;; The parts of tmux-control's keymaps that come from the terminal.
+  (should (eq (keymap-parent tmux-control-mode-map) eat-mode-map))
+  (should (eq (lookup-key tmux-control-mode-map [remap eat-yank])
+              #'tmux-control-yank))
+  (should (eq (lookup-key tmux-control-mode-map [remap eat-yank-from-kill-ring])
+              #'tmux-control-yank-from-kill-ring))
+  (should (eq (keymap-parent tmux-control--char-mode-map) eat-char-mode-map))
+  (should (eq (lookup-key tmux-control--char-mode-map [M-return])
+              #'eat-semi-char-mode))
+  (should (eq (lookup-key tmux-control-scrollback-mode-map
+                          [remap eat-semi-char-mode])
+              #'tmux-control-live)))
+
+(ert-deftest tmux-control-test-term-scroll-function-routes ()
+  ;; Output is followed through the buffer's sync function, which typing
+  ;; narrows, as Eat's own output path does.  A window arriving at the
+  ;; buffer uses Eat's sync itself, so that narrowing never reaches it.
+  ;; Without Eat's function, neither scrolls.
+  (with-temp-buffer
+    (setq-local eat--synchronize-scroll-function #'ignore)
+    (should (eq (tmux-control--term-scroll-function t) #'ignore))
+    (should (eq (tmux-control--term-scroll-function) 'eat--synchronize-scroll))
+    ;; Outside an Eat buffer, output falls back to Eat's sync too.
+    (setq-local eat--synchronize-scroll-function nil)
+    (should (eq (tmux-control--term-scroll-function t) 'eat--synchronize-scroll))
+    (setq-local eat--synchronize-scroll-function 'eat--synchronize-scroll)
+    (cl-letf (((symbol-function 'eat--synchronize-scroll) nil))
+      (should-not (tmux-control--term-scroll-function))
+      (should-not (tmux-control--term-scroll-function t)))
+    ;; The sync runs on this buffer's terminal, whatever Eat's variable says.
+    (let ((seen nil))
+      (setq-local tmux-control--terminal 'the-terminal
+                  eat-terminal nil)
+      (tmux-control--term-sync-scroll
+       (lambda (windows) (setq seen (list eat-terminal windows)))
+       '(buffer))
+      (should (equal seen '(the-terminal (buffer)))))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here
