@@ -6323,6 +6323,90 @@ Batch Emacs lays out no window, so `posn-at-point' can't make one."
       (should (= tmux-control--output-generation (1+ before))))
     (eat-term-delete tmux-control--terminal)))
 
+(ert-deftest tmux-control-test-seed-cursor-agrees-across-pending-wrap ()
+  ;; Arguments: tmux's cursor now, the terminal's, the grid width, and
+  ;; tmux's cursor as the seed found it.
+  (cl-flet ((agrees (tmux term width seeded)
+              (tmux-control--seed-cursor-agrees-p tmux term width seeded)))
+    ;; tmux reports a cursor waiting to wrap past the last column as
+    ;; cursor_x = width, which a seed can only place on the last column.
+    (should (agrees '(20 . 0) '(19 . 0) 20 '(20 . 0)))
+    (should (agrees '(20 . 0) '(20 . 0) 20 '(20 . 0)))
+    ;; A pane wider than the grid (a pinned size, another client), pending
+    ;; wrap or not: the seed can put the cursor no further than the grid.
+    (should (agrees '(100 . 0) '(79 . 0) 80 '(100 . 0)))
+    (should (agrees '(90 . 0) '(79 . 0) 80 '(90 . 0)))
+    (should-not (agrees '(90 . 0) '(78 . 0) 80 '(90 . 0)))
+    ;; Once output has moved tmux's cursor, the terminal must follow it
+    ;; exactly: still on the last column where tmux now waits to wrap is
+    ;; the terminal mishandling the wrap, not the seed's clamp.
+    (should-not (agrees '(20 . 0) '(19 . 0) 20 '(5 . 0)))
+    (should-not (agrees '(20 . 0) '(19 . 0) 20 nil))
+    (should (agrees '(5 . 3) '(5 . 3) 20 '(1 . 1)))
+    (should-not (agrees '(5 . 3) '(5 . 2) 20 '(5 . 3)))
+    (should-not (agrees '(18 . 0) '(19 . 0) 20 '(18 . 0)))
+    ;; The terminal waiting to wrap where tmux is not is a real difference:
+    ;; its next character goes to another row than tmux's.
+    (should-not (agrees '(19 . 0) '(20 . 0) 20 '(19 . 0)))
+    ;; Without a known width, X must match exactly.
+    (should-not (agrees '(20 . 0) '(19 . 0) nil '(20 . 0)))
+    (should (agrees '(20 . 0) '(20 . 0) nil nil))))
+
+(ert-deftest tmux-control-test-verify-seed-accepts-pending-wrap-cursor ()
+  ;; A pane whose program last wrote the bottom-right cell: tmux says
+  ;; cursor_x = width.  The seeded terminal's cursor sits on the last
+  ;; column, and verification must not call that drift and reseed -- but
+  ;; only while tmux's cursor is still where the seed found it.
+  (let ((reseeds 0))
+    (with-temp-buffer
+      (tmux-control--reset-buffer)
+      (tmux-control--apply-term-size 20 5)
+      (setq-local tmux-control--active-pane "%7"
+                  tmux-control--seed-verify-retries 0
+                  tmux-control--seed-cursor '(20 . 0))
+      (tmux-control--write-terminal
+       (tmux-control--screen-seed-sequence
+        "abcdefghijklmnopqrst" '(20 . 0) :visible))
+      (should (equal (tmux-control--term-cursor-xy) '(19 . 0)))
+      (cl-letf (((symbol-function 'tmux-control--query)
+                 (lambda (_cmd cb) (funcall cb (list "20,0")))))
+        (tmux-control--verify-seed (current-buffer)
+                                   (lambda () (cl-incf reseeds)))
+        (should (= reseeds 0))
+        (should (= tmux-control--seed-verify-retries 0))
+        ;; The seed found tmux's cursor elsewhere: output since moved it
+        ;; to the wrap, and the terminal did not follow.
+        (setq-local tmux-control--seed-cursor '(5 . 0))
+        (tmux-control--verify-seed (current-buffer)
+                                   (lambda () (cl-incf reseeds)))
+        (should (= reseeds 1))))))
+
+(ert-deftest tmux-control-test-window-buffer-seed-accepts-pending-wrap ()
+  ;; The same allowance through the path per-window render buffers take:
+  ;; their seed must record where it found tmux's cursor, or
+  ;; verification cannot tell the seed's clamp from drift and reseeds.
+  (let ((sep tmux-control--field-separator)
+        (seeds 0))
+    (with-temp-buffer
+      (tmux-control--reset-buffer)
+      (tmux-control--apply-term-size 20 5)
+      (cl-letf (((symbol-function 'tmux-control--query)
+                 (lambda (cmd cb)
+                   (funcall
+                    cb
+                    (cond
+                     ((string-prefix-p "list-panes" cmd)
+                      (cl-incf seeds)
+                      (list (concat "1" sep "%7" sep "20,0,1" sep
+                                    "0,0,0,0,0,0,1")))
+                     ((string-prefix-p "capture-pane" cmd)
+                      (list "abcdefghijklmnopqrst"))
+                     (t (list "20,0")))))))
+        (tmux-control--seed-window-buffer (current-buffer) "@1"))
+      (should (equal (tmux-control--term-cursor-xy) '(19 . 0)))
+      (should (equal tmux-control--seed-cursor '(20 . 0)))
+      (should (= seeds 1)))))
+
 (ert-deftest tmux-control-test-verify-seed-reseeds-on-drift-bounded ()
   ;; A seed's cursor query and capture are separate reply blocks; %output
   ;; interleaved between them leaves the seeded baseline shifted -- one
