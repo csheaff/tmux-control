@@ -77,11 +77,35 @@ class Tmux:
             if snap == last:
                 break
             last = snap
-        self.run("kill-session", "-t", session)
         head, _, text = snap.partition("\n")
         cx, cy, width = (int(v) for v in head.split())
-        rows = [expand_tabs(r, width) for r in text.split("\n")[:height]]
+        rows = text.split("\n")[:height]
+        tabbed = [y for y, r in enumerate(rows) if "\t" in r]
+        cells = self.cell_columns(session, width, tabbed[-1], n) if tabbed else {}
+        self.run("kill-session", "-t", session)
+        rows = [expand_tabs(r, width, cells.get(y)) for y, r in enumerate(rows)]
         return {"rows": rows, "cx": cx + 1, "cy": cy + 1}
+
+    def cell_columns(self, session, width, last, n):
+        """Return {row: [column, ...]} where each cell starts, rows 0 to LAST.
+`capture-pane' prints a tab tmux kept in its grid as one TAB, though the tab
+spans as many columns as it moved the cursor, and those depend on the tab
+stops, which HTS and TBC change.  Copy mode's cursor steps from cell to cell,
+over a tab's columns as over a double-width character's, so walking it
+across the screen gives each cell's column, and so each tab's width."""
+        step = (f"display -p -t {session} '#{{copy_cursor_x}} #{{copy_cursor_y}}'\n"
+                f"send -X -t {session} cursor-right\n")
+        # Too long for one command line, so given to the server as a file.
+        path = os.path.join(self.dir, f"{n}.cells")
+        with open(path, "w") as f:
+            f.write(f"copy-mode -t {session}\nsend -X -t {session} top-line\n")
+            f.write(step * ((width + 1) * (last + 1)))
+            f.write(f"send -X -t {session} cancel\n")
+        cells = {}
+        for x, y in (pair.split() for pair in
+                     self.run("source-file", path, check=True).stdout.splitlines()):
+            cells.setdefault(int(y), set()).add(int(x))
+        return {y: sorted(xs) for y, xs in cells.items()}
 
     def close(self):
         self.run("kill-server")
@@ -95,13 +119,17 @@ def char_width(ch):
     return 2 if unicodedata.east_asian_width(ch) in "WF" else 1
 
 
-def expand_tabs(row, width):
+def expand_tabs(row, width, cells=None):
     """Expand the TABs `capture-pane' keeps, as the terminal laid them out.
-A tab moves to the next multiple of 8, but never past the last column."""
+CELLS lists the columns where the row's cells start (`Tmux.cell_columns'): a
+tab reaches the next.  Without them a tab moves to the next multiple of 8,
+but never past the last column, as with the default tab stops."""
     out, col = [], 0
     for ch in row:
         if ch == "\t":
-            stop = min((col // 8 + 1) * 8, width - 1)
+            stop = next((c for c in cells or () if c > col), None)
+            if stop is None:
+                stop = min((col // 8 + 1) * 8, width - 1)
             out.append(" " * max(0, stop - col))
             col = max(col, stop)
         else:
