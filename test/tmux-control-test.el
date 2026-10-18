@@ -7963,14 +7963,50 @@ saw); a `completing-read' answers with `choice'."
     (cl-letf (((symbol-function 'eat--synchronize-scroll) nil))
       (should-not (tmux-control--term-scroll-function))
       (should-not (tmux-control--term-scroll-function t)))
-    ;; The sync runs on this buffer's terminal, whatever Eat's variable says.
+    ;; The sync runs on this buffer's terminal, whatever Eat's variable
+    ;; says, and reports whether it could scroll.
     (let ((seen nil))
       (setq-local tmux-control--terminal 'the-terminal
-                  eat-terminal nil)
-      (tmux-control--term-sync-scroll
-       (lambda (windows) (setq seen (list eat-terminal windows)))
-       '(buffer))
-      (should (equal seen '(the-terminal (buffer)))))))
+                  eat-terminal nil
+                  eat--synchronize-scroll-function
+                  (lambda (windows)
+                    (push (list 'output eat-terminal windows) seen)))
+      (cl-letf (((symbol-function 'eat--synchronize-scroll)
+                 (lambda (windows)
+                   (push (list 'eat eat-terminal windows) seen))))
+        (should (tmux-control--term-sync-scroll '(buffer) t))
+        (should (tmux-control--term-sync-scroll '(buffer))))
+      (should (equal (reverse seen) '((output the-terminal (buffer))
+                                      (eat the-terminal (buffer)))))
+      (cl-letf (((symbol-function 'eat--synchronize-scroll) nil))
+        (should-not (tmux-control--term-sync-scroll '(buffer)))))))
+
+(ert-deftest tmux-control-test-arrival-scrolls-past-typing-narrowing ()
+  ;; A window arriving at a buffer, or clicked back to its live screen,
+  ;; goes through Eat's own sync, never the buffer's sync function: while
+  ;; a key is sent that function is narrowed to skip windows already
+  ;; following the cursor (`tmux-control--eat-input-sync-advice'), which
+  ;; would leave an arriving window unsynced -- e.g. one shown during the
+  ;; reconnect prompt typing into a dead connection asks.
+  (let ((routes '()))
+    (cl-letf (((symbol-function 'eat--synchronize-scroll)
+               (lambda (_) (push 'eat routes)))
+              ((symbol-function 'eat-term-live-p) (lambda (_) t))
+              ((symbol-function 'window-old-buffer) (lambda (_) nil))
+              ((symbol-function 'tmux-control--heal-on-arrival) #'ignore))
+      (save-window-excursion
+        (with-temp-buffer
+          (tmux-control-mode)
+          (setq-local tmux-control--terminal t
+                      eat--synchronize-scroll-function
+                      (lambda (_) (push 'narrowed routes)))
+          (set-window-buffer (selected-window) (current-buffer))
+          (tmux-control--snap-to-live-screen (selected-window))
+          (should (equal routes '(eat)))
+          (setq routes nil)
+          (tmux-control-scroll-position-live
+           (list 'mouse-1 (list (selected-window) 'header-line '(0 . 0) 0)))
+          (should (equal routes '(eat))))))))
 
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

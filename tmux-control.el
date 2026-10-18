@@ -1158,25 +1158,31 @@ has the buffer's own point follow the cursor is kept."
   (append (and (memq 'buffer base) '(buffer)) windows))
 
 (defun tmux-control--term-scroll-function (&optional output)
-  "Return the function that scrolls windows to the terminal's cursor, or nil.
-With OUTPUT non-nil, the windows follow output the terminal just drew,
-and as on Eat's own output path that is the buffer's
-`eat--synchronize-scroll-function', which
-`tmux-control--eat-input-sync-advice' narrows while a key is sent.
-Otherwise -- a window arriving at the buffer, or going back to its live
-screen -- it is Eat's `eat--synchronize-scroll' itself.  Pass it to
-`tmux-control--term-sync-scroll'."
+  "Return the function `tmux-control--term-sync-scroll' scrolls with, or nil.
+With OUTPUT non-nil, it is the buffer's `eat--synchronize-scroll-function',
+or in a buffer without one (outside Eat mode) Eat's own
+`eat--synchronize-scroll'; without OUTPUT, always the latter.  Nil when
+that function is missing."
   (let ((function (or (and output
                            (bound-and-true-p eat--synchronize-scroll-function))
                       'eat--synchronize-scroll)))
     (and (functionp function) function)))
 
-(defun tmux-control--term-sync-scroll (function windows)
-  "Scroll WINDOWS to the terminal's cursor and live screen with FUNCTION.
-FUNCTION is from `tmux-control--term-scroll-function'.  WINDOWS can
-include `buffer', for the buffer's own point."
-  (let ((eat-terminal tmux-control--terminal))
-    (funcall function windows)))
+(defun tmux-control--term-sync-scroll (windows &optional output)
+  "Scroll WINDOWS to the terminal's cursor and live screen.
+WINDOWS can include `buffer', for the buffer's own point.  OUTPUT
+non-nil means the windows follow output the terminal just drew: as on
+Eat's own output path, that goes through the buffer's scroll
+synchronization, which `tmux-control--eat-input-sync-advice' narrows
+while a key is sent.  Without OUTPUT -- a window arriving at the buffer,
+or going back to its live screen -- Eat's synchronization is called
+itself, so that narrowing never reaches it.  Return non-nil when the
+windows were scrolled, and nil, doing nothing, when the terminal cannot
+scroll them."
+  (when-let* ((function (tmux-control--term-scroll-function output)))
+    (let ((eat-terminal tmux-control--terminal))
+      (funcall function windows))
+    t))
 
 ;; `tmux-control--flush-display' skips the sync for a window it would not
 ;; move, which takes knowing where Eat's sync puts a window.
@@ -3955,8 +3961,7 @@ KEY includes the buffer modification tick and the counted endpoints.")
       (when (and (derived-mode-p 'tmux-control-mode)
                  (tmux-control--term-live-p))
         (set-window-vscroll window 0 t)
-        (if-let* ((sync (tmux-control--term-scroll-function)))
-            (tmux-control--term-sync-scroll sync (list window))
+        (unless (tmux-control--term-sync-scroll (list window))
           ;; Eat's private helper is not a compatibility guarantee.  Keep
           ;; the button functional using its public cursor/screen accessors.
           (set-window-point window (tmux-control--term-cursor))
@@ -5477,28 +5482,22 @@ so the tmux-control keys get out of the way; the mode line shows
 
 (defun tmux-control--reset-render-state ()
   "Start rendering afresh in the current buffer, just put in its mode.
-Its terminal rows are never re-wrapped, tmux-control's keymaps take
-precedence in it, starting from semi-char mode, and no partial output,
-open link or seed cursor is left from before.  The connect buffer
-\(`tmux-control--reset-buffer') and the window and pane render buffers
-all start this way, after `tmux-control-mode' (for a render buffer,
+Its terminal rows are never re-wrapped, and tmux-control's keymaps take
+precedence in it, with the semi-char mode keys active
+\(`tmux-control--term-make' then puts the terminal itself in semi-char
+mode).  The stream state -- partial output, an open link, the seed
+cursor and the like -- needs nothing here: `tmux-control-mode' has just
+killed the buffer's local variables, so each is at its `defvar-local'
+default.  The connect buffer (`tmux-control--reset-buffer') and the
+window and pane render buffers all start this way, after
+`tmux-control-mode' (for a render buffer,
 `tmux-control--initialize-render-buffer-mode')."
   (tmux-control--no-line-wrap)
   (setq-local emulation-mode-map-alists
               (cons tmux-control--emulation-mode-map-alist
                     (delq tmux-control--emulation-mode-map-alist
                           emulation-mode-map-alists)))
-  (setq tmux-control--keys-active t
-        tmux-control--char-mode-keys nil
-        tmux-control--accumulator ""
-        tmux-control--output-batch nil
-        tmux-control--display-dirty nil
-        tmux-control--utf8-carry ""
-        tmux-control--hyperlink nil
-        tmux-control--hyperlink-carry ""
-        tmux-control--alt-screen-honored t
-        tmux-control--seed-cursor nil
-        tmux-control--seed-cursor-visible :unknown))
+  (setq tmux-control--keys-active t))
 
 (defun tmux-control--reset-buffer ()
   "Reset the current buffer for a fresh tmux-control session."
@@ -7466,10 +7465,10 @@ it stayed there until the pane's next output."
                ;; the bottom by unrelated window traffic elsewhere.
                (not (eq (window-old-buffer window) buffer)))
       (with-current-buffer buffer
-        (when-let* (((derived-mode-p 'tmux-control-mode))
-                    ((tmux-control--term-live-p))
-                    (sync (tmux-control--term-scroll-function)))
-          (tmux-control--term-sync-scroll sync (list window))
+        ;; Without Eat's scroll sync the window is left as it is.
+        (when (and (derived-mode-p 'tmux-control-mode)
+                   (tmux-control--term-live-p)
+                   (tmux-control--term-sync-scroll (list window)))
           (if (and tmux-control--controller
                    (buffer-live-p tmux-control--controller)
                    (buffer-local-value 'tmux-control--tiled
@@ -8211,6 +8210,22 @@ redisplay is not the version copied here (see
                         (eat--t-disp-begin disp))))))))
 
 (advice-add 'eat-term-redisplay :around #'tmux-control--eat-redisplay-advice)
+(defun tmux-control--sync-output-windows (windows)
+  "Scroll WINDOWS to follow the output just drawn, as Eat would.
+A window already where Eat's sync would put it only needs its point
+moved; the sync's `recenter' would make the next redisplay lay the
+whole window out again, every chunk.  Return nil, leaving WINDOWS as
+they are, when the terminal cannot scroll them."
+  (let* ((cursor (tmux-control--term-cursor))
+         (top (tmux-control--term-screen-start))
+         (settled (seq-filter
+                   (lambda (w) (tmux-control--window-settled-p w cursor top))
+                   windows)))
+    (when (tmux-control--term-sync-scroll (seq-difference windows settled) t)
+      (dolist (window settled)
+        (set-window-point window cursor))
+      t)))
+
 (defun tmux-control--flush-display (sync-windows)
   "Redisplay Eat once when output has been fed since the last flush.
 SYNC-WINDOWS is the result of `tmux-control--current-sync-windows' taken
@@ -8221,20 +8236,8 @@ cursor position and their cursor line is kept visible."
     (setq tmux-control--display-dirty nil)
     (let ((inhibit-read-only t))
       (tmux-control--term-redisplay)
-      (when-let* ((sync (and sync-windows
-                             (tmux-control--term-scroll-function t))))
-        ;; A window already where Eat's sync would put it only needs its
-        ;; point moved; the sync's `recenter' would make the next
-        ;; redisplay lay the whole window out again, every chunk.
-        (let* ((cursor (tmux-control--term-cursor))
-               (top (tmux-control--term-screen-start))
-               (settled (seq-filter
-                         (lambda (w) (tmux-control--window-settled-p w cursor top))
-                         sync-windows)))
-          (dolist (window settled)
-            (set-window-point window cursor))
-          (tmux-control--term-sync-scroll
-           sync (seq-difference sync-windows settled)))
+      (when (and sync-windows
+                 (tmux-control--sync-output-windows sync-windows))
         ;; In a TILED pane only, anchor to the top of the current terminal
         ;; screen so a full-screen TUI (e.g. a Claude Code panel) shows from
         ;; its top instead of being scrolled with its top cut off when tall
