@@ -16,9 +16,10 @@ tmux-control's own output path into a headless Eat terminal
                                  '\\x1b[2;3r\\x1b[5B') and show both screens
 
 The streams are what tmux receives from the pane (its pty runs with -opost),
-so a bare LF is a bare LF.  tmux runs on a private socket in a temporary
-directory; no other tmux server is touched.  EMACS and EAT_DIR are taken from
-the environment (the Makefile sets them).
+so a bare LF is a bare LF.  The pty does not echo either, so tmux's replies to
+queries in a stream (DA, OSC 11) stay off the screen.  tmux runs on a private
+socket in a temporary directory; no other tmux server is touched.  EMACS and
+EAT_DIR are taken from the environment (the Makefile sets them).
 """
 import argparse
 import base64
@@ -58,7 +59,7 @@ class Tmux:
         path = os.path.join(self.dir, f"{n}.bin")
         with open(path, "wb") as f:
             f.write(data)
-        cmd = (f"stty -opost; cat {path}; "
+        cmd = (f"stty -opost -echo; cat {path}; "
                f"tmux -S {self.sock} wait-for -S done{n}; exec sleep 100000")
         self.run("new-session", "-d", "-s", f"c{n}", "-x", str(width),
                  "-y", str(height), cmd, check=True)
@@ -112,11 +113,68 @@ across the screen gives each cell's column, and so each tab's width."""
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
+# Emoji tmux 3.6a's width table (utf8.c) makes two columns wide, where
+# Unicode leaves them narrow.
+TMUX_WIDE = frozenset((0x261D, 0x26F9, 0x270C, 0x270D, 0x1F3CB, 0x1F3CC,
+                       0x1F574, 0x1F575, 0x1F590))
+# The emoji a skin-tone modifier joins in tmux 3.6a (utf8-combined.c).
+MODIFIER_BASES = frozenset((
+    0x1F44B, 0x1F44C, 0x1F44D, 0x1F44E, 0x1F44F, 0x1F450, 0x1F466, 0x1F467,
+    0x1F468, 0x1F469, 0x1F46E, 0x1F470, 0x1F471, 0x1F472, 0x1F473, 0x1F474,
+    0x1F475, 0x1F476, 0x1F477, 0x1F478, 0x1F47C, 0x1F481, 0x1F482, 0x1F483,
+    0x1F485, 0x1F486, 0x1F487, 0x1F4AA, 0x1F575, 0x1F57A, 0x1F590, 0x1F595,
+    0x1F596, 0x1F645, 0x1F646, 0x1F647, 0x1F64B, 0x1F64C, 0x1F64D, 0x1F64E,
+    0x1F64F, 0x1F6B4, 0x1F6B5, 0x1F6B6, 0x1F926, 0x1F937, 0x1F938, 0x1F939,
+    0x1F93D, 0x1F93E, 0x1F9B5, 0x1F9B6, 0x1F9B8, 0x1F9B9, 0x1F9CD, 0x1F9CE,
+    0x1F9CF, *range(0x1F9D1, 0x1F9E0)))
+
+
 def char_width(ch):
-    """Return the columns CH takes in a terminal: 0, 1 or 2."""
-    if unicodedata.combining(ch):
+    """Return the columns tmux gives CH by itself: 0, 1 or 2.
+This is utf8proc's measure, which tmux uses where it is built with it (as on
+macOS); a tmux using the C library's measure may differ on rare characters."""
+    cp = ord(ch)
+    if cp in TMUX_WIDE:
+        return 2
+    if (0x1160 <= cp <= 0x11FF or 0xD7B0 <= cp <= 0xD7FF  # Hangul vowels, finals
+            or (unicodedata.category(ch) in ("Mn", "Mc", "Me", "Cf") and cp != 0xAD)):
         return 0
     return 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+
+
+def joins(cell, ch):
+    """Whether tmux adds CH to CELL, the text of the cell before it.
+Return "wide" when that makes a one-column CELL two columns wide.  This
+follows tmux 3.6a's `screen_write_combine'."""
+    cp, first = ord(ch), ord(cell[0])
+    if cp < 0x80 or cell == "\t":
+        return False
+    if ch == "\ufe0f":
+        return "wide"
+    if ch == "\u200d" or char_width(ch) == 0:
+        return True
+    if 0x1F1E6 <= cp <= 0x1F1FF and 0x1F1E6 <= first <= 0x1F1FF:
+        return "wide"           # every regional indicator in a row, not pairs
+    if ((0x1F3FB <= cp <= 0x1F3FF and first in MODIFIER_BASES)
+            or (cp in MODIFIER_BASES and 0x1F3FB <= first <= 0x1F3FF)):
+        return "wide"
+    return cell.endswith("\u200d")
+
+
+def clusters(row):
+    """Split ROW, as `capture-pane' prints it, into tmux's cells.
+Return [(text, columns)].  A cell prints every character tmux joined into it:
+an emoji and its VS16, skin tone or ZWJ sequence, regional indicators, and
+zero-width characters such as combining marks."""
+    cells = []
+    for ch in row:
+        join = cells and joins(cells[-1][0], ch)
+        if join:
+            text, width = cells[-1]
+            cells[-1] = (text + ch, 2 if join == "wide" else width)
+        else:
+            cells.append((ch, char_width(ch)))
+    return cells
 
 
 def expand_tabs(row, width, cells=None):
@@ -125,16 +183,16 @@ CELLS lists the columns where the row's cells start (`Tmux.cell_columns'): a
 tab reaches the next.  Without them a tab moves to the next multiple of 8,
 but never past the last column, as with the default tab stops."""
     out, col = [], 0
-    for ch in row:
-        if ch == "\t":
+    for text, columns in clusters(row):
+        if text == "\t":
             stop = next((c for c in cells or () if c > col), None)
             if stop is None:
                 stop = min((col // 8 + 1) * 8, width - 1)
             out.append(" " * max(0, stop - col))
             col = max(col, stop)
         else:
-            out.append(ch)
-            col += char_width(ch)
+            out.append(text)
+            col += columns
     return "".join(out)
 
 
