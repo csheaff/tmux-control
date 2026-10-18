@@ -51,6 +51,7 @@
 {"name": "tab-from-pending-wrap", "size": "12x6", "input": "gaabcidichba\t", "expect": "match", "note": "a tab from a pending wrap leaves the cursor there"}
 {"name": "vpr-ignored-by-tmux", "size": "12x6", "input": "\u001b[8e", "expect": "diverge", "note": "tmux ignores VPR (CSI e); Eat moves down.  Left as is: tmux's terminfo has no VPR, so programs do not send it there"}
 {"name": "cht-ignored-by-tmux", "size": "12x6", "input": "\u001b[2I", "expect": "diverge", "note": "tmux ignores CHT (CSI I); Eat tabs.  Left as is, as for VPR"}
+{"name": "hpr-ignored-by-tmux", "size": "12x6", "input": "\u001b[2a", "expect": "diverge", "note": "tmux ignores HPR (CSI a); Eat moves right.  Left as is, as for VPR"}
 {"name": "tab-stops-cleared", "size": "12x6", "input": "\u001b[3g\t", "expect": "diverge", "note": "Eat has fixed tab stops every 8 columns; TBC and HTS change tmux's"}
 {"name": "tab-stop-set", "size": "9x12", "input": "cbg\u001bH\u001b[2D\t", "expect": "diverge", "note": "Eat has fixed tab stops every 8 columns; TBC and HTS change tmux's"}
 {"name": "backspace-onto-wide-char", "size": "12x6", "input": "中\b", "expect": "diverge", "note": "the cursor is on a double-width character's second column; Eat shows it on the first (it records the same column)"}
@@ -58,3 +59,25 @@
 {"name": "el0-from-wide-second-column", "size": "9x3", "input": "ab中cd\u001b[1;4H\u001b[0K", "expect": "diverge", "note": "EL 0 from a double-width character's second column: tmux's grid keeps the character, Eat erases it"}
 {"name": "ich-most-of-row", "size": "9x3", "input": "ddfjibfh\r\u001b[8@", "expect": "diverge", "note": "tmux's grid blanks only the cells it moved when inserting more than half the row (a terminal attached to tmux shows the blanks); Eat blanks the whole gap"}
 {"name": "il-most-of-screen-outside-region", "size": "9x8", "input": "abc\r\ndef\u001b[3;7r\u001b[7L", "expect": "diverge", "note": "as for ICH: tmux's grid leaves old rows in the gap when inserting more than half the remaining rows"}
+{"name": "combining-acute", "size": "12x3", "input": "e\u0301x", "expect": "match", "note": "a combining accent joins the character before it"}
+{"name": "two-combining-marks", "size": "12x3", "input": "a\u0300\u0301b", "expect": "diverge", "note": "tmux keeps both combining marks in the cell; Eat loses the second (the columns agree)"}
+{"name": "combining-on-wide", "size": "12x3", "input": "中\u0301x", "expect": "diverge", "note": "a combining mark on a double-width character: tmux keeps it in the cell, Eat loses it (the columns agree)"}
+{"name": "combining-split-by-sgr", "size": "12x3", "input": "e\u001b[31m\u0301x", "expect": "match", "note": "a combining mark after an SGR still joins the character before it"}
+{"name": "vs16-heart", "size": "12x3", "input": "❤\ufe0fx", "expect": "diverge", "note": "VS16 makes ❤ an emoji two columns wide in tmux; Eat drops the selector and keeps it one column wide, so the rest of the row is a column left"}
+{"name": "vs15-text-emoji", "size": "12x3", "input": "❤\ufe0ex", "expect": "diverge", "note": "tmux keeps VS15 in the cell; Eat drops it (the columns agree)"}
+{"name": "text-default-smiley", "size": "12x3", "input": "☺x", "expect": "match", "note": "a text-presentation symbol is one column wide"}
+{"name": "emoji-presentation", "size": "12x3", "input": "😀x", "expect": "match", "note": "an emoji-presentation character is two columns wide"}
+{"name": "skin-tone-modifier", "size": "12x3", "input": "👍🏽x", "expect": "diverge", "note": "tmux joins a skin-tone modifier to its emoji in one two-column cell; Eat writes it as a second double-width character, so the rest of the row is two columns right"}
+{"name": "zwj-family", "size": "12x3", "input": "👨\u200d👩\u200d👧x", "expect": "diverge", "note": "tmux makes a ZWJ sequence one two-column cell; Eat drops the joiners and writes each emoji, so the rest of the row is four columns right"}
+{"name": "zwj-rainbow-flag", "size": "12x3", "input": "🏳\ufe0f\u200d🌈x", "expect": "diverge", "note": "tmux makes the ZWJ flag one two-column cell; Eat drops VS16 and the joiner and writes the flag (one column) and the rainbow (two), a column right"}
+{"name": "regional-flag", "size": "12x3", "input": "🇯🇵x", "expect": "match", "note": "two regional indicators: one two-column cell in tmux, a column each in Eat, the same two columns"}
+{"name": "keycap", "size": "12x3", "input": "1\ufe0f\u20e3x", "expect": "diverge", "note": "tmux makes 1, VS16 and the keycap mark one two-column cell; Eat drops both marks, so the rest of the row is a column left"}
+{"name": "devanagari-conjunct", "size": "12x3", "input": "क\u094dषx", "expect": "diverge", "note": "tmux keeps the virama joining क and ष in one cluster; Eat drops it (the columns agree)"}
+{"name": "hangul-jamo", "size": "12x3", "input": "ᄀ\u1161\u11a8x", "expect": "diverge", "note": "tmux joins conjoining jamo into one double-width syllable; Eat keeps only the leading consonant (the columns agree)"}
+{"name": "zero-width-space", "size": "12x3", "input": "a\u200bbx", "expect": "diverge", "note": "tmux keeps a zero-width space in the cell before it; Eat drops it (nothing shows either way)"}
+{"name": "emoji-then-cup-overwrite", "size": "12x3", "input": "👍🏽abc\u001b[1;3HZ", "expect": "diverge", "note": "after a skin-toned emoji Eat's text is two columns right of tmux's, so a CUP overwrite replaces a different character"}
+{"name": "zwj-then-text-and-el", "size": "12x3", "input": "👨\u200d👩\u200d👧abcdef\u001b[1;5H\u001b[K", "expect": "diverge", "note": "after a ZWJ sequence Eat's text is four columns right of tmux's, so EL erases different characters"}
+{"name": "emoji-at-last-column", "size": "12x3", "input": "abcdefghijk😀x", "expect": "match", "note": "an emoji with one column left wraps to the next row"}
+{"name": "vs16-at-last-column", "size": "12x3", "input": "abcdefghijk❤\ufe0fx", "expect": "diverge", "note": "tmux drops ❤ when VS16 widens it on the last column (a tmux quirk); Eat keeps it one column wide there and wraps the x"}
+{"name": "claude-code-bullet", "size": "20x3", "input": "⏺ Read(file)\r\n  ⎿  Done", "expect": "match", "note": "Claude Code's ⏺ and ⎿ are one column wide"}
+{"name": "box-and-emoji-row", "size": "20x3", "input": "│ ✅ tests │\r\n│ ❌ lint  │", "expect": "match", "note": "✅ and ❌ between box-drawing characters are two columns wide"}
