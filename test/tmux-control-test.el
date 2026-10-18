@@ -6061,6 +6061,93 @@ Batch Emacs lays out no window, so `posn-at-point' can't make one."
         (should (eq tmux-control--process new-proc))
         (should-not (string-match-p "connection lost" (buffer-string)))))))
 
+(defun tmux-control-test--drop (output &optional scrolled-back)
+  "Drop the connection of a screen OUTPUT drew, shown in the selected window.
+The screen has as many rows as the window has lines.  The window starts
+at the screen's top, or at the top of its history when SCROLLED-BACK,
+with point on the cursor.  Return the window."
+  (let ((window (selected-window))
+        (proc (make-symbol "proc")))
+    (tmux-control-mode)
+    (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
+    (eat-term-resize tmux-control--terminal 40 (floor (window-screen-lines)))
+    (let ((inhibit-read-only t))
+      (eat-term-process-output tmux-control--terminal output)
+      (eat-term-redisplay tmux-control--terminal))
+    (set-window-buffer window (current-buffer))
+    (set-window-start window (if scrolled-back (point-min)
+                               (eat-term-display-beginning tmux-control--terminal)))
+    (goto-char (eat-term-display-cursor tmux-control--terminal))
+    (setq-local tmux-control--process proc)
+    (cl-letf (((symbol-function 'process-buffer) (lambda (_p) (current-buffer)))
+              ((symbol-function 'message) #'ignore))
+      (let ((tmux-control-auto-reconnect nil))
+        (tmux-control--sentinel proc "killed: 9\n")))
+    window))
+
+(defun tmux-control-test--rows (count)
+  "Return COUNT numbered rows of terminal output, the cursor after the last."
+  (mapconcat (lambda (i) (format "R%d" i)) (number-sequence 1 count) "\r\n"))
+
+(ert-deftest tmux-control-test-drop-keeps-the-screen-in-view ()
+  ;; A dropped connection's note went after the whole screen, its blank
+  ;; rows too, and point went with it: the window scrolled to the note,
+  ;; and an agent's last lines, at the top of the screen, left the view.
+  (save-window-excursion
+    (with-temp-buffer
+      (let* ((rows (floor (window-screen-lines)))
+             ;; A repaint from tmux writes every row, blank ones too, and
+             ;; then puts the cursor back: here on the row under the text.
+             (window (tmux-control-test--drop
+                      (concat "L1\r\nL2\r\nL3"
+                              (apply #'concat (make-list (- rows 3) "\r\n"))
+                              "\e[4;1H")))
+             (top (eat-term-display-beginning tmux-control--terminal)))
+        (should (= (window-start window) top))
+        ;; Point stays on the cursor's row, and the note is right under it.
+        (should (= (window-point window)
+                   (eat-term-display-cursor tmux-control--terminal)))
+        (should (= (line-number-at-pos (window-point window)) 4))
+        (goto-char top)
+        (forward-line 4)
+        (should (looking-at-p "\\[tmux-control\\] connection lost (killed: 9)"))
+        (eat-term-delete tmux-control--terminal)))))
+
+(ert-deftest tmux-control-test-drop-of-a-full-screen-shows-the-note-at-the-bottom ()
+  ;; With no blank row to give up, the window scrolls by the note's line,
+  ;; not half a screen.
+  (save-window-excursion
+    (with-temp-buffer
+      (let* ((rows (floor (window-screen-lines)))
+             (window (tmux-control-test--drop (tmux-control-test--rows rows))))
+        (goto-char (window-start window))
+        (should (looking-at-p "R2$"))
+        (forward-line (1- rows))
+        (should (looking-at-p "\\[tmux-control\\] connection lost"))
+        (eat-term-delete tmux-control--terminal)))))
+
+(ert-deftest tmux-control-test-drop-leaves-a-window-reading-history ()
+  ;; A window scrolled back into the history is not taken to the note.
+  (save-window-excursion
+    (with-temp-buffer
+      (let* ((rows (floor (window-screen-lines)))
+             (window (tmux-control-test--drop
+                      (tmux-control-test--rows (* 3 rows)) t)))
+        (should (= (window-start window) (point-min)))
+        (eat-term-delete tmux-control--terminal)))))
+
+(ert-deftest tmux-control-test-message-leaves-point ()
+  ;; A note goes after the terminal without taking point there, which
+  ;; scrolled the view away from the screen.
+  (with-temp-buffer
+    (tmux-control-mode)
+    (let ((inhibit-read-only t)) (insert "screen"))
+    (goto-char 3)
+    (cl-letf (((symbol-function 'message) #'ignore))
+      (tmux-control--message "a note"))
+    (should (= (point) 3))
+    (should (string-match-p "a note" (buffer-string)))))
+
 (ert-deftest tmux-control-test-dead-connection-typing-offers-reconnect ()
   ;; Keystrokes against a dead connection are the natural recovery
   ;; gesture; they must offer to reconnect instead of vanishing.

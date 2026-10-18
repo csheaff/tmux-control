@@ -9203,6 +9203,45 @@ never steals the window the user is looking at."
         (setq tmux-control--auto-reconnect-timer
               (run-with-timer delay nil #'tmux-control--auto-reconnect-now buffer))))))
 
+(defun tmux-control--drop-blank-rows ()
+  "Delete the blank rows at the bottom of the screen, below the cursor.
+Run when the connection ends, so that the notes written after the
+screen sit under its last line instead of below a screenful of blank
+rows, out of view.  A repaint from tmux writes a screen's empty rows;
+Eat leaves rows below its cursor out until something is written there,
+so the screen is as Eat would have it had they never been written.  The
+cursor's own row stays."
+  (when (tmux-control--term-live-p)
+    (let ((inhibit-read-only t))
+      (save-excursion
+        (goto-char (tmux-control--term-end))
+        (let ((end (point)))
+          (skip-chars-backward " \n" (tmux-control--term-cursor))
+          (delete-region (line-end-position) end))))))
+
+(defun tmux-control--show-last-note ()
+  "Scroll the windows showing the screen's last row to show the last note.
+Each scrolls only as far as it must, so not at all when the note fits
+under the screen, and a window scrolled back into the history stays
+where it is.  Every terminal row is one line."
+  (when (tmux-control--term-live-p)
+    (save-excursion
+      (let ((bottom (progn (goto-char (tmux-control--term-end))
+                           (line-beginning-position)))
+            ;; A note ends with a newline: it is the line before the end.
+            (note (progn (goto-char (point-max))
+                         (line-beginning-position 0))))
+        (dolist (window (get-buffer-window-list nil nil t))
+          (let ((start (window-start window))
+                (lines (floor (with-selected-window window
+                                (window-screen-lines)))))
+            (when (and (<= start bottom)
+                       (< (count-lines start bottom) lines)
+                       (>= (count-lines start note) lines))
+              (goto-char note)
+              (forward-line (- 1 lines))
+              (set-window-start window (point)))))))))
+
 (defun tmux-control--sentinel (process message)
   "Handle PROCESS exit with MESSAGE."
   (when (buffer-live-p (process-buffer process))
@@ -9214,59 +9253,66 @@ never steals the window the user is looking at."
       ;; spurious loss announcement over a live session.  Only the
       ;; buffer's CURRENT process gets to report its own death.
       (when (eq process tmux-control--process)
-        (let ((count (tmux-control--unacknowledged-input-count)))
-          (setq tmux-control--last-disconnect
-                (list :time (current-time) :reason (string-trim-right message)
-                      :unacknowledged-input count))
-          (when (> count 0)
-            (tmux-control--message
-             (format "%d input command%s unacknowledged; delivery is unknown. Input will not be replayed"
-                     count (if (= count 1) "" "s")))))
-        ;; A connection loss ends both active tiling and retained hidden
-        ;; pane caches.  Only an actively tiled view should resume tiling.
-        (when (or tmux-control--tiled tmux-control--pane-buffers)
-          (when tmux-control--tiled (setq tmux-control--resume-tiling t))
-          (tmux-control--teardown-tiling (current-buffer)))
-        (let ((deliberate tmux-control--disconnecting))
-          (setq tmux-control--disconnecting nil)
-          (setq tmux-control--process nil)
-          ;; A deliberate disconnect (C-c C-k) needs no announcement.
-          ;; Anything else -- a dropped SSH connection, a killed tmux
-          ;; server -- used to die silently here, leaving a dead-looking
-          ;; buffer with no explanation and no way back short of
-          ;; re-running `tmux-control-connect' with all its prompts.  Say
-          ;; what happened and name the one-key recovery.  (Whether the
-          ;; tmux session survived cannot be known from here -- a dropped
-          ;; link leaves it running, a killed server does not -- so the
-          ;; message is conditional.)
-          (cond
-           ((and (not deliberate)
-                 tmux-control-auto-reconnect
-                 (< tmux-control--auto-reconnect-attempts
-                    tmux-control--auto-reconnect-max))
-            ;; Coming back: keep the cell (it shows its last frame and the
-            ;; "reconnecting" notice), so a flock view does not churn.
-            (tmux-control--schedule-auto-reconnect (current-buffer)))
-           (t
-            ;; No auto-reconnect (off, or the budget is spent): announce and
-            ;; leave the one-key recovery.  Reset a spent budget so a later
-            ;; manual reconnect starts fresh.
-            (unless deliberate
-              (setq tmux-control--auto-reconnect-attempts 0)
+        ;; The screen stays as the connection left it, with notes below it
+        ;; to say what happened.  Make room for them under its last line,
+        ;; and bring them into view.
+        (tmux-control--drop-blank-rows)
+        (let ((notes (point-max)))
+          (let ((count (tmux-control--unacknowledged-input-count)))
+            (setq tmux-control--last-disconnect
+                  (list :time (current-time) :reason (string-trim-right message)
+                        :unacknowledged-input count))
+            (when (> count 0)
               (tmux-control--message
-               (if tmux-control--exit-reason
-                   ;; tmux closed it: the session or server ended, or
-                   ;; something detached this client.  Its %exit can't
-                   ;; say which.
-                   (format "tmux ended the connection%s -- if the tmux session is still running, C-c C-r reconnects"
-                           (if (string-empty-p tmux-control--exit-reason) ""
-                             (format " (%s)" tmux-control--exit-reason)))
-                 (format "connection lost (%s) -- if the tmux session is still running, C-c C-r reconnects"
-                         (string-trim-right message))))
-              (force-mode-line-update t))
-            ;; The session is gone for now -- drop its frozen cell from any
-            ;; flock so the dashboard reflects what is actually live.
-            (tmux-control--schedule-reflock))))))))
+               (format "%d input command%s unacknowledged; delivery is unknown. Input will not be replayed"
+                       count (if (= count 1) "" "s")))))
+          ;; A connection loss ends both active tiling and retained hidden
+          ;; pane caches.  Only an actively tiled view should resume tiling.
+          (when (or tmux-control--tiled tmux-control--pane-buffers)
+            (when tmux-control--tiled (setq tmux-control--resume-tiling t))
+            (tmux-control--teardown-tiling (current-buffer)))
+          (let ((deliberate tmux-control--disconnecting))
+            (setq tmux-control--disconnecting nil)
+            (setq tmux-control--process nil)
+            ;; A deliberate disconnect (C-c C-k) needs no announcement.
+            ;; Anything else -- a dropped SSH connection, a killed tmux
+            ;; server -- used to die silently here, leaving a dead-looking
+            ;; buffer with no explanation and no way back short of
+            ;; re-running `tmux-control-connect' with all its prompts.  Say
+            ;; what happened and name the one-key recovery.  (Whether the
+            ;; tmux session survived cannot be known from here -- a dropped
+            ;; link leaves it running, a killed server does not -- so the
+            ;; message is conditional.)
+            (cond
+             ((and (not deliberate)
+                   tmux-control-auto-reconnect
+                   (< tmux-control--auto-reconnect-attempts
+                      tmux-control--auto-reconnect-max))
+              ;; Coming back: keep the cell (it shows its last frame and the
+              ;; "reconnecting" notice), so a flock view does not churn.
+              (tmux-control--schedule-auto-reconnect (current-buffer)))
+             (t
+              ;; No auto-reconnect (off, or the budget is spent): announce and
+              ;; leave the one-key recovery.  Reset a spent budget so a later
+              ;; manual reconnect starts fresh.
+              (unless deliberate
+                (setq tmux-control--auto-reconnect-attempts 0)
+                (tmux-control--message
+                 (if tmux-control--exit-reason
+                     ;; tmux closed it: the session or server ended, or
+                     ;; something detached this client.  Its %exit can't
+                     ;; say which.
+                     (format "tmux ended the connection%s -- if the tmux session is still running, C-c C-r reconnects"
+                             (if (string-empty-p tmux-control--exit-reason) ""
+                               (format " (%s)" tmux-control--exit-reason)))
+                   (format "connection lost (%s) -- if the tmux session is still running, C-c C-r reconnects"
+                           (string-trim-right message))))
+                (force-mode-line-update t))
+              ;; The session is gone for now -- drop its frozen cell from any
+              ;; flock so the dashboard reflects what is actually live.
+              (tmux-control--schedule-reflock))))
+          (when (> (point-max) notes)
+            (tmux-control--show-last-note)))))))
 
 (defun tmux-control--kill-process ()
   "Delete the tmux control process and any dependent render buffers."
@@ -9316,11 +9362,13 @@ never steals the window the user is looking at."
 The appended copy lands after the terminal, which the view does not
 necessarily reach -- a tiled pane shows exactly its screen -- so the echo
 area is what makes a warning reliably visible; the buffer copy is the
-record that survives the next keystroke."
+record that survives the next keystroke.  Point stays where it is: moved
+to the note, it took the view away from the screen."
   (let ((inhibit-read-only t))
-    (goto-char (point-max))
-    (insert (propertize (format "\n[tmux-control] %s\n" text)
-                        'face 'font-lock-comment-face)))
+    (save-excursion
+      (goto-char (point-max))
+      (insert (propertize (format "\n[tmux-control] %s\n" text)
+                          'face 'font-lock-comment-face))))
   (message "[tmux-control] %s" text))
 
 
