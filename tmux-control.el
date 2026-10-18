@@ -58,7 +58,6 @@
 (require 'seq)
 (require 'subr-x)
 (require 'ucs-normalize)
-(require 'eat)
 
 (defconst tmux-control-version "0.8.2"
   "Version of tmux-control, included in diagnostic reports.")
@@ -795,6 +794,11 @@ With it, the screen seed preserves trailing background cells so full-width
 background fills (tool-call panels, selections, status bars) survive a
 reseed; set from the `#{version}' query on connect.")
 (defvar-local tmux-control--keys-active nil)
+(defvar-local tmux-control--char-mode-keys nil
+  "Non-nil while this tmux-control buffer is in Eat char mode.
+Gates `tmux-control--char-mode-map' on, while `tmux-control--keys-active'
+gates the full override map off; toggled by the `eat-char-mode' /
+`eat-semi-char-mode' advices.")
 (defvar-local tmux-control--live-buffer nil)
 (defvar-local tmux-control--alt-screen-honored t
   "Non-nil when the controlled tmux honors alternate-screen for the active window.
@@ -915,6 +919,431 @@ A pane buffer's `kill-buffer-hook' re-tiles to recover a pane killed out
 from under the tiling, but must not fire during teardown/reconciliation
 kills, which are deliberate.")
 
+;;;; Terminal interface
+
+;; tmux-control draws each pane with a terminal emulator that lives in the
+;; buffer and has no process of its own: tmux's output is fed to it, and
+;; what it draws is the view.  That emulator is Eat.  Everything the rest
+;; of tmux-control asks of it goes through this section: the
+;; `tmux-control--term-' functions act on the current buffer's terminal,
+;; `tmux-control--terminal', and the advice here adapts Eat's own commands
+;; to tmux-control buffers.  The only other code that uses Eat directly is
+;; the patch layer, which corrects Eat itself: the emulation fixes
+;; (`tmux-control--vt-advice'), the redisplay copy
+;; (`tmux-control--eat-redisplay-advice') and the write advice
+;; (`tmux-control--eat-write-composed', `tmux-control--eat-write-hyperlink').
+;; Much of this section uses Eat's private (`eat--') definitions, which a
+;; new Eat version can change.
+
+(require 'eat)
+
+;;; The major mode and keymaps tmux-control builds on
+
+(defalias 'tmux-control--term-mode #'eat-mode
+  "The terminal's major mode, which `tmux-control-mode' derives from.")
+
+(defvar tmux-control--term-mode-map eat-mode-map
+  "The terminal's major mode keymap, the parent of `tmux-control-mode-map'.")
+
+(defvar tmux-control--term-char-mode-map eat-char-mode-map
+  "The terminal's char mode keymap, which sends every key to the pane.
+It is the parent of `tmux-control--char-mode-map'.")
+
+(defconst tmux-control--term-semi-char-command 'eat-semi-char-mode
+  "The terminal's command that switches to semi-char mode.")
+
+(defconst tmux-control--term-yank-command 'eat-yank
+  "The terminal's command that pastes the latest kill.")
+
+(defconst tmux-control--term-yank-pop-command 'eat-yank-from-kill-ring
+  "The terminal's command that pastes a kill chosen from the kill ring.")
+
+(defun tmux-control--term-set-history-limit (chars)
+  "Keep at most CHARS characters of terminal history in this buffer."
+  (setq-local eat-term-scrollback-size chars))
+
+;;; Making a terminal
+
+(defun tmux-control--selection-function ()
+  "Return the Eat `manipulate-selection-function' for a pane terminal.
+Ignores pane-driven OSC 52 clipboard manipulation unless the user opts in
+via `tmux-control-allow-clipboard-write' -- so untrusted pane output cannot
+silently poison or read the Emacs `kill-ring' by default."
+  (if (and tmux-control-allow-clipboard-write
+           (fboundp 'eat--manipulate-kill-ring))
+      #'eat--manipulate-kill-ring
+    #'ignore))
+
+(defun tmux-control--term-make (&optional size)
+  "Give the current buffer a new terminal, and return it.
+The terminal starts at the beginning of the buffer, in semi-char mode,
+sized to SIZE, a (WIDTH . HEIGHT) cons, when that is non-nil.  What it
+sends goes to the pane through `tmux-control--send-input'.  The pane's
+requests to change the cursor, track the mouse and ring the bell act on
+the buffer as they do in Eat; its clipboard requests are handled as
+`tmux-control--selection-function' says."
+  (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
+  (setq eat-terminal tmux-control--terminal)
+  (when size
+    (eat-term-resize tmux-control--terminal (car size) (cdr size)))
+  (eat-semi-char-mode)
+  (setf (eat-term-parameter tmux-control--terminal 'input-function)
+        #'tmux-control--send-input)
+  (setf (eat-term-parameter tmux-control--terminal 'set-cursor-function)
+        (if (fboundp 'eat--set-cursor) #'eat--set-cursor #'ignore))
+  (setf (eat-term-parameter tmux-control--terminal 'grab-mouse-function)
+        (if (fboundp 'eat--grab-mouse) #'eat--grab-mouse #'ignore))
+  (setf (eat-term-parameter tmux-control--terminal 'ring-bell-function)
+        (if (fboundp 'eat--bell) #'eat--bell #'ignore))
+  (setf (eat-term-parameter tmux-control--terminal 'manipulate-selection-function)
+        (tmux-control--selection-function))
+  tmux-control--terminal)
+
+(defun tmux-control--term-set-process (process)
+  "Record PROCESS, the control connection, as the terminal's process.
+Eat's own commands that act on a terminal's process, such as
+`eat-kill-process', use it."
+  (setf (eat-term-parameter tmux-control--terminal 'eat--process) process)
+  (setf (eat-term-parameter tmux-control--terminal 'eat--input-process)
+        process)
+  (setf (eat-term-parameter tmux-control--terminal 'eat--output-process)
+        process))
+
+(defun tmux-control--term-live-p ()
+  "Return non-nil when the current buffer has a live terminal."
+  (and tmux-control--terminal (eat-term-live-p tmux-control--terminal)))
+
+;;; Output and redisplay
+
+(defun tmux-control--term-process-output (output)
+  "Draw OUTPUT on the terminal's screen, without redisplaying the buffer.
+tmux's output goes through `tmux-control--feed-terminal', which prepares
+it for the terminal first."
+  (eat-term-process-output tmux-control--terminal output))
+
+(defun tmux-control--term-redisplay ()
+  "Finish the buffer for display once the terminal has drawn output.
+Lines that scrolled off the screen are rejoined, and history beyond
+the limit (see `tmux-control--term-set-history-limit') is dropped."
+  (eat-term-redisplay tmux-control--terminal))
+
+(defun tmux-control--term-run-update-hook ()
+  "Run the hook Eat runs once it has updated a terminal buffer."
+  (run-hooks 'eat-update-hook))
+
+;;; Size, cursor and screen
+
+(defun tmux-control--term-size ()
+  "Return the size of the terminal as (WIDTH . HEIGHT)."
+  (eat-term-size tmux-control--terminal))
+
+(defun tmux-control--term-resize (width height)
+  "Resize the terminal to WIDTH columns by HEIGHT rows."
+  (eat-term-resize tmux-control--terminal width height))
+
+(defun tmux-control--term-cursor ()
+  "Return the buffer position of the terminal's cursor.
+A cursor waiting to wrap, past the last column, is shown on the last
+column."
+  (eat-term-display-cursor tmux-control--terminal))
+
+(defun tmux-control--term-cursor-xy ()
+  "Return the current buffer's terminal cursor as 0-indexed (X . Y).
+Reads Eat's own cursor bookkeeping (the same coordinates tmux reports
+as #{cursor_x},#{cursor_y}).  After a write to the last column, while
+the wrap is pending, X is the width: one past the last column.  Return
+nil when the terminal is gone or Eat's internals are unavailable, in
+which case seed verification quietly disables itself."
+  (when (and tmux-control--terminal
+             (eat-term-live-p tmux-control--terminal)
+             (fboundp 'eat--t-term-display)
+             (fboundp 'eat--t-disp-cursor)
+             (fboundp 'eat--t-cur-x)
+             (fboundp 'eat--t-cur-y))
+    (let* ((disp (eat--t-term-display tmux-control--terminal))
+           (cur (and disp (eat--t-disp-cursor disp))))
+      (when cur
+        ;; Eat's cursor is 1-indexed; tmux's is 0-indexed.
+        (cons (1- (eat--t-cur-x cur)) (1- (eat--t-cur-y cur)))))))
+
+(defun tmux-control--term-screen-start ()
+  "Return where the terminal's live screen starts in the buffer.
+Above it is the history the terminal keeps.  The value can be a marker,
+so use it at once rather than keep it."
+  (eat-term-display-beginning tmux-control--terminal))
+
+(defun tmux-control--term-end ()
+  "Return where the terminal's screen ends in the buffer.
+Text after it, such as tmux-control's own notes, is not the terminal's.
+The value can be a marker, so use it at once rather than keep it."
+  (eat-term-end tmux-control--terminal))
+
+(defun tmux-control--term-alt-screen-known-p ()
+  "Return non-nil when the terminal can report its alternate screen."
+  (or (fboundp 'eat-term-in-alternative-display-p)
+      (fboundp 'eat--t-term-main-display)))
+
+(defun tmux-control--term-alt-screen-p ()
+  "Return non-nil when the terminal shows its alternate screen.
+This is the terminal's own state; `tmux-control--alt-screen-p' says
+whether the pane is truly there."
+  (cond
+   ((fboundp 'eat-term-in-alternative-display-p)
+    (eat-term-in-alternative-display-p tmux-control--terminal))
+   ((fboundp 'eat--t-term-main-display)
+    (eat--t-term-main-display tmux-control--terminal))))
+
+(defun tmux-control--term-grabs-mouse-p ()
+  "Return non-nil when the pane's application has requested mouse tracking.
+Such applications (full-screen TUIs, but also normal-screen programs like
+`less -X') expect to receive wheel events themselves."
+  (and (boundp 'eat--mouse-grabbing-type)
+       eat--mouse-grabbing-type
+       t))
+
+;;; Scrolling windows with the cursor
+
+(defun tmux-control--term-scroll-sync-p ()
+  "Return non-nil when the terminal can scroll windows to its cursor.
+Eat does that with private functions, which another version may lack;
+then windows stay where they are."
+  (and (fboundp 'eat--synchronize-scroll-windows)
+       (fboundp 'eat--synchronize-scroll)
+       (boundp 'eat--synchronize-scroll-function)))
+
+(defun tmux-control--term-following-windows ()
+  "Return the windows the terminal scrolls to follow its cursor.
+These are the windows whose point is on the cursor, and `buffer' when
+the buffer's point is.  Ask before feeding output, which moves the
+cursor away from them."
+  (eat--synchronize-scroll-windows))
+
+(defun tmux-control--term-sync-scroll (windows)
+  "Scroll WINDOWS to the terminal's cursor, as after the terminal's output.
+WINDOWS can include `buffer', for the buffer's own point.  This is the
+buffer's scroll synchronization, which
+`tmux-control--eat-input-sync-advice' narrows while a key is sent."
+  (funcall eat--synchronize-scroll-function windows))
+
+(defun tmux-control--term-scroll-to-cursor (windows)
+  "Scroll WINDOWS to the terminal's cursor and live screen.
+Like `tmux-control--term-sync-scroll', but for a window arriving at the
+buffer or returning to the live screen, rather than following output."
+  (let ((eat-terminal tmux-control--terminal))
+    (eat--synchronize-scroll windows)))
+
+(defun tmux-control--eat-synchronize-scroll-advice (orig-fn windows)
+  "Keep an alternate-screen TUI's first row visible after Eat syncs WINDOWS.
+Eat's line-counted `recenter' can advance past the screen top in a GUI
+with tall fallback glyphs, even when the cursor and entire screen fit.
+Use the actual screen marker for live-following alternate-screen windows.
+Normal-screen scrollback and ordinary Emacs navigation keep their view.
+ORIG-FN is Eat's scroll synchronization."
+  (prog1 (funcall orig-fn windows)
+    (when (and (derived-mode-p 'tmux-control-mode)
+               tmux-control--terminal
+               (eat-term-live-p tmux-control--terminal)
+               (tmux-control--alt-screen-p))
+      (tmux-control--anchor-windows-to-screen-top windows)
+      (tmux-control--keep-cursor-visible windows))))
+
+(advice-remove #'eat--synchronize-scroll
+               #'tmux-control--eat-synchronize-scroll-advice)
+(advice-add #'eat--synchronize-scroll :around
+            #'tmux-control--eat-synchronize-scroll-advice)
+
+;;; Input and input modes
+
+(defun tmux-control--term-input (event)
+  "Send EVENT, a key, mouse event or character, to the pane.
+It is encoded as the terminal encodes what is typed into it."
+  (eat-self-input 1 event))
+
+(defun tmux-control--term-char-mode ()
+  "Switch the terminal to char mode, where every key goes to the pane."
+  (eat-char-mode))
+
+(defun tmux-control--term-input-mode-p ()
+  "Return non-nil when keys go to the pane, in semi-char or char mode."
+  (or (bound-and-true-p eat--semi-char-mode)
+      (bound-and-true-p eat--char-mode)))
+
+(defun tmux-control--eat-semi-char-mode-advice (orig-fn &rest args)
+  "Make `eat-semi-char-mode' return tmux-control scrollback buffers live.
+In a live tmux-control buffer, also restore the full override keymap
+that char mode swapped out (see `tmux-control--char-mode-keys'), and
+keep the buffer read-only (see `tmux-control--protect-terminal-text').
+ORIG-FN is `eat-semi-char-mode', called with ARGS."
+  (if (derived-mode-p 'tmux-control-scrollback-mode)
+      (progn
+        (tmux-control-live)
+        (unless (bound-and-true-p eat--semi-char-mode)
+          (eat-semi-char-mode)))
+    (apply orig-fn args)
+    (when (derived-mode-p 'tmux-control-mode)
+      (tmux-control--protect-terminal-text current-input-method)
+      (setq tmux-control--char-mode-keys nil)
+      (setq tmux-control--keys-active t))))
+
+(advice-remove #'eat-semi-char-mode
+               #'tmux-control--eat-semi-char-mode-advice)
+(advice-add #'eat-semi-char-mode
+            :around #'tmux-control--eat-semi-char-mode-advice)
+
+(defun tmux-control--eat-char-mode-advice (orig-fn &rest args)
+  "Adapt `eat-char-mode' to tmux-control buffers.
+Eat's char mode exists to send EVERY key to the terminal -- C-c, C-x,
+C-u, C-h and all -- leaving only `C-M-m' (M-RET) to come back to
+semi-char mode.  That almost worked here out of the box, except the
+tmux-control override keymap is an EMULATION map, which outranks char
+mode's own keymap: C-c stayed a prefix, breaking precisely the key
+char mode is most reached for (the interrupt).  Swap the override map
+for the raw-input `tmux-control--char-mode-map' while char mode is on;
+`eat-semi-char-mode' restores it.  In a scrollback pager, char mode
+means \"get me back to the live terminal, raw\": return live first,
+then enter char mode there.
+ORIG-FN is `eat-char-mode', called with ARGS."
+  (if (derived-mode-p 'tmux-control-scrollback-mode)
+      (progn
+        (tmux-control-live)
+        (unless (bound-and-true-p eat--char-mode)
+          (eat-char-mode)))
+    (apply orig-fn args)
+    (when (derived-mode-p 'tmux-control-mode)
+      ;; xah-fly-keys command state uses a terminal-wide transient map,
+      ;; which even emulation maps cannot outrank.  Enter its insert state
+      ;; through its public command so that map is cleanly deactivated.
+      ;; Other buffers keep the modal package enabled, and ESC in semi-char
+      ;; mode can return to command state as usual.
+      (when (and (bound-and-true-p xah-fly-keys)
+                 (fboundp 'xah-fly-insert-mode-activate))
+        (funcall #'xah-fly-insert-mode-activate))
+      (tmux-control--protect-terminal-text current-input-method)
+      (setq tmux-control--keys-active nil)
+      (setq tmux-control--char-mode-keys t))))
+
+(advice-remove #'eat-char-mode
+               #'tmux-control--eat-char-mode-advice)
+(advice-add #'eat-char-mode
+            :around #'tmux-control--eat-char-mode-advice)
+
+(defun tmux-control--eat-input-sync-advice (orig-fn &rest args)
+  "Skip Eat's pre-input scroll sync for windows already following the cursor.
+Before sending a key, `eat-self-input' synchronizes every window showing
+the buffer with the terminal cursor: it sets point and calls `recenter',
+which makes the next redisplay lay out the whole window again -- even
+when nothing moved.  That relayout runs right after the key is sent, so
+the pane's echo arrives while Emacs is still busy and waits behind it:
+measured at about 6 ms of a 21 ms keystroke on a busy screen.
+
+A window that already shows the live cursor gains nothing from the sync,
+and the output the key produces syncs it again when it is rendered (see
+`tmux-control--flush-display').  So drop those windows from the list and
+keep the ones that need it: a window scrolled into history still jumps
+back to the cursor on the first key, as before.  Mouse events keep Eat's
+behavior unchanged.  ORIG-FN is `eat-self-input', called with ARGS."
+  (let ((event (nth 1 args)))
+    (if (not (and (derived-mode-p 'tmux-control-mode)
+                  eat-terminal
+                  (eat-term-live-p eat-terminal)
+                  (not (mouse-event-p event))
+                  (not (memq (event-basic-type event)
+                             '(mouse-movement wheel-up wheel-down
+                                              wheel-left wheel-right)))))
+        (apply orig-fn args)
+      (let* ((sync eat--synchronize-scroll-function)
+             (cursor (eat-term-display-cursor eat-terminal))
+             (top (eat-term-display-beginning eat-terminal))
+             (eat--synchronize-scroll-function
+              (lambda (windows)
+                (funcall sync
+                         (seq-remove
+                          (lambda (w)
+                            (and (windowp w)
+                                 (tmux-control--window-following-p
+                                  w cursor top)))
+                          windows)))))
+        (apply orig-fn args)))))
+
+(advice-remove #'eat-self-input #'tmux-control--eat-input-sync-advice)
+(advice-add #'eat-self-input :around #'tmux-control--eat-input-sync-advice)
+
+(defun tmux-control--eat-mouse-up (&optional button)
+  "Forget that mouse BUTTON is down, as Eat does when it sees it go up.
+BUTTON is a basic event type, such as `mouse-1'; nil forgets every
+button.  With no button left down, leave the keymap Eat holds while one
+is."
+  (setq eat--mouse-pressed-buttons
+        (and button (delq button eat--mouse-pressed-buttons)))
+  (unless eat--mouse-pressed-buttons
+    (setq eat--mouse-last-position nil)
+    (when-let* ((exit eat--mouse-drag-transient-map-exit))
+      (setq eat--mouse-drag-transient-map-exit nil)
+      ;; It restores `track-mouse' in the buffer of the press, which can
+      ;; have been killed since; the keymap is gone either way.
+      (ignore-errors (funcall exit)))))
+
+(defun tmux-control--eat-mouse-on-screen-p (event)
+  "Return non-nil when mouse EVENT starts on the screen of a live terminal."
+  (let* ((posn (event-start event))
+         (window (posn-window posn)))
+    (and (windowp window)
+         (window-live-p window)
+         (not (posn-area posn))
+         (let ((terminal (buffer-local-value 'eat-terminal
+                                             (window-buffer window))))
+           (and terminal (eat-term-live-p terminal))))))
+
+(defun tmux-control--eat-mouse-advice (orig-fn &rest args)
+  "Keep Eat's mouse drag from outlasting the button that started it.
+A button pressed in a terminal makes Eat hold a keymap that sends every
+mouse event to `eat-self-input', until it sees every button go up.  A
+release it never finished -- tmux not replying refuses the input, the
+window shows another buffer by then, a question asked meanwhile read the
+event -- left the keymap in place, and every click elsewhere, on a list
+or a link, went nowhere until a click in a terminal let go.
+
+So a button is forgotten once its release is handled, whatever happened
+while handling it, and a press off any terminal's screen while the
+keymap is held lets go of it and goes to its own binding.  ORIG-FN is
+`eat-self-input', called with ARGS."
+  (let* ((event (nth 1 args))
+         (button (and (consp event) (event-basic-type event)))
+         (modifiers (and button (event-modifiers event))))
+    (cond
+     ((not (memq button '(mouse-1 mouse-2 mouse-3)))
+      (apply orig-fn args))
+     ((memq 'down modifiers)
+      (if (or (not eat--mouse-drag-transient-map-exit)
+              (tmux-control--eat-mouse-on-screen-p event))
+          (apply orig-fn args)
+        (tmux-control--eat-mouse-up)
+        (push (cons 'no-record event) unread-command-events)))
+     ((or (memq 'click modifiers) (memq 'drag modifiers))
+      (unwind-protect (apply orig-fn args)
+        (tmux-control--eat-mouse-up button)))
+     (t (apply orig-fn args)))))
+
+(advice-remove #'eat-self-input #'tmux-control--eat-mouse-advice)
+(advice-add #'eat-self-input :around #'tmux-control--eat-mouse-advice)
+
+(defvar tmux-control--vt-advice)
+
+(defun tmux-control--term-unload ()
+  "Remove the advice tmux-control put on Eat, for `unload-feature'.
+That is this section's advice and the patch layer's."
+  (advice-remove #'eat-semi-char-mode #'tmux-control--eat-semi-char-mode-advice)
+  (advice-remove #'eat-char-mode #'tmux-control--eat-char-mode-advice)
+  (advice-remove 'eat--t-write #'tmux-control--eat-write-composed)
+  (advice-remove 'eat--t-write #'tmux-control--eat-write-hyperlink)
+  (advice-remove #'eat--synchronize-scroll
+                 #'tmux-control--eat-synchronize-scroll-advice)
+  (advice-remove #'eat-self-input #'tmux-control--eat-input-sync-advice)
+  (advice-remove #'eat-self-input #'tmux-control--eat-mouse-advice)
+  (dolist (entry tmux-control--vt-advice)
+    (advice-remove (car entry) (cdr entry)))
+  (advice-remove 'eat-term-redisplay #'tmux-control--eat-redisplay-advice))
+
 (defvar tmux-control--override-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-e") #'tmux-control-scrollback)
@@ -969,11 +1398,11 @@ shadowing the pane's own C-c.")
   (let ((map (make-sparse-keymap)))
     ;; Eat's minor-mode map can lose to a modal package's minor/emulation
     ;; map.  Put its raw bindings at our emulation-map precedence too.
-    (set-keymap-parent map eat-char-mode-map)
+    (set-keymap-parent map tmux-control--term-char-mode-map)
     ;; GUI events have symbolic names, unlike Eat's ASCII ESC / M-RET.
     (define-key map [escape] #'tmux-control-send-escape)
     (define-key map [S-return] #'tmux-control-send-shift-return)
-    (define-key map [M-return] #'eat-semi-char-mode)
+    (define-key map [M-return] tmux-control--term-semi-char-command)
     (define-key map [wheel-up] #'tmux-control-wheel-scroll)
     (define-key map [wheel-down] #'tmux-control-wheel-down)
     ;; Coalesced fast flicks, as in `tmux-control--override-map'.
@@ -995,12 +1424,6 @@ mouse-grabbing application).")
   "Emulation map alist used to override Eat minor-mode bindings.
 Exactly one of the two gate variables is non-nil at a time: the full
 override map in semi-char mode, the raw-input map in char mode.")
-
-(defvar-local tmux-control--char-mode-keys nil
-  "Non-nil while this tmux-control buffer is in Eat char mode.
-Gates `tmux-control--char-mode-map' on, while `tmux-control--keys-active'
-gates the full override map off; toggled by the `eat-char-mode' /
-`eat-semi-char-mode' advices.")
 
 (defvar-local tmux-control--windows nil
   "Cached window list for the tab bar.
@@ -1027,7 +1450,7 @@ the cross-session activity strip (see `tmux-control-session-activity').")
 
 (defvar tmux-control-mode-map
   (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map eat-mode-map)
+    (set-keymap-parent map tmux-control--term-mode-map)
     (define-key map (kbd "C-c C-e") #'tmux-control-scrollback)
     (define-key map (kbd "C-c C-k") #'tmux-control-disconnect)
     (define-key map (kbd "C-c C-l") #'tmux-control-clear-and-repaint)
@@ -1070,13 +1493,15 @@ the cross-session activity strip (see `tmux-control-session-activity').")
     ;; send cannot know whether the pane requested bracketed paste, so a
     ;; multi-line paste executed line by line; tmux knows, so the paste
     ;; rides `set-buffer' + `paste-buffer -p' (see
-    ;; `tmux-control--paste-to-pane').  The eat-yank remaps catch C-y/M-y
-    ;; through Eat's own minor-mode bindings.
+    ;; `tmux-control--paste-to-pane').  The terminal's own yank commands
+    ;; are remapped too, for C-y/M-y through Eat's minor-mode bindings.
     (define-key map [remap yank] #'tmux-control-yank)
     (define-key map [remap clipboard-yank] #'tmux-control-yank)
-    (define-key map [remap eat-yank] #'tmux-control-yank)
+    (define-key map (vector 'remap tmux-control--term-yank-command)
+      #'tmux-control-yank)
     (define-key map [remap yank-pop] #'tmux-control-yank-from-kill-ring)
-    (define-key map [remap eat-yank-from-kill-ring] #'tmux-control-yank-from-kill-ring)
+    (define-key map (vector 'remap tmux-control--term-yank-pop-command)
+      #'tmux-control-yank-from-kill-ring)
     ;; Open files at the live pane's own directory (on the pane's host), so
     ;; finding a file from a buffer mirroring a remote pane does not mean
     ;; spelling out a full TRAMP path.  Eat's semi-char mode leaves C-x and
@@ -1244,10 +1669,10 @@ buffers.  `tmux-control-unload-function' removes them."
   (add-hook 'window-size-change-functions #'tmux-control--on-frame-size-change)
   (add-hook 'window-size-change-functions #'tmux-control--follow-window-buffer-sizes))
 
-(define-derived-mode tmux-control-mode eat-mode "tmux"
+(define-derived-mode tmux-control-mode tmux-control--term-mode "tmux"
   "Major mode for tmux-control buffers."
   (when tmux-control-live-scrollback-size
-    (setq-local eat-term-scrollback-size tmux-control-live-scrollback-size))
+    (tmux-control--term-set-history-limit tmux-control-live-scrollback-size))
   (setq-local bookmark-make-record-function #'tmux-control--bookmark-record)
   ;; Nothing is edited here -- input goes to the pane -- so undo only
   ;; records each change Eat makes, with a copy of every deleted run: a
@@ -1293,7 +1718,8 @@ buffers.  `tmux-control-unload-function' removes them."
     (define-key map [wheel-down] #'tmux-control-scrollback-wheel-down)
     (define-key map [double-wheel-down] #'tmux-control-scrollback-wheel-down)
     (define-key map [triple-wheel-down] #'tmux-control-scrollback-wheel-down)
-    (define-key map [remap eat-semi-char-mode] #'tmux-control-live)
+    (define-key map (vector 'remap tmux-control--term-semi-char-command)
+      #'tmux-control-live)
     (define-key map [remap self-insert-command] #'tmux-control-live-self-insert)
     map)
   "Keymap for `tmux-control-scrollback-mode'.")
@@ -1453,12 +1879,7 @@ session (tmux attaches if it exists, otherwise creates it)."
       (tmux-control--arm-command-watchdog)
       (process-put tmux-control--process 'adjust-window-size-function
                    #'tmux-control--adjust-window-size)
-      (setf (eat-term-parameter tmux-control--terminal 'eat--process)
-            tmux-control--process)
-      (setf (eat-term-parameter tmux-control--terminal 'eat--input-process)
-            tmux-control--process)
-      (setf (eat-term-parameter tmux-control--terminal 'eat--output-process)
-            tmux-control--process)
+      (tmux-control--term-set-process tmux-control--process)
       (add-hook 'kill-buffer-hook #'tmux-control--kill-process nil t))
     (pop-to-buffer buffer)
     (with-current-buffer buffer
@@ -2161,8 +2582,8 @@ Pane contents, input text, titles, directories and SSH options are omitted."
          (process (buffer-local-value 'tmux-control--process controller))
          (pane (buffer-local-value 'tmux-control--active-pane source))
          (window-id (buffer-local-value 'tmux-control--window-id source))
-         (terminal (buffer-local-value 'tmux-control--terminal source))
-         (size (and terminal (eat-term-live-p terminal) (eat-term-size terminal)))
+         (size (with-current-buffer source
+                 (and (tmux-control--term-live-p) (tmux-control--term-size))))
          (bindings (with-current-buffer source
                      (mapcar (lambda (key) (cons key (key-binding (kbd key))))
                              '("C-c C-c" "C-c C-r" "C-c C-e" "C-y" "<escape>"))))
@@ -2278,10 +2699,10 @@ duplicate."
   ;; Refuse while disconnected rather than clear only the Emacs side: tmux's
   ;; history would survive and nothing could repaint the screen.
   (tmux-control--ensure-live)
-  (unless (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+  (unless (tmux-control--term-live-p)
     (user-error "No live tmux-control terminal in this buffer"))
-  (let ((beg (eat-term-display-beginning tmux-control--terminal))
-        (end (eat-term-end tmux-control--terminal))
+  (let ((beg (tmux-control--term-screen-start))
+        (end (tmux-control--term-end))
         (inhibit-read-only t))
     ;; Notes first: deleting above the screen shifts END.
     (delete-region (if (markerp end) (marker-position end) end) (point-max))
@@ -3078,7 +3499,7 @@ Older replies without dimensions still populate the routing map."
                          (string-match-p "\\`[1-9][0-9]*\\'" (or (nth 4 fields) ""))
                          (buffer-live-p buffer))
                 (with-current-buffer buffer
-                  (tmux-control--apply-eat-size (string-to-number (nth 3 fields))
+                  (tmux-control--apply-term-size (string-to-number (nth 3 fields))
                                                 (string-to-number (nth 4 fields))))))))))
     (setq tmux-control--pane-window map)))
 
@@ -3461,16 +3882,13 @@ KEY includes the buffer modification tick and the counted endpoints.")
       (when (derived-mode-p 'tmux-control-scrollback-mode)
         (tmux-control-live))
       (when (and (derived-mode-p 'tmux-control-mode)
-                 tmux-control--terminal
-                 (eat-term-live-p tmux-control--terminal))
+                 (tmux-control--term-live-p))
         (set-window-vscroll window 0 t)
-        (if (fboundp 'eat--synchronize-scroll)
-            (let ((eat-terminal tmux-control--terminal))
-              (eat--synchronize-scroll (list window)))
+        (if (tmux-control--term-scroll-sync-p)
+            (tmux-control--term-scroll-to-cursor (list window))
           ;; Eat's private helper is not a compatibility guarantee.  Keep
           ;; the button functional using its public cursor/screen accessors.
-          (set-window-point window
-                            (eat-term-display-cursor tmux-control--terminal))
+          (set-window-point window (tmux-control--term-cursor))
           (tmux-control--anchor-windows-to-screen-top (list window))
           (tmux-control--keep-cursor-visible (list window)))
         (force-mode-line-update)))))
@@ -3489,10 +3907,8 @@ unchanged header does not repeatedly scan retained history."
       (let* ((pager (derived-mode-p 'tmux-control-scrollback-mode))
              (start (if pager (window-end window t) (window-start window)))
              (end (if pager (point-max)
-                    (when (and tmux-control--terminal
-                               (eat-term-live-p tmux-control--terminal))
-                      (let ((beg (eat-term-display-beginning
-                                  tmux-control--terminal)))
+                    (when (tmux-control--term-live-p)
+                      (let ((beg (tmux-control--term-screen-start)))
                         (if (markerp beg) (marker-position beg) beg)))))
              (key (list (buffer-chars-modified-tick) start end))
              (count (if (equal key (car tmux-control--scroll-position-cache))
@@ -3709,12 +4125,11 @@ show as LABEL, and the URLs shown as text, with a nil LABEL."
   (let ((links
          (append
           (tmux-control--hyperlinks-in-region
-           (eat-term-display-beginning tmux-control--terminal)
-           (eat-term-end tmux-control--terminal))
+           (tmux-control--term-screen-start) (tmux-control--term-end))
           (mapcar (lambda (url) (cons (car url) (cons (cdr url) nil)))
                   (tmux-control--urls-in-text
                    (string-join (tmux-control--visible-screen-lines (current-buffer)) "\n")
-                   (car (eat-term-size tmux-control--terminal))))))
+                   (car (tmux-control--term-size))))))
         result)
     ;; `sort' is stable, so each row keeps the order found above.
     (dolist (link (sort links (lambda (a b) (> (car a) (car b)))))
@@ -3732,7 +4147,7 @@ the lowest on the screen first, with the text a marked link shows beside
 it.  With prefix argument COPY, put it on the kill ring instead.  Bound
 to \\`C-c C-u'.  A URL that a TUI wrapped over rows is joined again."
   (interactive "P")
-  (unless (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+  (unless (tmux-control--term-live-p)
     (user-error "No tmux-control terminal in this buffer"))
   (let* ((links (tmux-control--screen-links))
          (url (cond ((null links) (user-error "No link on the screen"))
@@ -4660,9 +5075,8 @@ keystroke, rather than dropping it."
     (tmux-control-live)
     (when (and (characterp event)
                (derived-mode-p 'tmux-control-mode)
-               tmux-control--terminal
-               (eat-term-live-p tmux-control--terminal))
-      (eat-self-input 1 event))))
+               (tmux-control--term-live-p))
+      (tmux-control--term-input event))))
 
 (defun tmux-control--dispatch-wheel (event)
   "Scroll normally for wheel EVENT, honoring `pixel-scroll-precision-mode'.
@@ -4714,14 +5128,14 @@ included)."
               (tmux-control--dispatch-wheel event))))
       (tmux-control--dispatch-wheel event))))
 
-(defun tmux-control--alt-screen-effective-p (honored eat-alt-display-p)
-  "Combine HONORED with EAT-ALT-DISPLAY-P into the effective alt-screen state.
+(defun tmux-control--alt-screen-effective-p (honored alt-display-p)
+  "Combine HONORED with ALT-DISPLAY-P into the effective alt-screen state.
 HONORED is whether the active tmux window honors the `alternate-screen'
-option; EAT-ALT-DISPLAY-P is whether Eat currently reports the alternate
+option; ALT-DISPLAY-P is whether Eat currently reports the alternate
 display.  Returns a normalized boolean: the pane is truly on the alternate
 screen only when both hold.  Pure: no side effects, for unit testing the
 phantom-alternate-screen gating."
-  (and honored eat-alt-display-p t))
+  (and honored alt-display-p t))
 
 (defun tmux-control--alt-screen-p ()
   "Return non-nil when the live pane truly shows the alternate display.
@@ -4734,15 +5148,9 @@ forwards a phantom alternate-screen request to the control client, so
 Eat's state alone is unreliable.  Read locally, with no tmux query."
   (let ((honored (tmux-control--effective-alt-screen-honored)))
     (and honored
-         tmux-control--terminal
-         (eat-term-live-p tmux-control--terminal)
+         (tmux-control--term-live-p)
          (tmux-control--alt-screen-effective-p
-          honored
-          (cond
-           ((fboundp 'eat-term-in-alternative-display-p)
-            (eat-term-in-alternative-display-p tmux-control--terminal))
-           ((fboundp 'eat--t-term-main-display)
-            (eat--t-term-main-display tmux-control--terminal)))))))
+          honored (tmux-control--term-alt-screen-p)))))
 
 (defun tmux-control--effective-alt-screen-honored ()
   "Return whether the rendered pane's window honors the alternate screen.
@@ -4772,19 +5180,6 @@ controller keyed by window id)."
       (buffer-local-value 'tmux-control--alt-screen-honored
                           tmux-control--controller)
     tmux-control--alt-screen-honored))
-
-(defun tmux-control--pane-grabs-mouse-p ()
-  "Return non-nil when the pane's application has requested mouse tracking.
-Such applications (full-screen TUIs, but also normal-screen programs like
-`less -X') expect to receive wheel events themselves."
-  (and (boundp 'eat--mouse-grabbing-type)
-       eat--mouse-grabbing-type
-       t))
-
-(defun tmux-control--wheel-detectable-p ()
-  "Return non-nil when Eat exposes the screen state used for wheel gating."
-  (or (fboundp 'eat-term-in-alternative-display-p)
-      (fboundp 'eat--t-term-main-display)))
 
 (defun tmux-control--wheel-should-enter-scrollback-p
     (direction enabled detectable alt-screen grabs-mouse)
@@ -4851,9 +5246,9 @@ be read, so the live behavior is otherwise unchanged."
                  (tmux-control--wheel-should-enter-scrollback-p
                   direction
                   tmux-control-wheel-enters-scrollback
-                  (tmux-control--wheel-detectable-p)
+                  (tmux-control--term-alt-screen-known-p)
                   (tmux-control--alt-screen-p)
-                  (tmux-control--pane-grabs-mouse-p)))
+                  (tmux-control--term-grabs-mouse-p)))
             (if (and tmux-control-wheel-scrolls-live-history
                      (not (tmux-control--tiled-mode-p))
                      (not (tmux-control--live-history-exhausted-p window)))
@@ -4871,8 +5266,8 @@ be read, so the live behavior is otherwise unchanged."
               (tmux-control-scrollback)))
            (t
             (with-selected-window window
-              (eat-self-input 1 event)))))
-      (eat-self-input 1 event))))
+              (tmux-control--term-input event)))))
+      (tmux-control--term-input event))))
 
 (defun tmux-control--live-history-exhausted-p (window)
   "Return non-nil when WINDOW already shows all of the live view's history.
@@ -4888,10 +5283,8 @@ The PARTIALLY arg to `pos-visible-in-window-p' is essential under
 clipped: without it a barely-clipped top or cursor line reads as not visible
 and the routing misfires."
   (and (pos-visible-in-window-p (point-min) window t)
-       (or (not (and tmux-control--terminal
-                     (eat-term-live-p tmux-control--terminal)))
-           (pos-visible-in-window-p
-            (eat-term-display-cursor tmux-control--terminal) window t))))
+       (or (not (tmux-control--term-live-p))
+           (pos-visible-in-window-p (tmux-control--term-cursor) window t))))
 
 (defun tmux-control--scroll-live-history (event window)
   "Scroll WINDOW up through the live view's retained history for EVENT.
@@ -4922,9 +5315,9 @@ user's ordinary downward scrolling."
              (with-current-buffer (window-buffer window)
                (and (derived-mode-p 'tmux-control-mode)
                     (or (tmux-control--alt-screen-p)
-                        (tmux-control--pane-grabs-mouse-p)))))
+                        (tmux-control--term-grabs-mouse-p)))))
         (with-selected-window window
-          (eat-self-input 1 event))
+          (tmux-control--term-input event))
       (tmux-control--dispatch-wheel event))))
 
 (defun tmux-control--disable-line-numbers ()
@@ -4990,76 +5383,15 @@ non-nil) the buffer stays writable, as in plain Eat."
 (defun tmux-control--input-method-activated ()
   "Let an input method work in a live buffer.
 See `tmux-control--protect-terminal-text'."
-  (when (or (bound-and-true-p eat--semi-char-mode)
-            (bound-and-true-p eat--char-mode))
+  (when (tmux-control--term-input-mode-p)
     (tmux-control--protect-terminal-text t)))
 
 (defun tmux-control--input-method-deactivated ()
   "Protect a live buffer again once its input method is turned off.
 `input-method-deactivate-hook' runs before `current-input-method' is
 cleared, so it cannot be consulted here."
-  (when (or (bound-and-true-p eat--semi-char-mode)
-            (bound-and-true-p eat--char-mode))
+  (when (tmux-control--term-input-mode-p)
     (tmux-control--protect-terminal-text nil)))
-
-(defun tmux-control--eat-semi-char-mode-advice (orig-fn &rest args)
-  "Make `eat-semi-char-mode' return tmux-control scrollback buffers live.
-In a live tmux-control buffer, also restore the full override keymap
-that char mode swapped out (see `tmux-control--char-mode-keys'), and
-keep the buffer read-only (see `tmux-control--protect-terminal-text').
-ORIG-FN is `eat-semi-char-mode', called with ARGS."
-  (if (derived-mode-p 'tmux-control-scrollback-mode)
-      (progn
-        (tmux-control-live)
-        (unless (bound-and-true-p eat--semi-char-mode)
-          (eat-semi-char-mode)))
-    (apply orig-fn args)
-    (when (derived-mode-p 'tmux-control-mode)
-      (tmux-control--protect-terminal-text current-input-method)
-      (setq tmux-control--char-mode-keys nil)
-      (setq tmux-control--keys-active t))))
-
-(advice-remove #'eat-semi-char-mode
-               #'tmux-control--eat-semi-char-mode-advice)
-(advice-add #'eat-semi-char-mode
-            :around #'tmux-control--eat-semi-char-mode-advice)
-
-(defun tmux-control--eat-char-mode-advice (orig-fn &rest args)
-  "Adapt `eat-char-mode' to tmux-control buffers.
-Eat's char mode exists to send EVERY key to the terminal -- C-c, C-x,
-C-u, C-h and all -- leaving only `C-M-m' (M-RET) to come back to
-semi-char mode.  That almost worked here out of the box, except the
-tmux-control override keymap is an EMULATION map, which outranks char
-mode's own keymap: C-c stayed a prefix, breaking precisely the key
-char mode is most reached for (the interrupt).  Swap the override map
-for the raw-input `tmux-control--char-mode-map' while char mode is on;
-`eat-semi-char-mode' restores it.  In a scrollback pager, char mode
-means \"get me back to the live terminal, raw\": return live first,
-then enter char mode there.
-ORIG-FN is `eat-char-mode', called with ARGS."
-  (if (derived-mode-p 'tmux-control-scrollback-mode)
-      (progn
-        (tmux-control-live)
-        (unless (bound-and-true-p eat--char-mode)
-          (eat-char-mode)))
-    (apply orig-fn args)
-    (when (derived-mode-p 'tmux-control-mode)
-      ;; xah-fly-keys command state uses a terminal-wide transient map,
-      ;; which even emulation maps cannot outrank.  Enter its insert state
-      ;; through its public command so that map is cleanly deactivated.
-      ;; Other buffers keep the modal package enabled, and ESC in semi-char
-      ;; mode can return to command state as usual.
-      (when (and (bound-and-true-p xah-fly-keys)
-                 (fboundp 'xah-fly-insert-mode-activate))
-        (funcall #'xah-fly-insert-mode-activate))
-      (tmux-control--protect-terminal-text current-input-method)
-      (setq tmux-control--keys-active nil)
-      (setq tmux-control--char-mode-keys t))))
-
-(advice-remove #'eat-char-mode
-               #'tmux-control--eat-char-mode-advice)
-(advice-add #'eat-char-mode
-            :around #'tmux-control--eat-char-mode-advice)
 
 (defun tmux-control-char-mode ()
   "Switch the live buffer to char mode: every key goes to the pane.
@@ -5070,7 +5402,7 @@ is the tmux-control/Emacs prefix again.  This is Eat's own char mode, adapted
 so the tmux-control keys get out of the way; the mode line shows
 [char] / [semi-char]."
   (interactive)
-  (eat-char-mode))
+  (tmux-control--term-char-mode))
 
 (defun tmux-control--reset-buffer ()
   "Reset the current buffer for a fresh tmux-control session."
@@ -5147,30 +5479,8 @@ so the tmux-control keys get out of the way; the mode line shows
     (setq tmux-control--session-display nil)
     (setq tmux-control--seed-cursor nil)
     (setq tmux-control--seed-cursor-visible :unknown)
-    (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
-    (setq eat-terminal tmux-control--terminal)
-    (eat-semi-char-mode)
-    (setf (eat-term-parameter tmux-control--terminal 'input-function)
-          #'tmux-control--send-input)
-    (setf (eat-term-parameter tmux-control--terminal 'set-cursor-function)
-          (if (fboundp 'eat--set-cursor) #'eat--set-cursor #'ignore))
-    (setf (eat-term-parameter tmux-control--terminal 'grab-mouse-function)
-          (if (fboundp 'eat--grab-mouse) #'eat--grab-mouse #'ignore))
-    (setf (eat-term-parameter tmux-control--terminal 'ring-bell-function)
-          (if (fboundp 'eat--bell) #'eat--bell #'ignore))
-    (setf (eat-term-parameter tmux-control--terminal 'manipulate-selection-function)
-          (tmux-control--selection-function))
+    (tmux-control--term-make)
     (tmux-control--disable-line-numbers)))
-
-(defun tmux-control--selection-function ()
-  "Return the Eat `manipulate-selection-function' for a pane terminal.
-Ignores pane-driven OSC 52 clipboard manipulation unless the user opts in
-via `tmux-control-allow-clipboard-write' -- so untrusted pane output cannot
-silently poison or read the Emacs `kill-ring' by default."
-  (if (and tmux-control-allow-clipboard-write
-           (fboundp 'eat--manipulate-kill-ring))
-      #'eat--manipulate-kill-ring
-    #'ignore))
 
 (defun tmux-control--check-host (host)
   "Signal a `user-error' if HOST could be misread by ssh as an option.
@@ -6609,9 +6919,9 @@ Invisible padding cells (the second half of a wide glyph) are dropped so a
 wide character does not read as spurious trailing space, matching tmux's
 `capture-pane'; trailing blank lines are trimmed, leading ones kept."
   (with-current-buffer buffer
-    (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
-      (let ((beg (eat-term-display-beginning tmux-control--terminal))
-            (end (eat-term-end tmux-control--terminal))
+    (when (tmux-control--term-live-p)
+      (let ((beg (tmux-control--term-screen-start))
+            (end (tmux-control--term-end))
             (out nil))
         (let ((i beg))
           (while (< i end)
@@ -6682,10 +6992,10 @@ screen check's interval and alternate-screen exemption."
                       (equal pane (buffer-local-value 'tmux-control--active-pane
                                                       target)))
              (let ((cap (tmux-control--rtrim-screen-lines (or lines '())))
-                   (eat (tmux-control--visible-screen-lines target)))
+                   (rendered (tmux-control--visible-screen-lines target)))
                ;; Only reseed on a real divergence: a match means the
                ;; incremental stream is still aligned, so no needless repaint.
-               (when (and eat (not (equal eat cap)))
+               (when (and rendered (not (equal rendered cap)))
                  (with-current-buffer target
                    (tmux-control--seed-screen)))))))))))
 
@@ -6758,24 +7068,6 @@ pause) gets a fresh budget.")
   "Consecutive seed retries triggered by cursor-drift detection.
 Reset to zero whenever a verification passes.")
 
-(defun tmux-control--eat-cursor-xy ()
-  "Return the current buffer's terminal cursor as 0-indexed (X . Y).
-Reads Eat's own cursor bookkeeping (the same coordinates tmux reports
-as #{cursor_x},#{cursor_y}); nil when the terminal is gone or Eat's
-internals are unavailable, in which case seed verification quietly
-disables itself."
-  (when (and tmux-control--terminal
-             (eat-term-live-p tmux-control--terminal)
-             (fboundp 'eat--t-term-display)
-             (fboundp 'eat--t-disp-cursor)
-             (fboundp 'eat--t-cur-x)
-             (fboundp 'eat--t-cur-y))
-    (let* ((disp (eat--t-term-display tmux-control--terminal))
-           (cur (and disp (eat--t-disp-cursor disp))))
-      (when cur
-        ;; Eat's cursor is 1-indexed; tmux's is 0-indexed.
-        (cons (1- (eat--t-cur-x cur)) (1- (eat--t-cur-y cur)))))))
-
 (defun tmux-control--verify-seed (buffer reseed)
   "Verify BUFFER's freshly seeded screen against tmux; RESEED on drift.
 
@@ -6812,7 +7104,7 @@ historical drift at the next natural seed, whatever its cause."
                  ;; apples to oranges.
                  (when (equal pane tmux-control--active-pane)
                    (let ((fresh (tmux-control--parse-cursor-pos lines))
-                         (mine (tmux-control--eat-cursor-xy)))
+                         (mine (tmux-control--term-cursor-xy)))
                      (cond
                       ((or (null fresh) (null mine))
                        (setq tmux-control--seed-verify-retries 0))
@@ -6879,9 +7171,7 @@ grid).  When nil -- the position could not be queried -- the cursor falls
 back to the bottom-left of the screen.  CURSOR-VISIBLE is `:visible',
 `:hidden', or `:unknown'; unknown leaves the current cursor visibility
 unchanged."
-  (let* ((size (and tmux-control--terminal
-                    (eat-term-live-p tmux-control--terminal)
-                    (eat-term-size tmux-control--terminal)))
+  (let* ((size (and (tmux-control--term-live-p) (tmux-control--term-size)))
          (width (or (car-safe size) 80))
          (height (or (cdr-safe size) 24))
          (lines (split-string text "\n"))
@@ -7049,18 +7339,17 @@ point happens to sit, which a mouse-wheel scroll under
 own list keys on point==cursor, which the wheel does not maintain, so it can
 neither hold reliably nor re-arm on the way back; this keys on what the user
 actually sees.  Eat's `buffer' point decision is preserved."
-  (and (fboundp 'eat--synchronize-scroll-windows)
-       tmux-control--terminal
-       (eat-term-live-p tmux-control--terminal)
-       (let ((base (eat--synchronize-scroll-windows)))
+  (and (tmux-control--term-scroll-sync-p)
+       (tmux-control--term-live-p)
+       (let ((base (tmux-control--term-following-windows)))
          (if (or (not tmux-control-wheel-scrolls-live-history)
                  ;; Tiled panes are anchored by the tiling layer, not by this
                  ;; cursor-visibility follow set -- leave them on Eat's own
                  ;; list (see `tmux-control--tiled-mode-p').
                  (tmux-control--tiled-mode-p))
              base
-           (let ((cursor (eat-term-display-cursor tmux-control--terminal))
-                 (top (eat-term-display-beginning tmux-control--terminal)))
+           (let ((cursor (tmux-control--term-cursor))
+                 (top (tmux-control--term-screen-start)))
              (append
               (and (memq 'buffer base) '(buffer))
               (seq-filter
@@ -7105,11 +7394,9 @@ it stayed there until the pane's next output."
                (not (eq (window-old-buffer window) buffer)))
       (with-current-buffer buffer
         (when (and (derived-mode-p 'tmux-control-mode)
-                   tmux-control--terminal
-                   (eat-term-live-p tmux-control--terminal)
-                   (fboundp 'eat--synchronize-scroll))
-          (let ((eat-terminal tmux-control--terminal))
-            (eat--synchronize-scroll (list window)))
+                   (tmux-control--term-live-p)
+                   (tmux-control--term-scroll-sync-p))
+          (tmux-control--term-scroll-to-cursor (list window))
           (if (and tmux-control--controller
                    (buffer-live-p tmux-control--controller)
                    (buffer-local-value 'tmux-control--tiled
@@ -7728,7 +8015,7 @@ are taken out here and set `tmux-control--hyperlink' for
     (setq tmux-control--hyperlink-carry (cdr split))
     (dolist (run (car split))
       (if (stringp run)
-          (eat-term-process-output tmux-control--terminal run)
+          (tmux-control--term-process-output run)
         (setq tmux-control--hyperlink (cdr run))))))
 
 (defun tmux-control--feed-terminal (output)
@@ -7757,7 +8044,7 @@ which Eat (working on characters) renders as octal escapes.  Reassemble
 the UTF-8 stream across feeds first -- carrying an incomplete trailing
 sequence in `tmux-control--utf8-carry' -- so split characters are made
 whole before they reach Eat."
-  (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+  (when (tmux-control--term-live-p)
     (let ((inhibit-read-only t)
           (tmux-control--suppress-responses t)
           (tmux-control--combining-write-scan nil)
@@ -7776,7 +8063,7 @@ whole before they reach Eat."
       (if (and (string-empty-p tmux-control--hyperlink-carry)
                (not (string-search "\e]8" output))
                (not (string-match-p "\e]?\\'" output)))
-          (eat-term-process-output tmux-control--terminal output)
+          (tmux-control--term-process-output output)
         (tmux-control--feed-hyperlinked output))
       (setq tmux-control--display-dirty t))))
 
@@ -7856,7 +8143,7 @@ redisplay is not the version copied here (see
 Eat recenters so the whole terminal screen shows: from its top when the
 window has room for every row, otherwise with the rows that do not fit
 cut from the top.  Every terminal row is one line."
-  (let ((rows (cdr (eat-term-size tmux-control--terminal)))
+  (let ((rows (cdr (tmux-control--term-size)))
         (lines (floor (with-selected-window window (window-screen-lines)))))
     (if (>= lines rows)
         top
@@ -7880,25 +8167,24 @@ SYNC-WINDOWS is the result of `tmux-control--current-sync-windows' taken
 before the output was fed; those windows are scrolled to follow the new
 cursor position and their cursor line is kept visible."
   (when (and tmux-control--display-dirty
-             tmux-control--terminal
-             (eat-term-live-p tmux-control--terminal))
+             (tmux-control--term-live-p))
     (setq tmux-control--display-dirty nil)
     (let ((inhibit-read-only t))
-      (eat-term-redisplay tmux-control--terminal)
+      (tmux-control--term-redisplay)
       (when (and sync-windows
-                 (boundp 'eat--synchronize-scroll-function))
+                 (tmux-control--term-scroll-sync-p))
         ;; A window already where Eat's sync would put it only needs its
         ;; point moved; the sync's `recenter' would make the next
         ;; redisplay lay the whole window out again, every chunk.
-        (let* ((cursor (eat-term-display-cursor tmux-control--terminal))
-               (top (eat-term-display-beginning tmux-control--terminal))
+        (let* ((cursor (tmux-control--term-cursor))
+               (top (tmux-control--term-screen-start))
                (settled (seq-filter
                          (lambda (w) (tmux-control--window-settled-p w cursor top))
                          sync-windows)))
           (dolist (window settled)
             (set-window-point window cursor))
-          (funcall eat--synchronize-scroll-function
-                   (seq-difference sync-windows settled)))
+          (tmux-control--term-sync-scroll
+           (seq-difference sync-windows settled)))
         ;; In a TILED pane only, anchor to the top of the current terminal
         ;; screen so a full-screen TUI (e.g. a Claude Code panel) shows from
         ;; its top instead of being scrolled with its top cut off when tall
@@ -7916,11 +8202,11 @@ cursor position and their cursor line is kept visible."
                                        tmux-control--controller))
           (tmux-control--anchor-windows-to-screen-top sync-windows))
         (tmux-control--keep-cursor-visible sync-windows))
-      (run-hooks 'eat-update-hook))))
+      (tmux-control--term-run-update-hook))))
 
 (defun tmux-control--anchor-windows-to-screen-top (windows)
   "Set each of WINDOWS to start at the top of the terminal's current screen.
-The current screen begins at `eat-term-display-beginning' of the terminal --
+The current screen begins at `tmux-control--term-screen-start' --
 not counted back from the end of the buffer or terminal, which overshoots
 into scrollback whenever the screen has unmaterialized trailing blank
 rows or wrapped lines -- so this reveals a full-screen TUI from its top
@@ -7929,35 +8215,14 @@ while still showing the latest screen of a scrolling pane.
 forward when the cursor would otherwise fall below
 the body (e.g. a tall prompt glyph on a scrolling log), so the follow-bottom
 behavior is preserved."
-  (when (and tmux-control--terminal
-             (eat-term-live-p tmux-control--terminal))
-    (let* ((beg (eat-term-display-beginning tmux-control--terminal))
+  (when (tmux-control--term-live-p)
+    (let* ((beg (tmux-control--term-screen-start))
            (top (if (markerp beg) (marker-position beg) beg)))
       (when top
         (dolist (window windows)
           (when (and (window-live-p window)
                      (/= (window-start window) top))
             (set-window-start window top t)))))))
-
-(defun tmux-control--eat-synchronize-scroll-advice (orig-fn windows)
-  "Keep an alternate-screen TUI's first row visible after Eat syncs WINDOWS.
-Eat's line-counted `recenter' can advance past the screen top in a GUI
-with tall fallback glyphs, even when the cursor and entire screen fit.
-Use the actual screen marker for live-following alternate-screen windows.
-Normal-screen scrollback and ordinary Emacs navigation keep their view.
-ORIG-FN is Eat's scroll synchronization."
-  (prog1 (funcall orig-fn windows)
-    (when (and (derived-mode-p 'tmux-control-mode)
-               tmux-control--terminal
-               (eat-term-live-p tmux-control--terminal)
-               (tmux-control--alt-screen-p))
-      (tmux-control--anchor-windows-to-screen-top windows)
-      (tmux-control--keep-cursor-visible windows))))
-
-(advice-remove #'eat--synchronize-scroll
-               #'tmux-control--eat-synchronize-scroll-advice)
-(advice-add #'eat--synchronize-scroll :around
-            #'tmux-control--eat-synchronize-scroll-advice)
 
 (defun tmux-control--cursor-visible-p (window cursor screen-top)
   "Return non-nil when WINDOW shows the line of CURSOR, at least partly.
@@ -7992,112 +8257,12 @@ through a pixel scroll, and shows the cursor line."
        (zerop (window-vscroll window t))
        (tmux-control--cursor-visible-p window cursor screen-top)))
 
-(defun tmux-control--eat-input-sync-advice (orig-fn &rest args)
-  "Skip Eat's pre-input scroll sync for windows already following the cursor.
-Before sending a key, `eat-self-input' synchronizes every window showing
-the buffer with the terminal cursor: it sets point and calls `recenter',
-which makes the next redisplay lay out the whole window again -- even
-when nothing moved.  That relayout runs right after the key is sent, so
-the pane's echo arrives while Emacs is still busy and waits behind it:
-measured at about 6 ms of a 21 ms keystroke on a busy screen.
-
-A window that already shows the live cursor gains nothing from the sync,
-and the output the key produces syncs it again when it is rendered (see
-`tmux-control--flush-display').  So drop those windows from the list and
-keep the ones that need it: a window scrolled into history still jumps
-back to the cursor on the first key, as before.  Mouse events keep Eat's
-behavior unchanged.  ORIG-FN is `eat-self-input', called with ARGS."
-  (let ((event (nth 1 args)))
-    (if (not (and (derived-mode-p 'tmux-control-mode)
-                  eat-terminal
-                  (eat-term-live-p eat-terminal)
-                  (not (mouse-event-p event))
-                  (not (memq (event-basic-type event)
-                             '(mouse-movement wheel-up wheel-down
-                                              wheel-left wheel-right)))))
-        (apply orig-fn args)
-      (let* ((sync eat--synchronize-scroll-function)
-             (cursor (eat-term-display-cursor eat-terminal))
-             (top (eat-term-display-beginning eat-terminal))
-             (eat--synchronize-scroll-function
-              (lambda (windows)
-                (funcall sync
-                         (seq-remove
-                          (lambda (w)
-                            (and (windowp w)
-                                 (tmux-control--window-following-p
-                                  w cursor top)))
-                          windows)))))
-        (apply orig-fn args)))))
-
-(advice-remove #'eat-self-input #'tmux-control--eat-input-sync-advice)
-(advice-add #'eat-self-input :around #'tmux-control--eat-input-sync-advice)
-
-(defun tmux-control--eat-mouse-up (&optional button)
-  "Forget that mouse BUTTON is down, as Eat does when it sees it go up.
-BUTTON is a basic event type, such as `mouse-1'; nil forgets every
-button.  With no button left down, leave the keymap Eat holds while one
-is."
-  (setq eat--mouse-pressed-buttons
-        (and button (delq button eat--mouse-pressed-buttons)))
-  (unless eat--mouse-pressed-buttons
-    (setq eat--mouse-last-position nil)
-    (when-let* ((exit eat--mouse-drag-transient-map-exit))
-      (setq eat--mouse-drag-transient-map-exit nil)
-      ;; It restores `track-mouse' in the buffer of the press, which can
-      ;; have been killed since; the keymap is gone either way.
-      (ignore-errors (funcall exit)))))
-
-(defun tmux-control--eat-mouse-on-screen-p (event)
-  "Return non-nil when mouse EVENT starts on the screen of a live terminal."
-  (let* ((posn (event-start event))
-         (window (posn-window posn)))
-    (and (windowp window)
-         (window-live-p window)
-         (not (posn-area posn))
-         (let ((terminal (buffer-local-value 'eat-terminal
-                                             (window-buffer window))))
-           (and terminal (eat-term-live-p terminal))))))
-
-(defun tmux-control--eat-mouse-advice (orig-fn &rest args)
-  "Keep Eat's mouse drag from outlasting the button that started it.
-A button pressed in a terminal makes Eat hold a keymap that sends every
-mouse event to `eat-self-input', until it sees every button go up.  A
-release it never finished -- tmux not replying refuses the input, the
-window shows another buffer by then, a question asked meanwhile read the
-event -- left the keymap in place, and every click elsewhere, on a list
-or a link, went nowhere until a click in a terminal let go.
-
-So a button is forgotten once its release is handled, whatever happened
-while handling it, and a press off any terminal's screen while the
-keymap is held lets go of it and goes to its own binding.  ORIG-FN is
-`eat-self-input', called with ARGS."
-  (let* ((event (nth 1 args))
-         (button (and (consp event) (event-basic-type event)))
-         (modifiers (and button (event-modifiers event))))
-    (cond
-     ((not (memq button '(mouse-1 mouse-2 mouse-3)))
-      (apply orig-fn args))
-     ((memq 'down modifiers)
-      (if (or (not eat--mouse-drag-transient-map-exit)
-              (tmux-control--eat-mouse-on-screen-p event))
-          (apply orig-fn args)
-        (tmux-control--eat-mouse-up)
-        (push (cons 'no-record event) unread-command-events)))
-     ((or (memq 'click modifiers) (memq 'drag modifiers))
-      (unwind-protect (apply orig-fn args)
-        (tmux-control--eat-mouse-up button)))
-     (t (apply orig-fn args)))))
-
-(advice-remove #'eat-self-input #'tmux-control--eat-mouse-advice)
-(advice-add #'eat-self-input :around #'tmux-control--eat-mouse-advice)
-
 (defun tmux-control--write-terminal (output)
   "Process decoded terminal OUTPUT into Eat and redisplay immediately.
 For one-shot writes (screen seed, resize repaint) that are not part of a
 streamed flood; live %output is fed via `tmux-control--feed-terminal' and
 flushed once per filter chunk."
-  (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+  (when (tmux-control--term-live-p)
     ;; A full repaint stands alone; drop any partial multibyte char carried
     ;; from streamed output so it cannot prefix the repaint.
     (setq tmux-control--utf8-carry ""
@@ -8204,7 +8369,7 @@ reaching the pane; to send ESC to the pane they bind this command to a
 free key, or use char mode.  Char mode binds ESC in its raw-input
 emulation map so it reaches the pane even with modal editing enabled."
   (interactive)
-  (eat-self-input 1 ?\e))
+  (tmux-control--term-input ?\e))
 
 (defun tmux-control--send-key (key)
   "Send KEY, a tmux key name such as \"S-Enter\", to the input pane.
@@ -8508,7 +8673,7 @@ redraws stay aligned."
   (let ((ctrl (tmux-control--wb-controller))
         (repaint (tmux-control--repaint-after-resize-p width height)))
     ;; The local grid resize is idempotent -- a no-op when the size is unchanged.
-    (tmux-control--apply-eat-size width height)
+    (tmux-control--apply-term-size width height)
     ;; The remote round trips -- `refresh-client -C' and the pane-size
     ;; reconciliation query -- only when the requested CLIENT size actually
     ;; changed.  Emacs core invokes the window-size hook on many redisplays
@@ -8538,7 +8703,7 @@ redraws stay aligned."
                            (not (eq buf self)))
                   (with-current-buffer buf
                     (let ((repaint (tmux-control--repaint-after-resize-p width height)))
-                      (tmux-control--apply-eat-size width height)
+                      (tmux-control--apply-term-size width height)
                       ;; Queued after `refresh-client', as for this buffer.
                       (when repaint
                         (tmux-control--repaint-once-resized buf (car entry)))))))))))
@@ -8569,7 +8734,7 @@ for a window render buffer, is its tmux window."
                (with-current-buffer buffer
                  (setq tmux-control--resize-repaint-timer nil)
                  ;; The program repaints the alternate screen, entered meanwhile.
-                 (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal)
+                 (when (and (tmux-control--term-live-p)
                             (not (tmux-control--alt-screen-p)))
                    (if window-id
                        (tmux-control--seed-window-buffer buffer window-id)
@@ -8585,9 +8750,8 @@ too high, or lines broken where tmux has none.  A shorter screen is
 repainted too: a repaint captured before it, at the old size, can land
 after it.  On the alternate screen, which has no history, the program
 repaints itself."
-  (when-let* ((size (and tmux-control--terminal
-                         (eat-term-live-p tmux-control--terminal)
-                         (eat-term-size tmux-control--terminal))))
+  (when-let* ((size (and (tmux-control--term-live-p)
+                         (tmux-control--term-size))))
     (and (not (equal size (cons width height)))
          (not (tmux-control--alt-screen-p)))))
 
@@ -8597,35 +8761,34 @@ tmux does this to a pane that gets shorter, so what is above the cursor
 stays on screen.  Eat, resized with those rows in place, would push the
 screen's top into its scrollback instead, leaving the view blank where
 tmux still shows text."
-  (let ((term tmux-control--terminal)
-        (inhibit-read-only t))
+  (let ((inhibit-read-only t))
     (save-excursion
-      (goto-char (eat-term-display-cursor term))
+      (goto-char (tmux-control--term-cursor))
       (let* ((below (line-end-position))
-             (end (eat-term-end term))
+             (end (tmux-control--term-end))
              (start end))
         (goto-char end)
         (while (and (> rows 0) (search-backward "\n" below t))
           (setq start (point) rows (1- rows)))
         (delete-region start end)))))
 
-(defun tmux-control--apply-eat-size (width height)
-  "Resize the Eat grid to WIDTH by HEIGHT when it differs from the current.
+(defun tmux-control--apply-term-size (width height)
+  "Resize the terminal grid to WIDTH by HEIGHT when it differs from the current.
 Return non-nil when a resize actually happened, so callers can repaint."
-  (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
-    (let ((size (eat-term-size tmux-control--terminal)))
+  (when (tmux-control--term-live-p)
+    (let ((size (tmux-control--term-size)))
       (unless (and size
                    (= (car size) width)
                    (= (cdr size) height))
         (let ((inhibit-read-only t))
           (when (and size (< height (cdr size)) (not (tmux-control--alt-screen-p)))
             (tmux-control--drop-rows-below-cursor (- (cdr size) height)))
-          (eat-term-resize tmux-control--terminal width height)
-          (eat-term-redisplay tmux-control--terminal)
+          (tmux-control--term-resize width height)
+          (tmux-control--term-redisplay)
           (tmux-control--screen-on-its-own-line)
-          (when (fboundp 'eat--synchronize-scroll-windows)
+          (when (tmux-control--term-scroll-sync-p)
             (tmux-control--keep-cursor-visible
-             (eat--synchronize-scroll-windows))))
+             (tmux-control--term-following-windows))))
         t))))
 
 (defun tmux-control--parse-pane-size (output)
@@ -8702,7 +8865,7 @@ seed -- wrong whenever the pane's application enabled or dropped a mode
 while Eat was not watching (it was running before connect, or the seed
 follows a reconnect or window switch).  Replaying the modes tmux reports
 keeps Eat's routing decisions (`tmux-control--alt-screen-p',
-`tmux-control--pane-grabs-mouse-p') and input encoding faithful to the
+`tmux-control--term-grabs-mouse-p') and input encoding faithful to the
 pane.  Emitted before the screen paint: entering the alternate display
 clears it, and the paint that follows fills it in.  Each escape is
 idempotent in Eat, so replaying an already-correct state is a no-op.
@@ -8786,7 +8949,7 @@ it for pin detection avoids false warnings on split layouts."
          (size (tmux-control--parse-pane-size (list (or (car parts) ""))))
          (win-size (and (cadr parts)
                         (tmux-control--parse-pane-size (list (cadr parts))))))
-    (when (and size (tmux-control--apply-eat-size (car size) (cdr size)))
+    (when (and size (tmux-control--apply-term-size (car size) (cdr size)))
       ;; Repaint output already rendered at the old width.
       (tmux-control--seed-screen))
     (when win-size
@@ -8802,9 +8965,8 @@ duplicates left by an older loaded version of tmux-control."
   (let ((inhibit-read-only t))
     (save-excursion
       (save-match-data
-        (goto-char (if (and tmux-control--terminal
-                            (eat-term-live-p tmux-control--terminal))
-                       (eat-term-end tmux-control--terminal)
+        (goto-char (if (tmux-control--term-live-p)
+                       (tmux-control--term-end)
                      (point-min)))
         (while (re-search-forward
                 "\n\\[tmux-control\\] tmux \\(?:kept the window at\\|window size is pinned\\)[^\n]*\n"
@@ -9178,9 +9340,7 @@ it asynchronously over the control connection."
            (fallback tmux-control--fallback-target)
            (track-directory tmux-control-pane-directory-mode)
            (local-directory (tmux-control--pane-directory-local-fallback))
-           (size (and tmux-control--terminal
-                      (eat-term-live-p tmux-control--terminal)
-                      (eat-term-size tmux-control--terminal)))
+           (size (and (tmux-control--term-live-p) (tmux-control--term-size)))
            (buffer (generate-new-buffer name)))
       (with-current-buffer buffer
         (let ((inhibit-read-only t)) (erase-buffer))
@@ -9214,33 +9374,14 @@ it asynchronously over the control connection."
               tmux-control--alt-screen-honored t
               tmux-control--seed-cursor nil
               tmux-control--seed-cursor-visible :unknown)
-        (setq tmux-control--terminal (eat-term-make buffer (point-min)))
-        (setq eat-terminal tmux-control--terminal)
-        (when size
-          (eat-term-resize tmux-control--terminal (car size) (cdr size)))
+        (tmux-control--term-make size)
+        (tmux-control--term-set-process process)
         ;; A first visit takes two control-connection round trips to paint
         ;; (noticeable over SSH); show a notice instead of a silent blank.
         ;; The seed's screen-clear replaces it.
         (tmux-control--feed-terminal
          "\033[2m[tmux-control] loading window…\033[0m")
         (tmux-control--flush-display nil)
-        (eat-semi-char-mode)
-        (setf (eat-term-parameter tmux-control--terminal 'input-function)
-              #'tmux-control--send-input)
-        (setf (eat-term-parameter tmux-control--terminal 'set-cursor-function)
-              (if (fboundp 'eat--set-cursor) #'eat--set-cursor #'ignore))
-        (setf (eat-term-parameter tmux-control--terminal 'grab-mouse-function)
-              (if (fboundp 'eat--grab-mouse) #'eat--grab-mouse #'ignore))
-        (setf (eat-term-parameter tmux-control--terminal 'ring-bell-function)
-              (if (fboundp 'eat--bell) #'eat--bell #'ignore))
-        (setf (eat-term-parameter tmux-control--terminal
-                                  'manipulate-selection-function)
-              (tmux-control--selection-function))
-        (setf (eat-term-parameter tmux-control--terminal 'eat--process) process)
-        (setf (eat-term-parameter tmux-control--terminal 'eat--input-process)
-              process)
-        (setf (eat-term-parameter tmux-control--terminal 'eat--output-process)
-              process)
         ;; This buffer owns no process (the controller does), so Eat's
         ;; default ":%s" mode-line suffix would permanently read
         ;; "no process" -- alarming for a perfectly live view.  Keep the
@@ -9721,23 +9862,8 @@ its own and routes commands through CONTROLLER."
             tmux-control--seed-cursor-visible :unknown)
       (when tmux-control-pane-directory-mode
         (tmux-control--schedule-pane-directory-sync t))
-      (setq tmux-control--terminal (eat-term-make buffer (point-min)))
-      (setq eat-terminal tmux-control--terminal)
-      (eat-term-resize tmux-control--terminal w h)
-      (eat-semi-char-mode)
-      (setf (eat-term-parameter tmux-control--terminal 'input-function)
-            #'tmux-control--send-input)
-      (setf (eat-term-parameter tmux-control--terminal 'set-cursor-function)
-            (if (fboundp 'eat--set-cursor) #'eat--set-cursor #'ignore))
-      (setf (eat-term-parameter tmux-control--terminal 'grab-mouse-function)
-            (if (fboundp 'eat--grab-mouse) #'eat--grab-mouse #'ignore))
-      (setf (eat-term-parameter tmux-control--terminal 'ring-bell-function)
-            (if (fboundp 'eat--bell) #'eat--bell #'ignore))
-      (setf (eat-term-parameter tmux-control--terminal 'manipulate-selection-function)
-            (tmux-control--selection-function))
-      (setf (eat-term-parameter tmux-control--terminal 'eat--process) process)
-      (setf (eat-term-parameter tmux-control--terminal 'eat--input-process) process)
-      (setf (eat-term-parameter tmux-control--terminal 'eat--output-process) process)
+      (tmux-control--term-make (cons w h))
+      (tmux-control--term-set-process process)
       ;; The pane's name stands in for the buffer name, in the mode line
       ;; every other window has, so what you put there stays in view.
       (setq-local mode-line-buffer-identification
@@ -9879,8 +10005,8 @@ the top of the screen, leaving the screen to start partway into a line
 of history.  The window then showed that history before the screen's
 first row, on the same row, scrolled up a line to do it.  Run after a
 resize, and before a repaint."
-  (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
-    (let ((start (eat-term-display-beginning tmux-control--terminal)))
+  (when (tmux-control--term-live-p)
+    (let ((start (tmux-control--term-screen-start)))
       (unless (memq (char-before start) '(nil ?\n))
         (let ((inhibit-read-only t))
           (save-excursion
@@ -9904,7 +10030,7 @@ into Eat before the paint (see `tmux-control--mode-seed-sequence').
 Used by the in-band pane seed path."
   (when (and (buffer-live-p buffer) text)
     (with-current-buffer buffer
-      (when (and tmux-control--terminal (eat-term-live-p tmux-control--terminal))
+      (when (tmux-control--term-live-p)
         (setq tmux-control--seed-cursor cursor)
         (setq tmux-control--seed-cursor-visible (or cursor-visible :unknown))
         ;; Repaint only the live screen.  Clearing history here made every
@@ -9958,10 +10084,10 @@ resumption must not be lost when a concurrent repaint replaces its seed."
                  (when reply
                    (tmux-control--paint-seed buffer (string-join reply "\n")
                                              cursor cursor-visible modes)
-                   (let ((term (buffer-local-value 'tmux-control--terminal buffer))
-                         (win (get-buffer-window buffer t)))
-                     (when (and term (eat-term-live-p term) (window-live-p win))
-                       (set-window-point win (eat-term-display-cursor term))))
+                   (let ((win (get-buffer-window buffer t)))
+                     (with-current-buffer buffer
+                       (when (and (tmux-control--term-live-p) (window-live-p win))
+                         (set-window-point win (tmux-control--term-cursor)))))
                    (when (tmux-control--seed-stale-retry-p buffer)
                      (tmux-control--seed-pane-buffer-async buffer controller))))
                (when (and after-seed (same-connection-p))
@@ -10371,9 +10497,8 @@ once the in-band window-state reply has been parsed."
                            (seed (or (not reuse) (not (assoc pane old-panes)))))
                       (with-current-buffer buf
                         (setq tmux-control--pane-info (plist-get leaf :info))
-                        (when (and tmux-control--terminal
-                                   (eat-term-live-p tmux-control--terminal))
-                          (let ((sz (eat-term-size tmux-control--terminal)))
+                        (when (tmux-control--term-live-p)
+                          (let ((sz (tmux-control--term-size)))
                             (unless (and sz (= (car sz) w) (= (cdr sz) h))
                               ;; A fed-live pane (registered the moment it
                               ;; appeared) is not seeded on this first placement
@@ -10383,7 +10508,7 @@ once the in-band window-state reply has been parsed."
                               (unless tmux-control--pane-fed-live
                                 (setq seed t))
                               (let ((inhibit-read-only t))
-                                (eat-term-resize tmux-control--terminal w h))
+                                (tmux-control--term-resize w h))
                               (tmux-control--screen-on-its-own-line))))
                         ;; The fed-live skip is for the opening placement only.
                         ;; Clear it now so a LATER resize reseeds normally: by
@@ -10435,11 +10560,10 @@ once the in-band window-state reply has been parsed."
                     (let ((win (cdr pw))
                           (buf (cdr (assoc (car pw) new-panes))))
                       (when (and (window-live-p win) (buffer-live-p buf))
-                        (let ((term (buffer-local-value
-                                     'tmux-control--terminal buf)))
-                          (when (and term (eat-term-live-p term))
+                        (with-current-buffer buf
+                          (when (tmux-control--term-live-p)
                             (set-window-point
-                             win (eat-term-display-cursor term)))))))
+                             win (tmux-control--term-cursor)))))))
                   (let ((fw (and focus-pane (listp pane-windows)
                                  (cdr (assoc focus-pane pane-windows)))))
                     (when (window-live-p fw) (select-window fw)))
@@ -10832,17 +10956,7 @@ also does its usual cleanup."
     (tmux-control-pause-log-mode -1))
   (advice-remove #'tmux-control-scrollback-mode
                  #'tmux-control--guard-scrollback-mode-command)
-  (advice-remove #'eat-semi-char-mode #'tmux-control--eat-semi-char-mode-advice)
-  (advice-remove #'eat-char-mode #'tmux-control--eat-char-mode-advice)
-  (advice-remove 'eat--t-write #'tmux-control--eat-write-composed)
-  (advice-remove 'eat--t-write #'tmux-control--eat-write-hyperlink)
-  (advice-remove #'eat--synchronize-scroll
-                 #'tmux-control--eat-synchronize-scroll-advice)
-  (advice-remove #'eat-self-input #'tmux-control--eat-input-sync-advice)
-  (advice-remove #'eat-self-input #'tmux-control--eat-mouse-advice)
-  (dolist (entry tmux-control--vt-advice)
-    (advice-remove (car entry) (cdr entry)))
-  (advice-remove 'eat-term-redisplay #'tmux-control--eat-redisplay-advice)
+  (tmux-control--term-unload)
   (remove-hook 'window-size-change-functions
                #'tmux-control--scrollback-follow-resize)
   (remove-hook 'window-size-change-functions #'tmux-control--on-frame-size-change)

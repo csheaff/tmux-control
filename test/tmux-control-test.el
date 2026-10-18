@@ -3322,7 +3322,7 @@ before the toggle kept a local directory while later ones went remote."
 (ert-deftest tmux-control-test-pane-size-accepts-normalized-separator ()
   (with-temp-buffer
     (let (applied window-size)
-      (cl-letf (((symbol-function 'tmux-control--apply-eat-size)
+      (cl-letf (((symbol-function 'tmux-control--apply-term-size)
                  (lambda (width height)
                    (setq applied (cons width height))
                    nil))
@@ -4232,7 +4232,7 @@ output), :calls (side-effect invocations in order), :active-pane,
                (lambda (cmd &optional _k) (push cmd sent)))
               ((symbol-function 'tmux-control--refresh-pane-size)
                (lambda () (cl-incf refreshed)))
-              ((symbol-function 'tmux-control--apply-eat-size) (lambda (_w _h) nil))
+              ((symbol-function 'tmux-control--apply-term-size) (lambda (_w _h) nil))
               ((symbol-function 'tmux-control--wb-controller)
                (lambda () (current-buffer))))
       (with-temp-buffer
@@ -4366,7 +4366,7 @@ output), :calls (side-effect invocations in order), :active-pane,
   (with-temp-buffer
     (let ((sent '()) (refreshed 0) (tmux-control-window-buffers nil))
       (cl-letf (((symbol-function 'tmux-control--ensure-live) #'ignore)
-                ((symbol-function 'tmux-control--apply-eat-size) #'ignore)
+                ((symbol-function 'tmux-control--apply-term-size) #'ignore)
                 ((symbol-function 'tmux-control--refresh-pane-size)
                  (lambda () (cl-incf refreshed)))
                 ((symbol-function 'tmux-control--send-command)
@@ -4411,7 +4411,7 @@ output), :calls (side-effect invocations in order), :active-pane,
                   ((symbol-function 'tmux-control--query)
                    (lambda (cmd cb) (push (cons cmd cb) queries)))
                   ((symbol-function 'tmux-control--refresh-pane-window-map) #'ignore)
-                  ((symbol-function 'tmux-control--apply-eat-size)
+                  ((symbol-function 'tmux-control--apply-term-size)
                    (lambda (w h) (push (list (current-buffer) w h) applied) nil))
                   ((symbol-function 'message) #'ignore))
           (with-current-buffer ctrl
@@ -4472,7 +4472,7 @@ output), :calls (side-effect invocations in order), :active-pane,
                     ((symbol-function 'tmux-control--query)
                      (lambda (cmd cb) (push (cons cmd cb) queries)))
                     ((symbol-function 'tmux-control--resize-to-window) #'ignore)
-                    ((symbol-function 'tmux-control--apply-eat-size) #'ignore)
+                    ((symbol-function 'tmux-control--apply-term-size) #'ignore)
                     ((symbol-function 'tmux-control--heal-if-drifted) #'ignore)
                     ((symbol-function 'tmux-control--alt-screen-p) (lambda () nil))
                     ((symbol-function 'message)
@@ -4529,7 +4529,7 @@ output), :calls (side-effect invocations in order), :active-pane,
                  (lambda (_cmd cb) (push cb callbacks)))
                 ((symbol-function 'tmux-control--ensure-live) #'ignore)
                 ((symbol-function 'tmux-control--send-command) #'ignore)
-                ((symbol-function 'tmux-control--apply-eat-size)
+                ((symbol-function 'tmux-control--apply-term-size)
                  (lambda (w h) (push (cons w h) applied) nil))
                 ((symbol-function 'tmux-control--resize-to-window)
                  (lambda () (tmux-control--resize 124 37)))
@@ -6266,7 +6266,7 @@ Batch Emacs lays out no window, so `posn-at-point' can't make one."
       (should (equal echoed "[tmux-control] connection lost"))
       (should (string-match-p "connection lost" (buffer-string))))))
 
-(ert-deftest tmux-control-test-eat-cursor-xy-reads-terminal-cursor ()
+(ert-deftest tmux-control-test-term-cursor-xy-reads-terminal-cursor ()
   ;; The drift detector compares tmux's 0-indexed #{cursor_x},#{cursor_y}
   ;; with Eat's own cursor; the accessor must convert Eat's 1-indexed
   ;; coordinates.
@@ -6277,11 +6277,11 @@ Batch Emacs lays out no window, so `posn-at-point' can't make one."
     (let ((inhibit-read-only t))
       (eat-term-process-output tmux-control--terminal "ab")
       (eat-term-redisplay tmux-control--terminal))
-    (should (equal (tmux-control--eat-cursor-xy) '(2 . 0)))
+    (should (equal (tmux-control--term-cursor-xy) '(2 . 0)))
     (let ((inhibit-read-only t))
       (eat-term-process-output tmux-control--terminal "\r\ncd")
       (eat-term-redisplay tmux-control--terminal))
-    (should (equal (tmux-control--eat-cursor-xy) '(2 . 1)))
+    (should (equal (tmux-control--term-cursor-xy) '(2 . 1)))
     (eat-term-delete tmux-control--terminal)))
 
 (ert-deftest tmux-control-test-seed-reseeds-when-output-races-capture ()
@@ -6334,7 +6334,7 @@ Batch Emacs lays out no window, so `posn-at-point' can't make one."
   (let ((reseeds 0) (queries '()) (fresh "5,3") (mine '(5 . 3)))
     (cl-letf (((symbol-function 'tmux-control--query)
                (lambda (cmd cb) (push cmd queries) (funcall cb (list fresh))))
-              ((symbol-function 'tmux-control--eat-cursor-xy)
+              ((symbol-function 'tmux-control--term-cursor-xy)
                (lambda () mine)))
       (with-temp-buffer
         (tmux-control-mode)
@@ -6580,7 +6580,7 @@ Batch Emacs lays out no window, so `posn-at-point' can't make one."
           ;; Mouse-grabbing (or alt-screen) app: forward to the app.
           (cl-letf (((symbol-function 'tmux-control--alt-screen-p)
                      (lambda () nil))
-                    ((symbol-function 'tmux-control--pane-grabs-mouse-p)
+                    ((symbol-function 'tmux-control--term-grabs-mouse-p)
                      (lambda () t)))
             (tmux-control-wheel-down event)
             (should (= forwarded 1))
@@ -6588,7 +6588,7 @@ Batch Emacs lays out no window, so `posn-at-point' can't make one."
           ;; Plain normal-screen pane: ordinary scrolling, not forwarded.
           (cl-letf (((symbol-function 'tmux-control--alt-screen-p)
                      (lambda () nil))
-                    ((symbol-function 'tmux-control--pane-grabs-mouse-p)
+                    ((symbol-function 'tmux-control--term-grabs-mouse-p)
                      (lambda () nil)))
             (tmux-control-wheel-down event)
             (should (= forwarded 1))
@@ -7891,8 +7891,8 @@ saw); a `completing-read' answers with `choice'."
   (tmux-control-test--with-pane 10 2
     (setq-local eat-terminal tmux-control--terminal)
     (tmux-control-test--feed "AAAAAAAAAABBBBB\r\nx")
-    (tmux-control--apply-eat-size 10 5)
-    (tmux-control--apply-eat-size 12 5)
+    (tmux-control--apply-term-size 10 5)
+    (tmux-control--apply-term-size 12 5)
     (let ((start (eat-term-display-beginning tmux-control--terminal)))
       (should (memq (char-before start) '(nil ?\n))))))
 (ert-deftest tmux-control-test-a-drag-repaints-once-it-stops ()
