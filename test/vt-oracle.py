@@ -23,7 +23,6 @@ EAT_DIR are taken from the environment (the Makefile sets them).
 """
 import argparse
 import base64
-import functools
 import json
 import os
 import random
@@ -85,8 +84,9 @@ class Tmux:
         tabbed = [y for y, r in enumerate(rows) if "\t" in r]
         cells = self.cell_columns(session, width, tabbed[-1], n) if tabbed else {}
         self.run("kill-session", "-t", session)
-        rows = [expand_tabs(r, width, cells.get(y)) for y, r in enumerate(rows)]
-        return {"rows": rows, "cx": cx + 1, "cy": cy + 1}
+        layouts = [tab_layouts(r, width, cells.get(y)) for y, r in enumerate(rows)]
+        return {"rows": [first for first, *_ in layouts], "layouts": layouts,
+                "cx": cx + 1, "cy": cy + 1}
 
     def cell_columns(self, session, width, last, n):
         """Return {row: [column, ...]} where each cell starts, then where the
@@ -182,26 +182,36 @@ zero-width characters such as combining marks."""
     return cells
 
 
+# The most layouts of one row that `fit_cells' returns.
+MAX_LAYOUTS = 8
+
+
 def fit_cells(row, starts):
-    """Split ROW into the cells STARTS measured; None if no split fits.
+    """Split ROW into the cells STARTS measured, every way with the fewest blanks.
 STARTS lists the columns where the row's cells start, then where it ends
 (`Tmux.cell_columns').  Characters printed side by side need not share a
 cell: tmux joins a character to the cell left of the cursor, so a skin tone
 or regional indicator written there after moving the cursor stays apart.  And
 a cell holding all CELL_BYTES prints nothing, since tmux 3.6a's grid keeps a
-cell's size in five bits; it is taken as blank.  Of the splits that fit, one
-with the fewest blank cells wins.  Where the columns cannot tell, a blank
-comes first, as a full cell comes before the character it refused, and
-characters join.  Return [(text, columns)], as `clusters' does."""
-    @functools.lru_cache(maxsize=None)
-    def fit(i, k):
-        # ROW[I:] in the cells from K on: (blank cells, [(text, columns)]).
-        if k == len(starts) - 1:
-            return (0, []) if i == len(row) else None
+cell's size in five bits; it is taken as blank.  Beside a character as
+wide, nothing tmux shows says which side such a cell is on: 中 then eight
+regional indicators, and the indicators then 中, capture and measure alike.
+Copying the cell in copy mode makes tmux 3.6a exit, and a copy-mode word
+stops short at it, so neither can tell.  So every split that fits with the
+fewest blank cells is returned, up to MAX_LAYOUTS, and [] when none fits.
+The first puts a blank before characters, as a full cell comes before the
+character it refused, and joins characters into cells.  Each split is
+[(text, columns)], as `clusters' returns.  The cells are searched in turn
+rather than recursively, so a row can be as wide as a pane."""
+    last = len(starts) - 1
+
+    def options(i, k):
+        # The ways cell K can hold ROW from I on, the likeliest first:
+        # [(text, where ROW goes on)].
         columns = starts[k + 1] - starts[k]
-        options = [(" " * columns, i)] if columns <= 2 else []  # a blank cell
+        found = [(" " * columns, i)] if columns <= 2 else []  # a blank cell
         if row[i:i + 1] == "\t":
-            options.append(("\t", i + 1))
+            found.append(("\t", i + 1))
         elif i < len(row) and char_width(row[i]):
             cells, text, w = [], row[i], char_width(row[i])
             for j in range(i + 1, len(row) + 1):
@@ -211,30 +221,60 @@ characters join.  Return [(text, columns)], as `clusters' does."""
                 if not join:
                     break
                 text, w = text + row[j], 2 if join == "wide" else w
-            options += reversed(cells)          # the longest cell first
-        best = None
-        for text, j in options:
-            rest = fit(j, k + 1)
-            if rest is not None and (best is None or rest[0] + (j == i) < best[0]):
-                best = (rest[0] + (j == i), [(text, columns)] + rest[1])
-        return best
-    found = fit(0, 0)
-    return found[1] if found else None
+            found += reversed(cells)            # the longest cell first
+        return found
+
+    # Where in ROW each cell can start, from the first cell on.
+    reach = [{0}]
+    for k in range(last):
+        reach.append({j for i in reach[k] for _, j in options(i, k)})
+    # From the last cell back: the fewest blank cells ROW[I:] takes in the
+    # cells from K on, and the choices for cell K that take no more.
+    best = {(len(row), last): (0, [])}
+    for k in range(last - 1, -1, -1):
+        for i in reach[k]:
+            choices = [(best[j, k + 1][0] + (j == i), text, j)
+                       for text, j in options(i, k) if (j, k + 1) in best]
+            if choices:
+                fewest = min(blanks for blanks, _, _ in choices)
+                best[i, k] = (fewest, [(text, j) for blanks, text, j in choices
+                                       if blanks == fewest])
+    # Each split, the likeliest choice first in every cell.  A split is
+    # built as nested pairs, (earlier cells, last cell), and unpacked once
+    # complete.
+    splits, stack = [], [(0, 0, None)] if (0, 0) in best else []
+    while stack and len(splits) < MAX_LAYOUTS:
+        i, k, built = stack.pop()
+        if k == last:
+            cells = []
+            while built:
+                built, cell = built
+                cells.append(cell)
+            splits.append(cells[::-1])
+            continue
+        columns = starts[k + 1] - starts[k]
+        for text, j in reversed(best[i, k][1]):
+            stack.append((j, k + 1, (built, (text, columns))))
+    return splits
 
 
-def expand_tabs(row, width, cells=None):
+def tab_layouts(row, width, cells=None):
     """Expand the TABs `capture-pane' keeps, as the terminal laid them out.
+Return the row's layouts: one, unless the measured cells fit its characters
+more than one way (see `fit_cells'), the likeliest first.
 CELLS lists the columns where the row's cells start (`Tmux.cell_columns'): a
 tab spans its own cell, and `fit_cells' places the characters in theirs.
 Without them, or if they fit none of the row's splits, the cells are read
 from the text and a tab moves to the next cell start, or else to the next
 multiple of 8 but never past the last column, as with the default tab stops."""
     if "\t" not in row:
-        return row
-    fitted = fit_cells(row, cells) if cells else None
-    if fitted is not None:
-        return "".join(" " * columns if text == "\t" else text
-                       for text, columns in fitted)
+        return [row]
+    splits = fit_cells(row, cells) if cells else []
+    if splits:
+        return list(dict.fromkeys(
+            "".join(" " * columns if text == "\t" else text
+                    for text, columns in split)
+            for split in splits))
     out, col = [], 0
     for text, columns in clusters(row):
         if text == "\t":
@@ -246,7 +286,7 @@ multiple of 8 but never past the last column, as with the default tab stops."""
         else:
             out.append(text)
             col += columns
-    return "".join(out)
+    return ["".join(out)]
 
 
 def render_emacs(cases, workdir, timeout=None):
@@ -298,6 +338,23 @@ cell, or on the start of a double-width character there."""
     return mine["cx"] in (width, width - 1)
 
 
+def row_layouts(truth, height):
+    """Each of TRUTH's rows as the layouts it can have, normalized.
+A row whose characters the measured cells place more than one way (see
+`fit_cells') has several; tmux's screen is one of them."""
+    layouts = truth.get("layouts") or [[r] for r in truth["rows"]]
+    layouts = [list(dict.fromkeys(normalize(options, len(options))))
+               for options in layouts[:height]]
+    return layouts + [[""]] * (height - len(layouts))
+
+
+def screen_differs(truth, mine, height):
+    """Return the first row, from 0, where MINE's screen is not tmux's, or None."""
+    return next((y for y, (options, row)
+                 in enumerate(zip(row_layouts(truth, height), normalize(mine["rows"], height)))
+                 if row not in options), None)
+
+
 def compare(cases):
     """Render CASES [(w, h, bytes)]; return [(diff-or-None, tmux, emacs)]."""
     tmux = Tmux()
@@ -315,10 +372,7 @@ def compare(cases):
             diff = f"render signalled: {e['error']}"
         elif len(e["rows"]) > h:
             diff = f"{len(e['rows'])} rows on a {h}-row screen"
-        elif normalize(t["rows"], h) != normalize(e["rows"], h):
-            row = next(i for i, (a, b) in enumerate(zip(normalize(t["rows"], h),
-                                                        normalize(e["rows"], h)))
-                       if a != b)
+        elif (row := screen_differs(t, e, h)) is not None:
             diff = f"screen differs from row {row + 1}"
         elif not cursor_matches(w, t, e):
             diff = (f"cursor at row {e['cy']} col {e['cx']} "
@@ -337,10 +391,13 @@ def parse_size(text):
 def show(width, height, truth, mine):
     if "error" in mine:
         mine = {"rows": [f"<{mine['error']}>"], "cx": 0, "cy": 0}
-    t, e = normalize(truth["rows"], height), normalize(mine["rows"], height)
+    layouts, e = row_layouts(truth, height), normalize(mine["rows"], height)
     print(f"{'tmux':{width + 2}} | tmux-control")
-    for a, b in zip(t, e):
-        print(f"{a:{width}}{'  ' if a == b else ' ≠'} | {b}")
+    for options, b in zip(layouts, e):
+        print(f"{options[0]:{width}}{'  ' if b in options else ' ≠'} | {b}")
+    for y, options in enumerate(layouts):
+        for other in options[1:]:
+            print(f"tmux row {y + 1} can also be: {other}")
     print(f"cursor: tmux row {truth['cy']} col {truth['cx']}; "
           f"tmux-control row {mine['cy']} col {mine['cx']}")
 
