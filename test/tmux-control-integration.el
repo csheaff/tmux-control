@@ -1421,7 +1421,7 @@ tmux's active one, so typing goes on to it."
           (should (tmux-control-it--ready controller))
           (with-current-buffer controller
             (should (tmux-control--alt-screen-p))
-            (should (tmux-control--pane-grabs-mouse-p))
+            (should (tmux-control--term-grabs-mouse-p))
             (should (equal (tmux-control--visible-screen-lines controller)
                            (mapcar #'ucs-normalize-NFC-string
                                    (tmux-control-it--capture-lines tmux-control--active-pane))))
