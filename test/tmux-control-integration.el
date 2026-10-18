@@ -1611,5 +1611,91 @@ one tmux grew back out of its history is painted again."
         (kill-buffer buf))
       (tmux-control-it--tmux-ok "kill-server"))))
 
+(defmacro tmux-control-it--in-second-window-buffer (&rest body)
+  "Run BODY viewing the render buffer of a session's second window.
+Each window runs, silently, each line sent to it.  Binds `buf' (the
+controller), `other' (the second window's buffer, the one shown),
+`other-pane' (its pane) and `runner' (the command a new pane can run)."
+  (declare (indent 0))
+  `(progn
+     (skip-unless (tmux-control-it--available-p))
+     (tmux-control-it--tmux-ok "kill-server")
+     (let ((runner "stty -echo; while IFS= read -r line; do eval \"$line\"; done"))
+       (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-x" "100" "-y" "35" runner)
+       (tmux-control-it--tmux "new-window" "-t" "t:" runner)
+       (tmux-control-it--tmux "select-window" "-t" "t:0")
+       (let* ((tmux-control-window-buffers t)
+              (tmux-control-auto-reconnect nil)
+              (buf (tmux-control-connect nil tmux-control-it--socket "t"))
+              (other-pane (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" "t:1" "#{pane_id}")))
+              (other nil))
+         (unwind-protect
+             (progn
+               (should (tmux-control-it--ready buf))
+               (with-current-buffer buf (tmux-control--resize 100 35))
+               (should (tmux-control-it--ready buf))
+               (with-current-buffer buf (tmux-control-next-window))
+               (setq other (tmux-control-it--pump-until
+                            6 (lambda ()
+                                (with-current-buffer buf
+                                  (cdr (cl-find-if (lambda (entry) (not (eq (cdr entry) buf)))
+                                                   tmux-control--window-buffers))))))
+               (should (buffer-live-p other))
+               (should (tmux-control-it--run other other-pane "seq 1 60"))
+               ,@body)
+           (when (buffer-live-p buf)
+             (with-current-buffer buf (ignore-errors (tmux-control-disconnect)))
+             (kill-buffer buf))
+           (tmux-control-it--tmux-ok "kill-server"))))))
+
+(defun tmux-control-it--fits-pane-p (buffer pane)
+  "Whether BUFFER's terminal comes to be PANE's size, as tmux reports it."
+  (tmux-control-it--pump-until
+   3 (lambda ()
+       (equal (with-current-buffer buffer
+                (let ((size (eat-term-size tmux-control--terminal)))
+                  (format "%dx%d" (car size) (cdr size))))
+              (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" pane
+                                                  "#{pane_width}x#{pane_height}"))))))
+
+(ert-deftest tmux-control-it-closing-a-split-repaints-a-window-buffer ()
+  "A window's buffer shows the pane left when the split's other pane closes.
+tmux reports the closing layout while that pane is still the active one,
+so its size was asked of a pane already gone; the buffer stayed at the
+split's height, and showed only that many rows of the pane left."
+  (tmux-control-it--in-second-window-buffer
+    (tmux-control-it--tmux "split-window" "-t" "t:1" runner)
+    (let ((new-pane (tmux-control-it--pump-until
+                     6 (lambda ()
+                         (let ((active (buffer-local-value 'tmux-control--active-pane other)))
+                           (and (not (equal active other-pane)) active))))))
+      (should new-pane)
+      (should (tmux-control-it--run other new-pane "seq 1 500"))
+      (tmux-control-it--tmux "kill-pane" "-t" new-pane)
+      (should (tmux-control-it--pump-until
+               6 (lambda () (equal (buffer-local-value 'tmux-control--active-pane other)
+                                   other-pane))))
+      (should (tmux-control-it--ready buf))
+      (should (tmux-control-it--fits-pane-p other other-pane))
+      (should (tmux-control-it--shows-pane-p other other-pane)))))
+
+(ert-deftest tmux-control-it-selecting-a-pane-fits-a-window-buffer-to-it ()
+  "A window's buffer takes the size of the pane selected in that window.
+Selecting a pane changes no layout, so nothing else reports the size of
+a pane that is not the size of the one before it."
+  (tmux-control-it--in-second-window-buffer
+    (tmux-control-it--tmux "split-window" "-l" "8" "-t" "t:1" runner)
+    (should (tmux-control-it--pump-until
+             6 (lambda () (not (equal (buffer-local-value 'tmux-control--active-pane other)
+                                      other-pane)))))
+    (should (tmux-control-it--ready buf))
+    (tmux-control-it--tmux "select-pane" "-t" other-pane)
+    (should (tmux-control-it--pump-until
+             6 (lambda () (equal (buffer-local-value 'tmux-control--active-pane other)
+                                 other-pane))))
+    (should (tmux-control-it--ready buf))
+    (should (tmux-control-it--fits-pane-p other other-pane))
+    (should (tmux-control-it--shows-pane-p other other-pane))))
+
 (provide 'tmux-control-integration)
 ;;; tmux-control-integration.el ends here

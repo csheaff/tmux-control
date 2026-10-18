@@ -6685,7 +6685,15 @@ backing off to the cap."
             (setq tmux-control--active-pane pane)
             (when tmux-control-pane-directory-mode
               (tmux-control--schedule-pane-directory-sync t)))
-          (tmux-control--seed-window-buffer wbuf win-id))
+          (tmux-control--seed-window-buffer wbuf win-id)
+          ;; Then fit the buffer to the pane, as the controller's own view
+          ;; does below.  A selected pane can differ in size from the one
+          ;; before it, with no layout change to say so; and when a split's
+          ;; other pane closes, tmux reports the closing layout while that
+          ;; pane is still the active one, so the size asked for then was
+          ;; a gone pane's.
+          (with-current-buffer wbuf
+            (tmux-control--refresh-pane-size)))
          ((and tmux-control-window-buffers
                (not tmux-control--tiled)
                ;; A HOMELESS controller owns no window at all, so every
