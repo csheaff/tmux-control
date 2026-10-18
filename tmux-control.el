@@ -757,8 +757,11 @@ controller.")
 (defvar-local tmux-control--seed-cursor nil
   "Most recent (X . Y) cursor position queried for a screen seed.
 X and Y are tmux's 0-indexed cursor column and row on the visible
-screen, or nil when the position has not been queried.  Used by the
-`:capture' reply handler to place the cursor on the seeded screen.")
+screen, or nil when the position has not been queried.  The controller's
+`:capture' reply handler places the cursor on the seeded screen with it,
+and `tmux-control--verify-seed' compares tmux's cursor with it, so every
+seed path records it: the `:cursor-pos' reply,
+`tmux-control--seed-window-buffer' and `tmux-control--paint-seed'.")
 (defvar-local tmux-control--seed-cursor-visible :unknown
   "Most recent cursor visibility queried for a screen seed.
 The value is `:visible' when tmux reports a visible cursor, `:hidden'
@@ -7142,6 +7145,26 @@ pause) gets a fresh budget.")
   "Consecutive seed retries triggered by cursor-drift detection.
 Reset to zero whenever a verification passes.")
 
+(defun tmux-control--seed-cursor-agrees-p (tmux-xy term-xy width seeded)
+  "Return non-nil when cursors TMUX-XY and TERM-XY are on the same cell.
+Both are 0-indexed (X . Y), WIDTH is the terminal grid's width, and
+SEEDED is tmux's cursor as the seed found it.  A seed puts the
+terminal's cursor no further right than the grid's last column, so while
+tmux's cursor is still where the seed found it, at or past that column,
+it agrees with the terminal's on that column: tmux reports X as the
+pane's width while a wrap is pending after a write to the last column,
+and a pane wider than the grid can have its cursor beyond it.  Once
+output has moved tmux's cursor, the terminal's must have followed it
+exactly; a terminal left on the last column where tmux waits to wrap, or
+waiting to wrap where tmux is not, is a real difference.  Pure, for unit
+testing."
+  (and (= (cdr tmux-xy) (cdr term-xy))
+       (or (= (car tmux-xy) (car term-xy))
+           (and width
+                (equal tmux-xy seeded)
+                (>= (car tmux-xy) width)
+                (= (car term-xy) (1- width))))))
+
 (defun tmux-control--verify-seed (buffer reseed)
   "Verify BUFFER's freshly seeded screen against tmux; RESEED on drift.
 
@@ -7178,11 +7201,14 @@ historical drift at the next natural seed, whatever its cause."
                  ;; apples to oranges.
                  (when (equal pane tmux-control--active-pane)
                    (let ((fresh (tmux-control--parse-cursor-pos lines))
-                         (mine (tmux-control--term-cursor-xy)))
+                         (mine (tmux-control--term-cursor-xy))
+                         (width (car-safe (and (tmux-control--term-live-p)
+                                               (tmux-control--term-size)))))
                      (cond
                       ((or (null fresh) (null mine))
                        (setq tmux-control--seed-verify-retries 0))
-                      ((equal fresh mine)
+                      ((tmux-control--seed-cursor-agrees-p
+                        fresh mine width tmux-control--seed-cursor)
                        (setq tmux-control--seed-verify-retries 0))
                       ((< tmux-control--seed-verify-retries
                           tmux-control--seed-verify-max-retries)
@@ -9484,6 +9510,10 @@ screen, prefixed by the mode replay (see
                 (lambda (cap-lines)
                   (when (and cap-lines (buffer-live-p buffer))
                     (with-current-buffer buffer
+                      ;; As `tmux-control--paint-seed' does: verification
+                      ;; compares tmux's cursor with where the seed found it.
+                      (setq tmux-control--seed-cursor cur
+                            tmux-control--seed-cursor-visible (or vis :unknown))
                       (tmux-control--write-seed
                        (tmux-control--mode-seed-sequence modes)
                        (tmux-control--screen-seed-sequence
