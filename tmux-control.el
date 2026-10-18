@@ -5554,23 +5554,13 @@ window and pane render buffers all start this way, after
     (tmux-control-mode)
     (tmux-control--restore-pane-directory-mode-after-reset)
     (tmux-control--reset-render-state)
-    (setq tmux-control--capture-trailing-p nil)
-    (setq tmux-control--active-pane nil)
-    (setq tmux-control--command-queue nil)
-    (setq tmux-control--current-command-kind :ignore)
-    (setq tmux-control--collecting-command nil)
-    (setq tmux-control--command-output nil)
-    (when tmux-control--command-watchdog-timer
-      (cancel-timer tmux-control--command-watchdog-timer))
-    (setq tmux-control--command-watchdog-timer nil)
-    (setq tmux-control--command-watchdog-warned nil)
-    ;; A (re)connect starts the per-window buffer registry fresh; stale
-    ;; sibling render buffers from the previous connection must go.
+    ;; The connection state -- command queue and reply collection, active
+    ;; pane, window registry -- is at its defaults too: `tmux-control-mode'
+    ;; has just killed the buffer's local variables, once the timers they
+    ;; held were cancelled above.  The per-window render buffers of the
+    ;; previous connection are found by owner rather than by that registry;
+    ;; they must go.
     (tmux-control--kill-render-buffers (current-buffer))
-    (setq tmux-control--window-buffers nil)
-    (setq tmux-control--window-id nil)
-    (setq tmux-control--homeless nil)
-    (setq tmux-control--session-display nil)
     (tmux-control--term-make)
     (tmux-control--disable-line-numbers)))
 
