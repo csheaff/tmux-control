@@ -1157,35 +1157,30 @@ BASE is a list from `tmux-control--term-following-windows'; whether it
 has the buffer's own point follow the cursor is kept."
   (append (and (memq 'buffer base) '(buffer)) windows))
 
-(defun tmux-control--term-scroll-function (&optional output)
-  "Return the function `tmux-control--term-sync-scroll' scrolls with, or nil.
-With OUTPUT non-nil, it is the buffer's `eat--synchronize-scroll-function',
-or in a buffer without one (outside Eat mode) Eat's own
-`eat--synchronize-scroll'; without OUTPUT, always the latter.  Nil when
-that function is missing."
-  (let ((function (or (and output
-                           (bound-and-true-p eat--synchronize-scroll-function))
-                      'eat--synchronize-scroll)))
-    (and (functionp function) function)))
-
 (defun tmux-control--term-sync-scroll (windows &optional output)
   "Scroll WINDOWS to the terminal's cursor and live screen.
 WINDOWS can include `buffer', for the buffer's own point.  OUTPUT
 non-nil means the windows follow output the terminal just drew: as on
 Eat's own output path, that goes through the buffer's scroll
-synchronization, which `tmux-control--eat-input-sync-advice' narrows
-while a key is sent.  Without OUTPUT -- a window arriving at the buffer,
-or going back to its live screen -- Eat's synchronization is called
+synchronization, `eat--synchronize-scroll-function', which
+`tmux-control--eat-input-sync-advice' narrows while a key is sent (in
+a buffer without one, outside Eat mode, Eat's sync itself).  Without
+OUTPUT -- a window arriving at the buffer, or going back to its live
+screen -- Eat's synchronization `eat--synchronize-scroll' is called
 itself, so that narrowing never reaches it.  Return non-nil when the
 windows were scrolled, and nil, doing nothing, when the terminal cannot
-scroll them."
-  (when-let* ((function (tmux-control--term-scroll-function output)))
-    (let ((eat-terminal tmux-control--terminal))
-      (funcall function windows))
-    t))
+scroll them: Eat's function is private, and another version may lack
+it."
+  (let ((function (or (and output
+                           (bound-and-true-p eat--synchronize-scroll-function))
+                      'eat--synchronize-scroll)))
+    (when (functionp function)
+      (let ((eat-terminal tmux-control--terminal))
+        (funcall function windows))
+      t)))
 
-;; `tmux-control--flush-display' skips the sync for a window it would not
-;; move, which takes knowing where Eat's sync puts a window.
+;; `tmux-control--term-follow-output' skips the sync for a window it would
+;; not move, which takes knowing where Eat's sync puts a window.
 
 (defun tmux-control--screen-window-start (window top)
   "Return where Eat's scroll sync starts WINDOW for a screen beginning at TOP.
@@ -1209,6 +1204,23 @@ that start, or that the user scrolled, is not settled."
        (zerop (window-vscroll window t))
        (= (window-start window) (tmux-control--screen-window-start window top))
        (tmux-control--cursor-visible-p window cursor top)))
+
+(defun tmux-control--term-follow-output (windows)
+  "Scroll WINDOWS to follow the output the terminal just drew, as Eat would.
+WINDOWS are from `tmux-control--current-sync-windows', taken before the
+output was fed.  A window already where Eat's sync would put it only
+needs its point moved: the sync's `recenter' would make the next
+redisplay lay the whole window out again, every chunk.  Return nil,
+leaving WINDOWS as they are, when the terminal cannot scroll them."
+  (let* ((cursor (tmux-control--term-cursor))
+         (top (tmux-control--term-screen-start))
+         (settled (seq-filter
+                   (lambda (w) (tmux-control--window-settled-p w cursor top))
+                   windows)))
+    (when (tmux-control--term-sync-scroll (seq-difference windows settled) t)
+      (dolist (window settled)
+        (set-window-point window cursor))
+      t)))
 
 (defun tmux-control--eat-synchronize-scroll-advice (orig-fn windows)
   "Keep an alternate-screen TUI's first row visible after Eat syncs WINDOWS.
@@ -8210,21 +8222,6 @@ redisplay is not the version copied here (see
                         (eat--t-disp-begin disp))))))))
 
 (advice-add 'eat-term-redisplay :around #'tmux-control--eat-redisplay-advice)
-(defun tmux-control--sync-output-windows (windows)
-  "Scroll WINDOWS to follow the output just drawn, as Eat would.
-A window already where Eat's sync would put it only needs its point
-moved; the sync's `recenter' would make the next redisplay lay the
-whole window out again, every chunk.  Return nil, leaving WINDOWS as
-they are, when the terminal cannot scroll them."
-  (let* ((cursor (tmux-control--term-cursor))
-         (top (tmux-control--term-screen-start))
-         (settled (seq-filter
-                   (lambda (w) (tmux-control--window-settled-p w cursor top))
-                   windows)))
-    (when (tmux-control--term-sync-scroll (seq-difference windows settled) t)
-      (dolist (window settled)
-        (set-window-point window cursor))
-      t)))
 
 (defun tmux-control--flush-display (sync-windows)
   "Redisplay Eat once when output has been fed since the last flush.
@@ -8237,7 +8234,7 @@ cursor position and their cursor line is kept visible."
     (let ((inhibit-read-only t))
       (tmux-control--term-redisplay)
       (when (and sync-windows
-                 (tmux-control--sync-output-windows sync-windows))
+                 (tmux-control--term-follow-output sync-windows))
         ;; In a TILED pane only, anchor to the top of the current terminal
         ;; screen so a full-screen TUI (e.g. a Claude Code panel) shows from
         ;; its top instead of being scrolled with its top cut off when tall

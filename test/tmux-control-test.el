@@ -7947,25 +7947,14 @@ saw); a `completing-read' answers with `choice'."
                           [remap eat-semi-char-mode])
               #'tmux-control-live)))
 
-(ert-deftest tmux-control-test-term-scroll-function-routes ()
+(ert-deftest tmux-control-test-term-sync-scroll-routes ()
   ;; Output is followed through the buffer's sync function, which typing
   ;; narrows, as Eat's own output path does.  A window arriving at the
   ;; buffer uses Eat's sync itself, so that narrowing never reaches it.
-  ;; Without Eat's function, neither scrolls.
-  (with-temp-buffer
-    (setq-local eat--synchronize-scroll-function #'ignore)
-    (should (eq (tmux-control--term-scroll-function t) #'ignore))
-    (should (eq (tmux-control--term-scroll-function) 'eat--synchronize-scroll))
-    ;; Outside an Eat buffer, output falls back to Eat's sync too.
-    (setq-local eat--synchronize-scroll-function nil)
-    (should (eq (tmux-control--term-scroll-function t) 'eat--synchronize-scroll))
-    (setq-local eat--synchronize-scroll-function 'eat--synchronize-scroll)
-    (cl-letf (((symbol-function 'eat--synchronize-scroll) nil))
-      (should-not (tmux-control--term-scroll-function))
-      (should-not (tmux-control--term-scroll-function t)))
-    ;; The sync runs on this buffer's terminal, whatever Eat's variable
-    ;; says, and reports whether it could scroll.
-    (let ((seen nil))
+  ;; Without Eat's function, neither scrolls.  Either way the sync runs
+  ;; on this buffer's terminal, whatever Eat's variable says.
+  (let ((seen nil))
+    (with-temp-buffer
       (setq-local tmux-control--terminal 'the-terminal
                   eat-terminal nil
                   eat--synchronize-scroll-function
@@ -7975,11 +7964,17 @@ saw); a `completing-read' answers with `choice'."
                  (lambda (windows)
                    (push (list 'eat eat-terminal windows) seen))))
         (should (tmux-control--term-sync-scroll '(buffer) t))
-        (should (tmux-control--term-sync-scroll '(buffer))))
+        (should (tmux-control--term-sync-scroll '(buffer)))
+        ;; Outside an Eat buffer, output falls back to Eat's sync too.
+        (setq-local eat--synchronize-scroll-function nil)
+        (should (tmux-control--term-sync-scroll '(buffer) t)))
       (should (equal (reverse seen) '((output the-terminal (buffer))
+                                      (eat the-terminal (buffer))
                                       (eat the-terminal (buffer)))))
+      (setq-local eat--synchronize-scroll-function 'eat--synchronize-scroll)
       (cl-letf (((symbol-function 'eat--synchronize-scroll) nil))
-        (should-not (tmux-control--term-sync-scroll '(buffer)))))))
+        (should-not (tmux-control--term-sync-scroll '(buffer)))
+        (should-not (tmux-control--term-sync-scroll '(buffer) t))))))
 
 (ert-deftest tmux-control-test-arrival-scrolls-past-typing-narrowing ()
   ;; A window arriving at a buffer, or clicked back to its live screen,
