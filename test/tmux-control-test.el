@@ -6172,6 +6172,40 @@ Return the window."
         (should (looking-at-p "R2$"))
         (eat-term-delete tmux-control--terminal)))))
 
+(ert-deftest tmux-control-test-drop-while-tiled-shows-the-note ()
+  ;; Dropped while tiled, the screen comes back to the window a pane was
+  ;; in: that window is to show the note too.
+  (save-window-excursion
+    (let ((pane (generate-new-buffer " *pane*"))
+          (proc (make-symbol "proc")))
+      (unwind-protect
+          (with-temp-buffer
+            (let ((rows (floor (window-screen-lines)))
+                  (window (selected-window)))
+              (tmux-control--reset-buffer)
+              (eat-term-resize tmux-control--terminal 40 rows)
+              (let ((inhibit-read-only t))
+                (eat-term-process-output tmux-control--terminal
+                                         (tmux-control-test--rows rows))
+                (eat-term-redisplay tmux-control--terminal))
+              (goto-char (eat-term-display-cursor tmux-control--terminal))
+              (set-window-buffer window pane)
+              (setq-local tmux-control--tiled t
+                          tmux-control--panes (list (cons "%1" pane))
+                          tmux-control--process proc)
+              (cl-letf (((symbol-function 'process-buffer)
+                         (lambda (_p) (current-buffer)))
+                        ((symbol-function 'message) #'ignore))
+                (let ((tmux-control-auto-reconnect nil))
+                  (tmux-control--sentinel proc "killed: 9\n")))
+              (should (eq (window-buffer window) (current-buffer)))
+              (goto-char (window-start window))
+              (should (looking-at-p "R2$"))
+              (forward-line (1- rows))
+              (should (looking-at-p "\\[tmux-control\\] connection lost"))
+              (eat-term-delete tmux-control--terminal)))
+        (when (buffer-live-p pane) (kill-buffer pane))))))
+
 (ert-deftest tmux-control-test-drop-leaves-a-window-reading-history ()
   ;; A window scrolled back into the history is not taken to the note.
   (save-window-excursion

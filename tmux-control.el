@@ -9273,6 +9273,13 @@ glyphs make some rows taller than a line."
       ;; spurious loss announcement over a live session.  Only the
       ;; buffer's CURRENT process gets to report its own death.
       (when (eq process tmux-control--process)
+        ;; A connection loss ends both active tiling and retained hidden
+        ;; pane caches.  Only an actively tiled view should resume tiling.
+        ;; First, so that the window the screen comes back to is among
+        ;; those the notes are shown in.
+        (when (or tmux-control--tiled tmux-control--pane-buffers)
+          (when tmux-control--tiled (setq tmux-control--resume-tiling t))
+          (tmux-control--teardown-tiling (current-buffer)))
         ;; The screen stays as the connection left it, with notes below it
         ;; to say what happened.  Make room for them under its last line,
         ;; and bring them into view.
@@ -9287,11 +9294,6 @@ glyphs make some rows taller than a line."
               (tmux-control--message
                (format "%d input command%s unacknowledged; delivery is unknown. Input will not be replayed"
                        count (if (= count 1) "" "s")))))
-          ;; A connection loss ends both active tiling and retained hidden
-          ;; pane caches.  Only an actively tiled view should resume tiling.
-          (when (or tmux-control--tiled tmux-control--pane-buffers)
-            (when tmux-control--tiled (setq tmux-control--resume-tiling t))
-            (tmux-control--teardown-tiling (current-buffer)))
           (let ((deliberate tmux-control--disconnecting))
             (setq tmux-control--disconnecting nil)
             (setq tmux-control--process nil)
