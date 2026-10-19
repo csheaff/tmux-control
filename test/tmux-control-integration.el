@@ -1151,6 +1151,43 @@ taller than the window, so the view's top row was out of sight."
                                                            "#{pane_height}"))
                        (number-to-string (funcall rows))))))))
 
+(ert-deftest tmux-control-it-drop-keeps-the-screen-and-reconnect-repaints ()
+  "A dropped connection wrote its note below the blank rows of a screen
+repainted from tmux, and the view went to the note, taking the screen's
+text out of sight.  The screen stays in view with the note under it, and
+a reconnect repaints it without the note."
+  (tmux-control-it--with-session
+    (tmux-control-it--tmux "send-keys" "-t" pane
+                           "clear; printf 'ONE\\nTWO\\nTHREE\\n'" "Enter")
+    (should (tmux-control-it--pump-until
+             5 (lambda () (string-match-p "^THREE"
+                                          (tmux-control-it--buffer-text controller)))))
+    (with-current-buffer controller
+      ;; A repaint writes the screen's blank rows too, as on every attach.
+      (tmux-control-clear-and-repaint)
+      (should (tmux-control-it--ready controller))
+      (let* ((window (get-buffer-window controller t))
+             (rows (floor (with-selected-window window (window-screen-lines))))
+             (top (tmux-control--term-screen-start)))
+        (set-window-start window top)
+        (signal-process tmux-control--process 'KILL)
+        (should (tmux-control-it--pump-until 5 (lambda () (null tmux-control--process))))
+        (should (= (window-start window) top))
+        (save-excursion
+          (goto-char (point-max))
+          (forward-line -1)
+          ;; "killed: 9" on macOS, "killed" on GNU/Linux.
+          (should (looking-at-p "\\[tmux-control\\] connection lost (killed"))
+          (should (< (count-lines top (point)) rows))
+          (should (string-match-p "^THREE" (buffer-substring top (point)))))
+        (tmux-control-reconnect)
+        (should (tmux-control-it--ready controller))
+        (should (process-live-p tmux-control--process))
+        (should-not (string-match-p "\\[tmux-control\\]"
+                                    (tmux-control-it--buffer-text controller)))
+        (should (string-match-p "^THREE" (tmux-control-it--buffer-text controller)))
+        (should (= (cdr (eat-term-size tmux-control--terminal)) rows))))))
+
 (defun tmux-control-it--settle-tiles (controller count)
   "Run batch idle re-tiles until COUNT panes are placed and queries drain."
   (tmux-control-it--pump-until
