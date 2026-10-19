@@ -2962,8 +2962,9 @@ leaves a foreign window sharing the frame untouched -- the regression behind
       (kill-buffer foreign-buf))))
 
 (ert-deftest tmux-control-test-tiled-region-size-subtracts-foreign ()
-  "`tmux-control--tiled-region-size' owns the full width with a positive row
-budget when no foreign window shares the frame, and a full-height foreign
+  "`tmux-control--tiled-region-size' owns the full width, less the last
+pane's truncation column, with a positive row budget when no foreign
+window shares the frame, and a full-height foreign
 window steals columns while leaving the rows untouched (a side split).  The
 exact row count is a pixel measurement (inner height less the minibuffer and
 the real mode-line height, so it matches the window body and the bottom pane
@@ -2978,7 +2979,8 @@ foreign-subtraction logic, which is display-independent."
                  (cw (selected-window)))
             (set-window-buffer cw ctrl-buf)
             (let ((whole (tmux-control--tiled-region-size frame ctrl-buf)))
-              (should (= (car whole) (frame-text-cols frame)))  ; full width
+              ;; The full width, less the last pane's truncation column.
+              (should (= (car whole) (1- (frame-text-cols frame))))
               (should (> (cdr whole) 0))                        ; a real row budget
               (let ((fw (split-window cw nil 'right)))
                 (set-window-buffer fw foreign-buf)
