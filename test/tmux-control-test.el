@@ -5309,6 +5309,98 @@ Batch Emacs lays out no window, so `posn-at-point' can't make one."
                 (should-not (window-parameter one 'header-line-format))))
           (dolist (entry panes) (tmux-control--forget-pane-buffer (car entry))))))))
 
+(defun tmux-control-test--nested-layout (columns rows)
+  "A COLUMNS x ROWS layout: a row of a pane and a 2-stack, over one pane.
+Return (LAYOUT-STRING TOP BOTTOM UPPER LOWER), the panes' row counts: the
+TOP row over BOTTOM, and UPPER over LOWER in the top row's right column."
+  (let* ((top (/ (1- rows) 2))
+         (bottom (- rows top 1))
+         (upper (/ (1- top) 2))
+         (lower (- top upper 1))
+         (left (/ (1- columns) 2))
+         (right (- columns left 1)))
+    (list (format "%dx%d,0,0[%dx%d,0,0{%dx%d,0,0,1,%dx%d,%d,0[%dx%d,%d,0,2,%dx%d,%d,%d,3]},%dx%d,0,%d,4]"
+                  columns rows columns top left top right top (1+ left)
+                  right upper (1+ left) right lower (1+ left) (1+ upper)
+                  columns bottom (1+ top))
+          top bottom upper lower)))
+
+(ert-deftest tmux-control-test-layout-stack-depth ()
+  ;; The separators the tallest column crosses: none side by side, one per
+  ;; stacked pair, and a column's nested stack adds its own.
+  (should (= 0 (tmux-control--layout-stack-depth
+                (tmux-control--parse-layout "80x24,0,0,1"))))
+  (should (= 0 (tmux-control--layout-stack-depth
+                (tmux-control--parse-layout "80x24,0,0{40x24,0,0,1,39x24,41,0,2}"))))
+  (should (= 2 (tmux-control--layout-stack-depth
+                (tmux-control--parse-layout
+                 "80x24,0,0[80x8,0,0,1,80x7,0,9,2,80x7,0,17,3]"))))
+  (should (= 2 (tmux-control--layout-stack-depth
+                (tmux-control--parse-layout
+                 (car (tmux-control-test--nested-layout 80 24))))))
+  (should (= 0 (tmux-control--layout-stack-depth nil))))
+
+(ert-deftest tmux-control-test-stacked-tiles-budget-a-tall-mode-line ()
+  ;; A mode line one pixel taller than a text row (here a row is a pixel,
+  ;; and the stub says the mode line is two).  Counting it as a row left
+  ;; each pane above another one pixel short of its rows, so redisplay
+  ;; recentred it on the cursor and hid half the pane.  Each stacked window
+  ;; must get its rows plus the mode line's real height.
+  (save-window-excursion
+    (delete-other-windows)
+    (with-temp-buffer
+      (tmux-control-mode)
+      (cl-letf (((symbol-function 'window-mode-line-height) (lambda (&rest _) 2)))
+        (let* ((root (selected-window))
+               (spec (tmux-control-test--nested-layout
+                      (window-total-width root) (- (window-body-height root) 2)))
+               (layout (tmux-control--parse-layout (car spec)))
+               (leaves (tmux-control--layout-leaves layout))
+               panes placed)
+          (should (= (frame-char-height) 1))
+          (unwind-protect
+              (progn
+                (dolist (leaf leaves)
+                  (let ((pane (concat "%" (plist-get leaf :id))))
+                    (plist-put leaf :pane pane)
+                    (push (cons pane (tmux-control--make-pane-buffer
+                                     pane leaf (current-buffer)
+                                     (list :local-directory default-directory)))
+                          panes)))
+                (tmux-control--tile-arrange-node
+                 layout root panes (lambda (pane window) (push (cons pane window) placed)))
+                (pcase-let ((`(,_ ,top ,bottom ,upper ,lower) spec)
+                            (win (lambda (pane) (cdr (assoc pane placed)))))
+                  ;; The top row holds a stack in its right column, so it
+                  ;; gets its rows, its mode line, and one pixel more for
+                  ;; that stack's own mode line.
+                  (should (= (window-pixel-height (funcall win "%1")) (+ top 2 1)))
+                  (should (= (window-pixel-height (funcall win "%2")) (+ upper 2)))
+                  (should (>= (window-body-height (funcall win "%1")) top))
+                  (should (>= (window-body-height (funcall win "%2")) upper))
+                  (should (>= (window-body-height (funcall win "%3")) lower))
+                  (should (>= (window-body-height (funcall win "%4")) bottom))))
+            (dolist (entry panes) (tmux-control--forget-pane-buffer (car entry)))))))))
+
+(ert-deftest tmux-control-test-tiled-region-size-reserves-stacked-mode-lines ()
+  ;; tmux counts each stacked separator as one row; a mode line taller than
+  ;; a row takes more, so the region reserves the extra once per separator
+  ;; in the tallest column of the layout last tiled.
+  (let ((ctrl-buf (generate-new-buffer " tc-test-ctrl")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (set-window-buffer (selected-window) ctrl-buf)
+          (cl-letf (((symbol-function 'window-mode-line-height) (lambda (&rest _) 2)))
+            (let ((flat (tmux-control--tiled-region-size (selected-frame) ctrl-buf)))
+              (with-current-buffer ctrl-buf
+                (setq tmux-control--tiled-layout
+                      (car (tmux-control-test--nested-layout 80 20))))
+              (let ((stacked (tmux-control--tiled-region-size (selected-frame) ctrl-buf)))
+                (should (= (car stacked) (car flat)))
+                (should (= (cdr stacked) (- (cdr flat) 2)))))))
+      (kill-buffer ctrl-buf))))
+
 (ert-deftest tmux-control-test-tiled-header-line-names-the-session-and-tabs ()
   ;; Over a tiled view, the header line is the single-pane view's, from the
   ;; top-left pane's buffer; a buffer outside the tiling keeps its own.
