@@ -136,10 +136,12 @@ with live per-pane I/O and automatic re-tiling.
 
 **If the live view ever drifts a row or looks scrambled**, press **`C-c C-l`**
 (`M-x tmux-control-clear-and-repaint`) — it reseeds the buffer from tmux's own
-screen and clears the glitch instantly.  The cause is a bug in Eat's terminal
-emulation that drops a display row when a full-screen TUI repaints, so the
-offset can accumulate over redraws; it's tracked upstream at
-[emacs-eat#263](https://codeberg.org/akib/emacs-eat/issues/263).
+screen and clears the glitch instantly.  Drift comes from places where Eat's
+terminal emulation departs from tmux's.  tmux-control corrects several of them
+(see `tmux-control-correct-emulation`); `make test-vt-oracle` checks those
+against tmux and tracks the ones still open, mostly tab stops, emoji and other
+wide or combined characters.  If drift keeps happening, please open an issue
+with the program and what you did.
 
 **Switching to a window always heals it**: a window's buffer keeps streaming
 while you are looking at another one, so it can accumulate that drift in the
@@ -186,8 +188,9 @@ can ignore it entirely — none of the above depends on it.
 
 Packages built on tmux-control (such as
 [Roost](https://github.com/csheaff/roost)) should use these functions,
-available since 0.7.0, and require `(tmux-control "0.7.0")`.  Names with a
-double dash are internal and may change in any release.
+available since 0.7.0, and require `(tmux-control "0.7.0")`, or 0.8.0 to use
+`tmux-control-switch-session-functions` below.  Names with a double dash are
+internal and may change in any release.
 
 | Function | Purpose |
 | --- | --- |
@@ -228,9 +231,10 @@ make test          # pure-logic unit tests (no tmux server required)
 ```
 
 `eat` must be on the load path; pass `EAT_DIR=/path/to/eat` if it isn't at the
-straight.el default.  The live render-fidelity suites (`make test-integration`
-and a GUI tiling oracle) are described in the
-[guide](docs/guide.md#development).
+straight.el default.  Three suites need a real tmux: `make test-integration`
+checks what tmux-control renders against `capture-pane`, `make test-vt-oracle`
+checks the terminal emulation against tmux's own, and a GUI oracle checks the
+tiled view.  The [guide](docs/guide.md#development) describes them.
 
 ## License
 
