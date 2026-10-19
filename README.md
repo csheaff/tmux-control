@@ -105,12 +105,12 @@ attaches, typing a new name creates it.
   naturally operate on the pane's host.
 - **Stays responsive** under a flood of output (optional flow control).
 
-![Two tmux panes side by side in Emacs via tmux-control — a left pane showing git history and a right pane a file listing, each its own buffer with a mode-line label](docs/images/split-panes.png)
+![Two tmux panes side by side in Emacs via tmux-control — a left pane showing git history and a right pane test results, each its own buffer with a mode-line label](docs/images/split-panes.png)
 
 *Two panes of one tmux window, side by side — each a live Emacs buffer you
-search and copy in, labelled by its pane id in the mode line. Split the active
-pane from Emacs with `C-c |` (side by side) or `C-c -` (stacked); both show at
-once in the tiled view (experimental).*
+search and copy in, labelled in its mode line by window, pane id and title.
+Split the active pane from Emacs with `C-c |` (side by side) or `C-c -`
+(stacked); both show at once in the tiled view (experimental).*
 
 ![Working in one session while the others are named in the header corner, then C-c C-f tiles every session into a live grid](docs/images/flock-demo.gif)
 

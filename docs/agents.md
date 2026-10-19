@@ -44,8 +44,9 @@ appears on its tab — the "which agent wants me?" signal. Switch with
 ![A pi-side-agents flock rendered in Emacs via tmux-control](images/agent-flock.png)
 
 *A `pi-side-agents` flock in Emacs: the tab bar carries one tab per child
-agent, and the focused agent's TUI — its reasoning and a colored edit diff in
-its own worktree — renders cell-for-cell.*
+agent, with a dot on each whose output you haven't seen, and the focused
+agent's TUI — its reasoning and a colored edit diff in its own worktree —
+renders cell-for-cell.*
 
 ## Notes
 
