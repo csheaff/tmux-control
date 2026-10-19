@@ -9219,28 +9219,48 @@ cursor's own row stays."
           (skip-chars-backward " \n" (tmux-control--term-cursor))
           (delete-region (line-end-position) end))))))
 
-(defun tmux-control--show-last-note ()
-  "Scroll the windows showing the screen's last row to show the last note.
-Each scrolls only as far as it must, so not at all when the note fits
-under the screen, and a window scrolled back into the history stays
-where it is.  Every terminal row is one line."
+(defun tmux-control--screen-views ()
+  "Return the windows following the screen, each with where it starts.
+The value is an alist of windows and their starts, for
+`tmux-control--show-last-note'."
   (when (tmux-control--term-live-p)
-    (save-excursion
-      (let ((bottom (progn (goto-char (tmux-control--term-end))
-                           (line-beginning-position)))
-            ;; A note ends with a newline: it is the line before the end.
-            (note (progn (goto-char (point-max))
-                         (line-beginning-position 0))))
-        (dolist (window (get-buffer-window-list nil nil t))
-          (let ((start (window-start window))
-                (lines (floor (with-selected-window window
-                                (window-screen-lines)))))
-            (when (and (<= start bottom)
-                       (< (count-lines start bottom) lines)
-                       (>= (count-lines start note) lines))
-              (goto-char note)
-              (forward-line (- 1 lines))
-              (set-window-start window (point)))))))))
+    (let ((top (tmux-control--term-screen-start))
+          (cursor (tmux-control--term-cursor))
+          (views nil))
+      (dolist (window (get-buffer-window-list nil nil t))
+        (when (tmux-control--window-following-p window cursor top)
+          (push (cons window (window-start window)) views)))
+      views)))
+
+(defun tmux-control--show-last-note (views)
+  "Scroll the windows in VIEWS just far enough to show the last note.
+VIEWS are the windows that followed the screen before the notes were
+written, from `tmux-control--screen-views'.  Each window's start moves
+from where it was a row at a time, only until the note's line fits, so
+not at all when the note fits under the screen.  A note too long for the
+echo area's one line makes it taller, and redisplay then centers the
+cursor in the shorter window; this undoes that too.  The fit is measured
+in pixels, as in `tmux-control--keep-cursor-visible': tall fallback
+glyphs make some rows taller than a line."
+  ;; Point stays put throughout: it is the selected window's point.
+  (let (;; A note ends with a newline: it is the line before the end.
+        (note (save-excursion (goto-char (point-max))
+                              (line-beginning-position 0))))
+    (pcase-dolist (`(,window . ,start) views)
+      (when (and (window-live-p window)
+                 (eq (window-buffer window) (current-buffer)))
+        (let ((body (window-body-height window t)))
+          ;; Measured to the end of the last line that is not empty, the
+          ;; note's.  Measured to its position at the end, past the
+          ;; window's edge on a truncated line, Emacs counts a line more.
+          (while (and (< start note)
+                      (> (cdr (window-text-pixel-size window start t))
+                         body))
+            (setq start (save-excursion (goto-char start)
+                                        (forward-line 1)
+                                        (point))))
+          (unless (= start (window-start window))
+            (set-window-start window start)))))))
 
 (defun tmux-control--sentinel (process message)
   "Handle PROCESS exit with MESSAGE."
@@ -9257,7 +9277,8 @@ where it is.  Every terminal row is one line."
         ;; to say what happened.  Make room for them under its last line,
         ;; and bring them into view.
         (tmux-control--drop-blank-rows)
-        (let ((notes (point-max)))
+        (let ((notes (point-max))
+              (views (tmux-control--screen-views)))
           (let ((count (tmux-control--unacknowledged-input-count)))
             (setq tmux-control--last-disconnect
                   (list :time (current-time) :reason (string-trim-right message)
@@ -9312,7 +9333,7 @@ where it is.  Every terminal row is one line."
               ;; flock so the dashboard reflects what is actually live.
               (tmux-control--schedule-reflock))))
           (when (> (point-max) notes)
-            (tmux-control--show-last-note)))))))
+            (tmux-control--show-last-note views)))))))
 
 (defun tmux-control--kill-process ()
   "Delete the tmux control process and any dependent render buffers."

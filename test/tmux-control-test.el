@@ -6061,15 +6061,15 @@ Batch Emacs lays out no window, so `posn-at-point' can't make one."
         (should (eq tmux-control--process new-proc))
         (should-not (string-match-p "connection lost" (buffer-string)))))))
 
-(defun tmux-control-test--drop (output &optional scrolled-back)
+(defun tmux-control-test--drop (output &optional scrolled-back echo)
   "Drop the connection of a screen OUTPUT drew, shown in the selected window.
 The screen has as many rows as the window has lines.  The window starts
 at the screen's top, or at the top of its history when SCROLLED-BACK,
-with point on the cursor.  Return the window."
+with point on the cursor.  ECHO, when non-nil, stands in for `message'.
+Return the window."
   (let ((window (selected-window))
         (proc (make-symbol "proc")))
-    (tmux-control-mode)
-    (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
+    (tmux-control--reset-buffer)
     (eat-term-resize tmux-control--terminal 40 (floor (window-screen-lines)))
     (let ((inhibit-read-only t))
       (eat-term-process-output tmux-control--terminal output)
@@ -6080,7 +6080,7 @@ with point on the cursor.  Return the window."
     (goto-char (eat-term-display-cursor tmux-control--terminal))
     (setq-local tmux-control--process proc)
     (cl-letf (((symbol-function 'process-buffer) (lambda (_p) (current-buffer)))
-              ((symbol-function 'message) #'ignore))
+              ((symbol-function 'message) (or echo #'ignore)))
       (let ((tmux-control-auto-reconnect nil))
         (tmux-control--sentinel proc "killed: 9\n")))
     window))
@@ -6124,6 +6124,52 @@ with point on the cursor.  Return the window."
         (should (looking-at-p "R2$"))
         (forward-line (1- rows))
         (should (looking-at-p "\\[tmux-control\\] connection lost"))
+        (eat-term-delete tmux-control--terminal)))))
+
+(ert-deftest tmux-control-test-drop-measures-tall-rows ()
+  ;; Counted in lines, the note fits under a screen whose bottom row was
+  ;; blank; a row of tall fallback glyphs leaves it clipped all the same.
+  ;; Batch Emacs draws every line a pixel high, so the first row is made
+  ;; two high here.
+  (save-window-excursion
+    (with-temp-buffer
+      (let ((rows (floor (window-screen-lines)))
+            (pixel-size (symbol-function 'window-text-pixel-size)))
+        (cl-letf (((symbol-function 'window-text-pixel-size)
+                   (lambda (window from to &rest args)
+                     (let ((size (apply pixel-size window from to args)))
+                       (cons (car size)
+                             (+ (cdr size)
+                                (how-many "^TALL" from
+                                          (if (eq to t) (point-max) to))))))))
+          (let ((window (tmux-control-test--drop
+                         (concat "TALL\r\n" (tmux-control-test--rows (- rows 2))
+                                 "\r\n" (format "\e[%d;1H" (1- rows))))))
+            (goto-char (window-start window))
+            (should (looking-at-p "R1$"))
+            (forward-line (- rows 2))
+            (should (looking-at-p "\\[tmux-control\\] connection lost"))))
+        (eat-term-delete tmux-control--terminal)))))
+
+(ert-deftest tmux-control-test-drop-undoes-the-echo-areas-recenter ()
+  ;; A note wider than the frame makes the echo area two lines high, and
+  ;; the redisplay that shows it centers the cursor in the shorter
+  ;; window, half the screen out of view.  Here the echo moves the
+  ;; window as that redisplay would.
+  (save-window-excursion
+    (with-temp-buffer
+      (let* ((rows (floor (window-screen-lines)))
+             (window (tmux-control-test--drop
+                      (tmux-control-test--rows rows) nil
+                      (lambda (&rest _)
+                        (let ((window (selected-window)))
+                          (set-window-start
+                           window (save-excursion
+                                    (goto-char (window-start window))
+                                    (forward-line (/ rows 2))
+                                    (point))))))))
+        (goto-char (window-start window))
+        (should (looking-at-p "R2$"))
         (eat-term-delete tmux-control--terminal)))))
 
 (ert-deftest tmux-control-test-drop-leaves-a-window-reading-history ()
