@@ -137,10 +137,11 @@ with live per-pane I/O and automatic re-tiling.
 **If the live view ever drifts a row or looks scrambled**, press **`C-c C-l`**
 (`M-x tmux-control-clear-and-repaint`) — it reseeds the buffer from tmux's own
 screen and clears the glitch instantly.  Drift comes from places where Eat's
-terminal emulation departs from tmux's.  tmux-control corrects the ones it
-knows, checked against tmux by `make test-vt-oracle` (see
-`tmux-control-correct-emulation`), so drift should be rare; if you can make it
-happen, please open an issue with the program and what you did.
+terminal emulation departs from tmux's.  tmux-control corrects several of them
+(see `tmux-control-correct-emulation`); `make test-vt-oracle` checks those
+against tmux and tracks the ones still open, mostly tab stops, emoji and other
+wide or combined characters.  If drift keeps happening, please open an issue
+with the program and what you did.
 
 **Switching to a window always heals it**: a window's buffer keeps streaming
 while you are looking at another one, so it can accumulate that drift in the
