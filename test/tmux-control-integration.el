@@ -1176,7 +1176,8 @@ a reconnect repaints it without the note."
         (save-excursion
           (goto-char (point-max))
           (forward-line -1)
-          (should (looking-at-p "\\[tmux-control\\] connection lost (killed: 9)"))
+          ;; "killed: 9" on macOS, "killed" on GNU/Linux.
+          (should (looking-at-p "\\[tmux-control\\] connection lost (killed"))
           (should (< (count-lines top (point)) rows))
           (should (string-match-p "^THREE" (buffer-substring top (point)))))
         (tmux-control-reconnect)
