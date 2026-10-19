@@ -10230,7 +10230,12 @@ sized to the tmux pane heights this size produces, and
 `tmux-control--tile-arrange-node' budgets each stacked pane's mode line, so
 making the total match the real body keeps every pane's grid within its
 window.  This is the same height the single-pane path derives from
-`window-screen-lines' (the real body), so the two paths agree.  Reduced by any
+`window-screen-lines' (the real body), so the two paths agree.  COLS is one
+less than the columns the tiling has: a pane window has no fringe, so its
+last column is kept for the `$' of a truncated line, and
+`tmux-control--tile-arrange-node' gives each pane window its tmux width and
+one more.  Every pane but the last on a row takes that column from the
+separator tmux puts after it; the last takes it from this one.  Reduced by any
 foreign window sharing the frame: a full-height neighbor steals columns, a
 full-width one steals rows.  Computed from frame-level measures (stable across
 the split, whether called before tiling from the controller's window or while
@@ -10269,7 +10274,7 @@ forces a spurious re-tile."
         (if (>= (window-total-height w) usable-rows)
             (setq cols (- cols (window-total-width w)))     ; a side column
           (setq rows (- rows (window-total-height w))))))    ; a top/bottom band
-    (cons (max 1 cols) (max 1 rows))))
+    (cons (max 1 (1- cols)) (max 1 rows))))
 
 (defun tmux-control--collapse-tile-windows (keep)
   "Delete this tiling's own windows on KEEP's frame, except KEEP.
