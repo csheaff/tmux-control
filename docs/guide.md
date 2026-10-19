@@ -43,7 +43,7 @@ bound in the live buffer; the rest are `M-x`, bind them to taste):
   ![Inline window preview: a minibuffer window list with the highlighted window previewed in place](images/inline-window-preview.png)
 
   *`tmux-control-window-preview` = `inline`: pick a window in the minibuffer
-  while the live buffer behind previews the highlighted one (here `0: code`) —
+  while the live buffer behind previews the highlighted one (here `1: server`) —
   no split; moving the selection updates the preview, and cancelling restores
   the window you started on.*
 
@@ -142,7 +142,8 @@ a glance.
 ![Working in one session with the others named in the header corner, then C-c C-f tiles every session live](images/flock-demo.gif)
 
 *The header corner names each other session with unseen output; `C-c C-f` then
-tiles all of them into one live grid — here four sessions streaming at once.*
+tiles all of them into one live grid — here three sessions stream beside the
+one you work in.*
 
 This is cheap precisely because of the design above: each session is
 already its own buffer with its own always-live connection (it streams whether
