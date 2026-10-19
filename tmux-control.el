@@ -10227,10 +10227,13 @@ the point -- it is commonly a hair taller than a text row (a larger mode-line
 face), so any fixed `frame-text-lines' row offset over-counts and the bottom
 pane's last row -- a full-screen TUI's bottom border -- clips.  The grids are
 sized to the tmux pane heights this size produces, and
-`tmux-control--tile-arrange-node' budgets each stacked pane's mode line, so
-making the total match the real body keeps every pane's grid within its
-window.  This is the same height the single-pane path derives from
-`window-screen-lines' (the real body), so the two paths agree.  COLS is one
+`tmux-control--tile-arrange-node' gives each stacked pane's mode line its
+real pixel height where tmux counts one separator row, so the pixels a mode
+line has over a row are reserved here too, once per separator in the
+tallest column of the layout last tiled.  Making the total match the real
+body keeps every pane's grid within its window.  This is the same height
+the single-pane path derives from `window-screen-lines' (the real body), so
+the two paths agree.  COLS is one
 less than the columns the tiling has: a pane window has no fringe, so its
 last column is kept for the `$' of a truncated line, and
 `tmux-control--tile-arrange-node' gives each pane window its tmux width and
@@ -10267,7 +10270,14 @@ forces a spurious re-tile."
          (usable-rows (- (frame-text-lines frame)
                          (window-total-height (minibuffer-window frame))))
          (cols (frame-text-cols frame))
-         (rows (max 1 (floor (- (frame-inner-height frame) mini-h ml-h hl-h)
+         ;; Each stacked separator is a mode line, not a text row.
+         (stacked (* (max 0 (- ml-h char-h))
+                     (tmux-control--layout-stack-depth
+                      (tmux-control--parse-layout
+                       (buffer-local-value 'tmux-control--tiled-layout
+                                           controller)))))
+         (rows (max 1 (floor (- (frame-inner-height frame)
+                                mini-h ml-h hl-h stacked)
                              char-h))))
     (dolist (w windows)
       (unless (tmux-control--our-tiling-window-p w controller)
@@ -10302,12 +10312,60 @@ line it held as a top pane, so it reads as a plain window afterwards."
     (set-window-parameter keep 'tmux-control-pane nil)
     (set-window-parameter keep 'header-line-format nil)))
 
+(defun tmux-control--tile-stacked-height (window child header)
+  "Return the pixel height for WINDOW's share of a stack, laid out as CHILD.
+That is CHILD's tmux rows plus the window's mode line and, when HEADER says
+it is on the top row, its header line -- each at its real pixel height.  A
+mode line is commonly a hair taller than a text row (a boxed mode-line face),
+so counting it as one row left every pane above another a few pixels short
+of its rows; the last row then could not show in full and redisplay
+recentred the window on the cursor.  With the mode lines hidden
+\(`tmux-control-tiled-hide-mode-line'), a text row stands in for tmux's
+separator row instead."
+  (let* ((char-h (frame-char-height (window-frame window)))
+         (ml-h (if tmux-control-tiled-hide-mode-line
+                   char-h
+                 (let ((h (window-mode-line-height window)))
+                   (if (> h 0) h char-h))))
+         (hl-h (if header
+                   ;; WINDOW keeps the top of the split, so it is the top-row
+                   ;; window that will carry this header line; give it the
+                   ;; line now so its height is the real one, not a guess.
+                   ;; Placing the leaf sets the same parameter for good.
+                   (progn
+                     (set-window-parameter
+                      window 'header-line-format
+                      (if (eq header 'tabs)
+                          '(:eval (tmux-control--tiled-header-line))
+                        ""))
+                     (let ((h (window-header-line-height window)))
+                       (if (> h 0) h char-h)))
+                 0)))
+    (+ (* (plist-get child :h) char-h) ml-h hl-h
+       ;; A stack inside CHILD has mode lines of its own where tmux counted
+       ;; rows.
+       (* (tmux-control--layout-stack-depth child) (- ml-h char-h)))))
+
+(defun tmux-control--layout-stack-depth (node)
+  "Return how many stacked separators the tallest column of layout NODE has.
+tmux gives each one a row; in the tiled view each is the mode line of the
+pane window above it, which is that row plus any extra pixels the mode line
+has over a text row.  `tmux-control--tiled-region-size' reserves those."
+  (if (eq (plist-get node :type) 'split)
+      (let ((depths (mapcar #'tmux-control--layout-stack-depth
+                            (plist-get node :children))))
+        (if (eq (plist-get node :dir) 'v)
+            (+ (apply #'+ depths) (1- (length depths)))
+          (apply #'max depths)))
+    0))
+
 (defun tmux-control--tile-arrange-node (node window panes collect
                                              &optional header)
   "Subdivide WINDOW to match layout NODE, assigning PANES buffers to leaves.
 COLLECT is called as (PANE-ID WINDOW) for each leaf placed.  Splits follow
 tmux's geometry: a row (`:dir h') splits side by side, a column (`:dir v')
-stacks; each non-last child is given its tmux char size and the last child
+stacks; each non-last child is given its tmux size -- a stacked one in
+pixels, see `tmux-control--tile-stacked-height' -- and the last child
 takes the remaining window.  HEADER is non-nil when NODE is on the view's
 top row, whose windows have a header line: `tabs' for the one that shows
 `tmux-control--tiled-header-line', the top-left, and `blank' for the
@@ -10341,18 +10399,23 @@ others, which keep their rows in line with it."
            (head header))
        (while (cdr kids)
          (let* ((child (car kids))
-                (size (if (eq dir 'h)
-                          ;; tmux allocates a separator column between
-                          ;; children.  Emacs's fringe-free internal window
-                          ;; needs that column too: otherwise redisplay
-                          ;; replaces the last terminal cell with `$'.
-                          (max window-min-width (1+ (plist-get child :w)))
-                        ;; +1 row for the child window's mode line, so its
-                        ;; body height ends up near the tmux pane height,
-                        ;; and +1 for a header line over the top row.
-                        (max window-min-height
-                             (+ (plist-get child :h) (if head 2 1)))))
-                (new (split-window win size (if (eq dir 'h) 'right 'below))))
+                (new (if (eq dir 'h)
+                         ;; tmux allocates a separator column between
+                         ;; children.  Emacs's fringe-free internal window
+                         ;; needs that column too: otherwise redisplay
+                         ;; replaces the last terminal cell with `$'.
+                         (split-window
+                          win (max window-min-width (1+ (plist-get child :w)))
+                          'right)
+                       ;; Without `window-resize-pixelwise' the split
+                       ;; rounds back to whole lines.  A tmux pane can be
+                       ;; one row high, and the usual `window-min-height'
+                       ;; would inflate it at the expense of the pane below.
+                       (let ((window-resize-pixelwise t)
+                             (window-min-height 1))
+                         (split-window
+                          win (tmux-control--tile-stacked-height win child head)
+                          'below t)))))
            (tmux-control--tile-arrange-node child win panes collect head)
            ;; Side by side, the rest are on the same row; stacked, below it.
            (setq head (and (eq dir 'h) head 'blank))
