@@ -8377,14 +8377,22 @@ chunks so a large paste is not dropped as one over-long `send-keys'.
 
 Typing into a session whose connection has died offers to reconnect:
 keystrokes are the natural thing to try against a dead-looking
-terminal, so make them the recovery path instead of a silent no-op."
+terminal, so make them the recovery path instead of a silent no-op.
+A click only says how: a program that takes the mouse gets a report
+for the press and another for the release, and asking for each, in a
+dialog box, asked again as soon as you answered."
   (when (and (not (process-live-p tmux-control--process))
              (> (length string) 0)
              (not tmux-control--suppress-responses)
              tmux-control--session)
-    (when (y-or-n-p "tmux-control: connection is down; reconnect? ")
+    (cond
+     ;; A mouse event, as a click, a drag or the wheel, rather than a key.
+     ((consp last-input-event)
+      (message "tmux-control: connection is down; %s reconnects"
+               (substitute-command-keys "\\[tmux-control-reconnect]")))
+     ((y-or-n-p "tmux-control: connection is down; reconnect? ")
       (tmux-control-reconnect)
-      (message "tmux-control: reconnected; type again to send input"))
+      (message "tmux-control: reconnected; type again to send input")))
     ;; The new connection has not resolved its pane yet.  Never send the
     ;; triggering key to a fallback target or replay input from the old link.
     (setq string ""))

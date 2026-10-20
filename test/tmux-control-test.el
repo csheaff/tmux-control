@@ -6338,6 +6338,35 @@ Return the window."
         (should offered)
         (should reconnected)))))
 
+(ert-deftest tmux-control-test-dead-connection-click-only-says-how ()
+  ;; A program that takes the mouse gets a report for the press and
+  ;; another for the release.  Asking for each, in a dialog box since a
+  ;; click asked, came back as soon as you answered No.
+  (let ((asked 0) (said nil) (sent '()))
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (_prompt) (cl-incf asked) nil))
+              ((symbol-function 'message)
+               (lambda (format &rest args) (push (apply #'format format args) said)))
+              ((symbol-function 'tmux-control--send-command)
+               (lambda (cmd &optional _kind) (push cmd sent))))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (setq-local tmux-control--session "dev"
+                    tmux-control--process nil)
+        (let ((last-input-event (list 'down-mouse-1 (list (selected-window) 1 '(0 . 0) 0))))
+          (tmux-control--send-input nil "\e[<0;1;1M"))
+        (let ((last-input-event (list 'mouse-1 (list (selected-window) 1 '(0 . 0) 0))))
+          (tmux-control--send-input nil "\e[<0;1;1m"))
+        (should (= asked 0))
+        (should (null sent))
+        (should (cl-every (lambda (line) (string-match-p "connection is down; C-c C-r reconnects" line))
+                          said))
+        (should (= (length said) 2))
+        ;; A key still asks.
+        (let ((last-input-event ?x))
+          (tmux-control--send-input nil "x"))
+        (should (= asked 1))))))
+
 (ert-deftest tmux-control-test-pane-changed-foreign-window-leaves-buffer-alone ()
   ;; %window-pane-changed for an UNVISITED other window (no render buffer
   ;; yet) must not retarget this buffer.  tmux-control-new-window emits
