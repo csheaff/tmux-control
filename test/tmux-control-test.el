@@ -3900,6 +3900,101 @@ killed with it."
         (tmux-control--update-windows '("3\told\t0\t0"))
         (should (= (length seeded) 2))))))
 
+(ert-deftest tmux-control-test-window-buffers-stream-behind-tiled-view ()
+  ;; While the session is tiled, a pane of the tiled window goes to its
+  ;; pane's buffer, and another window's pane to that window's buffer,
+  ;; which keeps streaming as it does untiled; the end of each chunk
+  ;; flushes both.
+  (let ((tile (generate-new-buffer " *tc-tile*"))
+        (window (generate-new-buffer " *tc-behind*"))
+        flushed)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((tmux-control-window-buffers 'all)
+                (proc (make-pipe-process :name "tc-tiled-flush" :buffer (current-buffer)
+                                         :noquery t)))
+            (unwind-protect
+                (progn
+                  (setq-local tmux-control--tiled t
+                              tmux-control--panes (list (cons "%0" tile))
+                              tmux-control--pane-buffers nil
+                              tmux-control--pane-window (make-hash-table :test 'equal))
+                  (puthash "%0" (cons "0" "@5") tmux-control--pane-window)
+                  (puthash "%1" (cons "1" "@6") tmux-control--pane-window)
+                  (dolist (buffer (list tile window))
+                    (with-current-buffer buffer (setq-local tmux-control--output-batch nil)))
+                  (with-current-buffer window (setq-local tmux-control--active-pane "%1"))
+                  (tmux-control--register-window-buffer "@6" window)
+                  (cl-letf (((symbol-function 'tmux-control--note-pane-activity) #'ignore)
+                            ((symbol-function 'tmux-control--current-sync-windows) #'ignore)
+                            ((symbol-function 'tmux-control--flush-tiled-panes)
+                             (lambda () (push 'panes flushed)))
+                            ((symbol-function 'tmux-control--flush-window-buffers)
+                             (lambda () (push 'windows flushed))))
+                    (tmux-control--batch-pane-output "%0" "tiled")
+                    (tmux-control--batch-pane-output "%1" "behind")
+                    (tmux-control--batch-pane-output "%2" "nobody's")
+                    (tmux-control--filter proc "%continue %1\n"))
+                  (should (equal (buffer-local-value 'tmux-control--output-batch tile) '("tiled")))
+                  (should (equal (buffer-local-value 'tmux-control--output-batch window) '("behind")))
+                  (should (equal (sort flushed #'string<) '(panes windows))))
+              (delete-process proc))))
+      (kill-buffer tile)
+      (kill-buffer window))))
+
+(ert-deftest tmux-control-test-window-buffer-heals-on-arrival-beside-tiled-view ()
+  ;; A tiled pane's window is anchored to its screen on arrival, but a
+  ;; window's own buffer, reached with C-x b while its session is tiled,
+  ;; is no tiled pane: it is checked against tmux as it would be untiled.
+  (let ((ctrl (generate-new-buffer " *tc-tiled-ctrl*"))
+        healed anchored)
+    (unwind-protect
+        (cl-letf (((symbol-function 'tmux-control--heal-on-arrival)
+                   (lambda (buffer) (push buffer healed)))
+                  ((symbol-function 'tmux-control--anchor-windows-to-screen-top)
+                   (lambda (_windows) (push t anchored)))
+                  ((symbol-function 'tmux-control--keep-cursor-visible) #'ignore)
+                  ((symbol-function 'eat--synchronize-scroll) (lambda (_windows) nil))
+                  ((symbol-function 'window-old-buffer) (lambda (_w) nil)))
+          (with-current-buffer ctrl (setq-local tmux-control--tiled t))
+          (with-temp-buffer
+            (tmux-control-mode)
+            (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
+            (setq-local tmux-control--controller ctrl)
+            (save-window-excursion
+              (set-window-buffer (selected-window) (current-buffer))
+              ;; A tiled pane.
+              (tmux-control--snap-to-live-screen (selected-window))
+              (should anchored)
+              (should-not healed)
+              ;; A window's buffer.
+              (setq anchored nil)
+              (with-current-buffer ctrl
+                (tmux-control--register-window-buffer "@6" (window-buffer)))
+              (tmux-control--snap-to-live-screen (selected-window))
+              (should-not anchored)
+              (should (equal healed (list (current-buffer)))))
+            (eat-term-delete tmux-control--terminal)))
+      (kill-buffer ctrl))))
+
+(ert-deftest tmux-control-test-tab-names-without-window-buffers ()
+  ;; Without window buffers the session's one buffer shows its current
+  ;; window, and takes that window's tab, following a switch.  Naming by
+  ;; tab needs the window list even with the tab bar and the mode line's
+  ;; window name off.
+  (tmux-control-test--with-controller "*tmux local:work*"
+    (let ((tmux-control-window-buffers nil)
+          (tmux-control-window-buffer-names 'tab)
+          (tmux-control-window-tab-bar nil)
+          (tmux-control-mode-line-window-name nil))
+      (should (tmux-control--track-windows-p))
+      (tmux-control--update-windows '("0\tagent\t1\t0\t@5" "1\tbash\t0\t0\t@6"))
+      (should (equal (buffer-name ctrl) "*tmux local:work 0:agent*"))
+      (tmux-control--update-windows '("0\tagent\t0\t0\t@5" "1\tbash\t1\t0\t@6"))
+      (should (equal (buffer-name ctrl) "*tmux local:work 1:bash*"))
+      (setq tmux-control-window-buffer-names 'id)
+      (should-not (tmux-control--track-windows-p)))))
+
 (ert-deftest tmux-control-test-window-buffer-functions-errors-are-demoted ()
   ;; The functions run from the process filter, in the middle of handling a
   ;; window list: one that fails is reported, and the buffer is still made.

@@ -3503,9 +3503,11 @@ underscore-normalized replies."
 
 (defun tmux-control--track-windows-p ()
   "Whether some feature needs the session's window list and pane map.
-Those are the tab bar, per-window buffers and the mode line's window name."
+Those are the tab bar, per-window buffers, the mode line's window name
+and buffers named by their tabs."
   (or tmux-control-window-tab-bar tmux-control-window-buffers
-      tmux-control-mode-line-window-name))
+      tmux-control-mode-line-window-name
+      (eq tmux-control-window-buffer-names 'tab)))
 
 (defun tmux-control--refresh-windows ()
   "Asynchronously refresh the cached window list that feeds the tab bar."
@@ -6462,7 +6464,10 @@ when LEFT contains thousands of older history lines."
         ;; the controller renders nothing itself; it flushes each pane's
         ;; render buffer instead.
         (if tmux-control--tiled
-            (tmux-control--flush-tiled-panes)
+            (progn
+              (tmux-control--flush-tiled-panes)
+              (when tmux-control-window-buffers
+                (tmux-control--flush-window-buffers)))
           (tmux-control--flush-output-batch)
           (tmux-control--flush-display sync-windows)
           ;; Per-window render buffers stream in the background; flush
@@ -6561,7 +6566,15 @@ the matching pane's render buffer instead, so every pane updates at once."
         (push (tmux-control--decode-output payload) tmux-control--output-batch))))
   (if tmux-control--tiled
       (let ((buf (and (not (assoc pane tmux-control--pane-buffers))
-                      (cdr (assoc pane tmux-control--panes)))))
+                      (if (assoc pane tmux-control--panes)
+                          (cdr (assoc pane tmux-control--panes))
+                        ;; Another window's pane: its window's buffer keeps
+                        ;; streaming behind the tiled view.
+                        (let ((wbuf (tmux-control--pane-window-buffer pane)))
+                          (and wbuf (not (eq wbuf (current-buffer)))
+                               (equal pane (buffer-local-value
+                                            'tmux-control--active-pane wbuf))
+                               wbuf))))))
         ;; The tabs over the tiled view flag the other windows' output too.
         (tmux-control--note-pane-activity pane)
         (when (buffer-live-p buf)
@@ -6574,12 +6587,7 @@ the matching pane's render buffer instead, so every pane updates at once."
     ;; buffer when that window has been visited, so it keeps accumulating
     ;; in the background.  The controller is registered for its own window,
     ;; so its pane routes here too once the map is known.
-    (let ((wbuf (and tmux-control-window-buffers
-                     (hash-table-p tmux-control--pane-window)
-                     (when-let* ((entry (gethash pane
-                                                 tmux-control--pane-window))
-                                 (id (cdr-safe entry)))
-                       (tmux-control--window-buffer id)))))
+    (let ((wbuf (tmux-control--pane-window-buffer pane)))
       (cond
        ((and wbuf (not (eq wbuf (current-buffer))))
         (when (equal pane (buffer-local-value 'tmux-control--active-pane wbuf))
@@ -6598,6 +6606,15 @@ the matching pane's render buffer instead, so every pane updates at once."
                    (equal pane tmux-control--active-pane))
           (push (tmux-control--decode-output payload)
                 tmux-control--output-batch)))))))
+
+(defun tmux-control--pane-window-buffer (pane)
+  "Return the render buffer of PANE's window, or nil if it has none.
+Must run in the controller."
+  (and tmux-control-window-buffers
+       (hash-table-p tmux-control--pane-window)
+       (when-let* ((entry (gethash pane tmux-control--pane-window))
+                   (id (cdr-safe entry)))
+         (tmux-control--window-buffer id))))
 
 (defun tmux-control--note-link-alive (line)
   "Clear a spent auto-reconnect budget when LINE proves the link is back.
@@ -7544,7 +7561,12 @@ it stayed there until the pane's next output."
           (if (and tmux-control--controller
                    (buffer-live-p tmux-control--controller)
                    (buffer-local-value 'tmux-control--tiled
-                                       tmux-control--controller))
+                                       tmux-control--controller)
+                   ;; A window's own buffer, reached with `C-x b' say, is
+                   ;; no tiled pane: it heals on arrival as it would untiled.
+                   (not (rassq buffer (buffer-local-value
+                                       'tmux-control--window-buffers
+                                       tmux-control--controller))))
               (progn
                 (tmux-control--anchor-windows-to-screen-top (list window))
                 (tmux-control--keep-cursor-visible (list window)))
@@ -9643,12 +9665,22 @@ its window's tab: then it is the session's name alone."
   "Name the session's window buffers as their tabs read.
 For `tmux-control-window-buffer-names' `tab'.  Runs in the controller
 after each window list, so a buffer's name follows tmux renaming or
-moving its window.  The controller takes its own window's tab,
-or the session's name alone when it has no window."
+moving its window.  The controller takes its own window's tab, or,
+without window buffers, the tab of the window it shows, the session's
+current one.  It takes the session's name alone when it has no window."
   (let ((base (tmux-control--buffer-name tmux-control--host tmux-control--socket-name
                                          tmux-control--session)))
     (unless tmux-control--window-id
-      (tmux-control--rename-render-buffer (current-buffer) base))
+      (let ((shown (and (not tmux-control-window-buffers)
+                        (not tmux-control--homeless)
+                        (seq-find (lambda (w) (equal (plist-get w :index)
+                                                     tmux-control--current-window))
+                                  tmux-control--windows))))
+        (tmux-control--rename-render-buffer
+         (current-buffer)
+         (if shown
+             (tmux-control--derived-buffer-name base (tmux-control--window-label shown))
+           base))))
     (dolist (entry tmux-control--window-buffers)
       (when-let* ((window (seq-find (lambda (w) (equal (plist-get w :id) (car entry)))
                                     tmux-control--windows)))
