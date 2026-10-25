@@ -3856,11 +3856,17 @@ killed with it."
                                           :noquery t))
            ,@body)
        (let ((kill-buffer-query-functions nil))
-         (tmux-control--kill-render-buffers ctrl)
+         ;; Only this controller's scrollback: tests run interactively share
+         ;; Emacs with your own sessions.
          (dolist (buffer (buffer-list))
-           (when (eq (buffer-local-value 'major-mode buffer)
-                     'tmux-control-scrollback-mode)
+           (when (and (eq (buffer-local-value 'major-mode buffer)
+                          'tmux-control-scrollback-mode)
+                      (let ((live (buffer-local-value 'tmux-control--live-buffer buffer)))
+                        (and (buffer-live-p live)
+                             (memq ctrl (list live (buffer-local-value
+                                                    'tmux-control--controller live))))))
              (kill-buffer buffer)))
+         (tmux-control--kill-render-buffers ctrl)
          (when-let* ((process (get-buffer-process ctrl)))
            (delete-process process))
          (kill-buffer ctrl)))))
