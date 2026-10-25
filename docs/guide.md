@@ -64,9 +64,21 @@ bound in the live buffer; the rest are `M-x`, bind them to taste):
   a visited window **keeps streaming while you look at another**, so flipping
   back shows everything it printed in the meantime (an agent's full
   transcript, a build's output), not just its final screen.  Memory grows only
-  with windows you actually visit.  Set the option to nil for the old
+  with windows you actually visit.  Set the option to `all` to give every
+  window its buffer as soon as the session connects or the window is added,
+  so each is in your buffer list (`C-x b`) from the start; each keeps
+  streaming, so memory grows with every window.  Set it to nil for the old
   repaint-in-place behavior (a switch then discards the previous window's
   scrollback).
+
+  A window's buffer is named by its tmux ID, `*tmux dev:work @5*`.  To tell
+  windows apart in a buffer list, and find one by typing its name, set
+  `tmux-control-window-buffer-names` to `tab`: each buffer is then named as
+  its tab reads, `*tmux dev:work 1:bash*`, and renamed when tmux renames or
+  moves the window.  Under tmux's `automatic-rename`, that is whenever the
+  program running in the window changes.  tmux doesn't report
+  `move-window -r`: a buffer, like its tab, keeps the old number until the
+  session's windows next change.
 
   Arriving at a window always shows its **live screen** (tmux's own rule;
   the history above stays one wheel-up away) — however the buffer reaches
