@@ -6565,23 +6565,24 @@ the matching pane's render buffer instead, so every pane updates at once."
       (with-current-buffer buf
         (push (tmux-control--decode-output payload) tmux-control--output-batch))))
   (if tmux-control--tiled
-      (let ((buf (if (assoc pane tmux-control--panes)
-                     ;; A cached pane buffer had its copy above.
-                     (and (not (assoc pane tmux-control--pane-buffers))
-                          (cdr (assoc pane tmux-control--panes)))
-                   ;; Another window's pane: its window's buffer keeps
-                   ;; streaming behind the tiled view, as untiled.
-                   (let ((wbuf (tmux-control--pane-window-buffer pane)))
-                     (and wbuf (not (eq wbuf (current-buffer)))
-                          (equal pane (buffer-local-value
-                                       'tmux-control--active-pane wbuf))
-                          wbuf)))))
+      (let ((buf (and (not (assoc pane tmux-control--pane-buffers))
+                      (cdr (assoc pane tmux-control--panes))))
+            ;; A window's own buffer keeps streaming its active pane behind
+            ;; the tiled view, as untiled, whether the view shows that
+            ;; window or another.
+            (wbuf (let ((wbuf (tmux-control--pane-window-buffer pane)))
+                    (and wbuf (not (eq wbuf (current-buffer)))
+                         (equal pane (buffer-local-value
+                                      'tmux-control--active-pane wbuf))
+                         wbuf))))
         ;; The tabs over the tiled view flag the other windows' output too.
         (tmux-control--note-pane-activity pane)
-        (when (buffer-live-p buf)
+        (when (or (buffer-live-p buf) wbuf)
           (let ((decoded (tmux-control--decode-output payload)))
-            (with-current-buffer buf
-              (push decoded tmux-control--output-batch)))))
+            (dolist (target (list buf wbuf))
+              (when (buffer-live-p target)
+                (with-current-buffer target
+                  (push decoded tmux-control--output-batch)))))))
     (tmux-control--note-pane-activity pane)
     (tmux-control--note-session-activity)
     ;; Per-window render buffers: route the pane's output to its window's
@@ -6729,29 +6730,32 @@ backing off to the cap."
       (let* ((win-id (match-string 1 line))
              (pane (match-string 2 line))
              (wbuf (and tmux-control-window-buffers
-                        ;; While tiled, the tiled window's panes are the
-                        ;; view's own; another window's buffer follows its
-                        ;; window as it does untiled.
-                        (not (and tmux-control--tiled
-                                  (assoc pane tmux-control--panes)))
-                        (tmux-control--window-buffer win-id))))
-        (cond
-         ((and wbuf (not (eq wbuf (current-buffer))))
-          ;; A visited background window changed its active pane: retarget
-          ;; and repaint THAT buffer; the controller's own view is untouched.
-          (with-current-buffer wbuf
+                        (tmux-control--window-buffer win-id)))
+             (own (and wbuf (not (eq wbuf (current-buffer))) wbuf))
+             ;; The tiled view shows this pane: it moves the view's pointer
+             ;; too, below.
+             (tiled-pane (and tmux-control--tiled
+                              (assoc pane tmux-control--panes))))
+        (when own
+          ;; A window with a buffer of its own changed its active pane:
+          ;; retarget and repaint THAT buffer, hidden behind a tiled view
+          ;; or not.  The controller's own view is untouched.
+          (with-current-buffer own
             (setq tmux-control--active-pane pane)
             (when tmux-control-pane-directory-mode
               (tmux-control--schedule-pane-directory-sync t)))
-          (tmux-control--seed-window-buffer wbuf win-id)
+          (tmux-control--seed-window-buffer own win-id)
           ;; Then fit the buffer to the pane, as the controller's own view
           ;; does below.  A selected pane can differ in size from the one
           ;; before it, with no layout change to say so; and when a split's
           ;; other pane closes, tmux reports the closing layout while that
           ;; pane is still the active one, so the size asked for then was
           ;; a gone pane's.
-          (with-current-buffer wbuf
+          (with-current-buffer own
             (tmux-control--refresh-pane-size)))
+        (cond
+         ;; Another window's pane: the view is untouched.
+         ((and own (not tiled-pane)))
          ((and tmux-control-window-buffers
                (not tmux-control--tiled)
                ;; A HOMELESS controller owns no window at all, so every
@@ -6788,17 +6792,26 @@ backing off to the cap."
      ((string-prefix-p "%layout-change " line)
       ;; The window's pane structure or sizes changed (a split, a resize, a
       ;; closed pane).  In tiling mode re-derive the tiling; in single-pane
-      ;; mode reconcile the active pane's size and refresh the pane->window map
-      ;; (panes came or went) for the tab bar's activity marker.
+      ;; mode reconcile the active pane's size.  Either way refresh the
+      ;; pane->window map (panes came or went), which routes a window's
+      ;; output to its buffer and flags its tab.
+      (tmux-control--refresh-pane-window-map)
       (if tmux-control--tiled
-          (progn
+          (let ((wbuf (and tmux-control-window-buffers
+                           (tmux-control--window-buffer
+                            (nth 1 (split-string line " "))))))
             ;; Register any just-appeared pane NOW, from the layout this line
             ;; carries, so its %output (which follows) streams in live from the
             ;; first byte; the debounced re-tile then places it without seeding
             ;; it (avoiding the split-into-a-screenful double-render).
             (tmux-control--eager-register-new-panes
              (current-buffer) (nth 2 (split-string line " ")))
-            (setq tmux-control--retile-pending t))
+            (setq tmux-control--retile-pending t)
+            ;; A window's own buffer streams behind the tiled view: fit it
+            ;; to its pane, as untiled.
+            (when (and wbuf (not (eq wbuf (current-buffer))))
+              (with-current-buffer wbuf
+                (tmux-control--refresh-pane-size))))
         ;; The event may belong to a sibling or background window.  Its
         ;; dimensions and warning state belong to that render buffer,
         ;; rather than whichever window the controller originally rendered.
@@ -6810,8 +6823,7 @@ backing off to the cap."
                          (current-buffer))))
           (when (buffer-live-p buffer)
             (with-current-buffer buffer
-              (tmux-control--refresh-pane-size))))
-        (tmux-control--refresh-pane-window-map)))
+              (tmux-control--refresh-pane-size))))))
      ((string-prefix-p "%session-window-changed " line)
       ;; The session's active window changed (switched here or by another
       ;; client).  Refresh the tab bar so its highlight and unseen-output

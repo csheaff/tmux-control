@@ -3909,6 +3909,7 @@ killed with it."
         (window (generate-new-buffer " *tc-behind*"))
         (cached (generate-new-buffer " *tc-cached*"))
         (earlier (generate-new-buffer " *tc-earlier*"))
+        (shown (generate-new-buffer " *tc-shown*"))
         flushed)
     (unwind-protect
         (with-temp-buffer
@@ -3926,8 +3927,11 @@ killed with it."
                   (puthash "%0" (cons "0" "@5") tmux-control--pane-window)
                   (puthash "%1" (cons "1" "@6") tmux-control--pane-window)
                   (puthash "%4" (cons "2" "@7") tmux-control--pane-window)
-                  (dolist (buffer (list tile window cached earlier))
+                  (dolist (buffer (list tile window cached earlier shown))
                     (with-current-buffer buffer (setq-local tmux-control--output-batch nil)))
+                  ;; The tiled window @5 has a buffer of its own too.
+                  (with-current-buffer shown (setq-local tmux-control--active-pane "%0"))
+                  (tmux-control--register-window-buffer "@5" shown)
                   (with-current-buffer window (setq-local tmux-control--active-pane "%1"))
                   (with-current-buffer earlier (setq-local tmux-control--active-pane "%4"))
                   (tmux-control--register-window-buffer "@6" window)
@@ -3944,12 +3948,13 @@ killed with it."
                     (tmux-control--batch-pane-output "%4" "cached")
                     (tmux-control--filter proc "%continue %1\n"))
                   (should (equal (buffer-local-value 'tmux-control--output-batch tile) '("tiled")))
+                  (should (equal (buffer-local-value 'tmux-control--output-batch shown) '("tiled")))
                   (should (equal (buffer-local-value 'tmux-control--output-batch window) '("behind")))
                   (should (equal (buffer-local-value 'tmux-control--output-batch cached) '("cached")))
                   (should (equal (buffer-local-value 'tmux-control--output-batch earlier) '("cached")))
                   (should (equal (sort flushed #'string<) '(panes windows))))
               (delete-process proc))))
-      (mapc #'kill-buffer (list tile window cached earlier)))))
+      (mapc #'kill-buffer (list tile window cached earlier shown)))))
 
 (ert-deftest tmux-control-test-window-buffer-follows-its-pane-behind-tiled-view ()
   ;; While tiled, a background window that changes its active pane retargets
@@ -3957,6 +3962,7 @@ killed with it."
   ;; and keys go to it.  A tiled pane's change still only moves the view's
   ;; pointer, with no repaint.
   (let ((window (generate-new-buffer " *tc-pane-behind*"))
+        (shown (generate-new-buffer " *tc-pane-shown*"))
         seeded)
     (unwind-protect
         (with-temp-buffer
@@ -3981,7 +3987,44 @@ killed with it."
                                                     (cons "%5" (current-buffer))))
               (tmux-control--handle-line "%window-pane-changed @5 %5")
               (should (equal tmux-control--active-pane "%5"))
-              (should-not seeded))))
+              (should-not seeded)
+              ;; The tiled window has a buffer of its own: it follows too,
+              ;; hidden, and the view still only moves its pointer.
+              (with-current-buffer shown (setq-local tmux-control--active-pane "%5"))
+              (tmux-control--register-window-buffer "@5" shown)
+              (tmux-control--handle-line "%window-pane-changed @5 %0")
+              (should (equal (buffer-local-value 'tmux-control--active-pane shown) "%0"))
+              (should (equal tmux-control--active-pane "%0"))
+              (should (equal seeded (list (list shown "@5")))))))
+      (kill-buffer window)
+      (kill-buffer shown))))
+
+(ert-deftest tmux-control-test-window-buffer-fits-layout-behind-tiled-view ()
+  ;; A window's buffer streams behind the tiled view, so a layout change of
+  ;; its window resizes it to its pane, as untiled; the tiled view re-tiles.
+  ;; The pane map is refreshed too: a pane split off in another window must
+  ;; route to that window's buffer (checked against real tmux).
+  (let ((window (generate-new-buffer " *tc-layout-behind*"))
+        sized (mapped 0))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((tmux-control-window-buffers t))
+            (setq-local tmux-control--tiled t
+                        tmux-control--retile-pending nil)
+            (tmux-control--register-window-buffer "@5" (current-buffer))
+            (tmux-control--register-window-buffer "@6" window)
+            (cl-letf (((symbol-function 'tmux-control--eager-register-new-panes) #'ignore)
+                      ((symbol-function 'tmux-control--refresh-pane-window-map)
+                       (lambda () (cl-incf mapped)))
+                      ((symbol-function 'tmux-control--refresh-pane-size)
+                       (lambda () (push (current-buffer) sized))))
+              (tmux-control--handle-line "%layout-change @6 b25d,80x24,0,0,1 b25d,80x24,0,0,1 *")
+              (should (equal sized (list window)))
+              (should (= mapped 1))
+              (should tmux-control--retile-pending)
+              (setq sized nil)
+              (tmux-control--handle-line "%layout-change @5 b25d,80x24,0,0,0 b25d,80x24,0,0,0 *")
+              (should-not sized))))
       (kill-buffer window))))
 
 (ert-deftest tmux-control-test-window-buffer-heals-on-arrival-beside-tiled-view ()
