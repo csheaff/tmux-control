@@ -3836,6 +3836,166 @@ output), :calls (side-effect invocations in order), :active-pane,
       (should (eq (tmux-control--window-buffer "@5") (current-buffer)))
       (should (equal (tmux-control--window-id-for-index "1") "@6")))))
 
+(defmacro tmux-control-test--with-controller (name &rest body)
+  "Run BODY in a controller buffer NAME for session \"work\" on \"sock\".
+It has a live process, and BODY's window and scrollback buffers are
+killed with it."
+  (declare (indent 1))
+  `(let ((ctrl (generate-new-buffer ,name))
+         (tmux-control-default-socket-name "sock"))
+     (unwind-protect
+         (with-current-buffer ctrl
+           (tmux-control-mode)
+           (setq-local tmux-control--host nil
+                       tmux-control--socket-name "sock"
+                       tmux-control--session "work"
+                       tmux-control--capture-trailing-p nil
+                       tmux-control--fallback-target "work:"
+                       tmux-control--process
+                       (make-pipe-process :name "tc-ctrl-test" :buffer ctrl
+                                          :noquery t))
+           ,@body)
+       (let ((kill-buffer-query-functions nil))
+         (tmux-control--kill-render-buffers ctrl)
+         (dolist (buffer (buffer-list))
+           (when (eq (buffer-local-value 'major-mode buffer)
+                     'tmux-control-scrollback-mode)
+             (kill-buffer buffer)))
+         (when-let* ((process (get-buffer-process ctrl)))
+           (delete-process process))
+         (kill-buffer ctrl)))))
+
+(ert-deftest tmux-control-test-window-buffers-all-made-from-window-list ()
+  ;; With `all', each window list makes and seeds a buffer for every window
+  ;; that has none -- when the session connects and when tmux adds a window
+  ;; -- and tells `tmux-control-window-buffer-functions', by when the buffer
+  ;; knows its session and window.  The controller renders its own window,
+  ;; and a reply without window ids (an older tmux-control's) makes nothing.
+  (tmux-control-test--with-controller " *tc-all*"
+    (let* (seeded announced
+           (tmux-control-window-buffers t)
+           (tmux-control-window-buffer-functions
+            (list (lambda (buffer)
+                    (with-current-buffer buffer
+                      (push (list (tmux-control-buffer-session)
+                                  (tmux-control-window-id))
+                            announced))))))
+      (cl-letf (((symbol-function 'tmux-control--seed-window-buffer)
+                 (lambda (_buffer id &optional fit) (push (list id fit) seeded))))
+        ;; Visited windows only: nothing made until you visit one.
+        (tmux-control--update-windows '("0\tcode\t1\t0\t@5" "1\tbuild\t0\t0\t@6"))
+        (should (eq (tmux-control--window-buffer "@5") ctrl))
+        (should-not (tmux-control--window-buffer "@6"))
+        (setq tmux-control-window-buffers 'all)
+        (tmux-control--update-windows '("0\tcode\t1\t0\t@5" "1\tbuild\t0\t0\t@6"))
+        (should (buffer-live-p (tmux-control--window-buffer "@6")))
+        (should (equal seeded '(("@6" t))))
+        (should (equal announced '(("work" "@6"))))
+        ;; A window added later gets one; the others keep theirs.
+        (tmux-control--update-windows
+         '("0\tcode\t1\t0\t@5" "1\tbuild\t0\t0\t@6" "2\tlogs\t0\t0\t@7"))
+        (should (equal seeded '(("@7" t) ("@6" t))))
+        (should (equal (sort (mapcar #'car tmux-control--window-buffers) #'string<)
+                       '("@5" "@6" "@7")))
+        (tmux-control--update-windows '("3\told\t0\t0"))
+        (should (= (length seeded) 2))))))
+
+(ert-deftest tmux-control-test-window-buffer-functions-errors-are-demoted ()
+  ;; The functions run from the process filter, in the middle of handling a
+  ;; window list: one that fails is reported, and the buffer is still made.
+  (tmux-control-test--with-controller " *tc-hook-error*"
+    (let ((tmux-control-window-buffer-functions
+           (list (lambda (_buffer) (error "Broken"))))
+          ;; ERT sets it, which would let the error through.
+          (debug-on-error nil))
+      (should (buffer-live-p (tmux-control--make-window-buffer "@6" ctrl)))
+      (should (tmux-control--window-buffer "@6")))))
+
+(ert-deftest tmux-control-test-window-buffer-seed-fits-buffer-to-pane ()
+  ;; A buffer made before it is shown has the session's size, which a split
+  ;; window's pane doesn't: with FIT the seed asks for the pane's size once
+  ;; it knows the pane.
+  (let ((sep tmux-control--field-separator) asked)
+    (with-temp-buffer
+      (tmux-control--reset-buffer)
+      (cl-letf (((symbol-function 'tmux-control--query)
+                 (lambda (cmd cb)
+                   (when (string-prefix-p "list-panes" cmd)
+                     (funcall cb (list (concat "1" sep "%7" sep "0,0,1" sep
+                                               "0,0,0,0,0,0,1"))))))
+                ((symbol-function 'tmux-control--refresh-pane-size)
+                 (lambda () (push tmux-control--active-pane asked))))
+        (tmux-control--seed-window-buffer (current-buffer) "@1")
+        (should-not asked)
+        (tmux-control--seed-window-buffer (current-buffer) "@1" t)
+        (should (equal asked '("%7")))))))
+
+(ert-deftest tmux-control-test-window-label-is-safe-and-short ()
+  ;; Whatever runs in a window names it.  The label keeps the index and the
+  ;; name's text, with no control or bidirectional formatting characters,
+  ;; and a long name is cut short.
+  (should (equal (tmux-control--window-label '(:index "2" :name "bash")) "2:bash"))
+  (should (equal (tmux-control--window-label
+                  (list :index "1" :name (concat "ev\e]0;x\ail\tna\u0085me‮olr")))
+                 "1:ev]0;xilnameolr"))
+  (let ((label (tmux-control--window-label (list :index "1" :name (make-string 200 ?x)))))
+    (should (string-prefix-p "1:xxx" label))
+    (should (string-suffix-p "…" label))
+    (should (<= (string-width label) (+ 2 tmux-control--window-label-width)))))
+
+(ert-deftest tmux-control-test-window-buffer-names-follow-tabs ()
+  ;; With `tab', a window's buffer is named as its tab reads, and renamed
+  ;; when tmux renames or renumbers the window; its scrollback follows.  The
+  ;; controller takes its own window's tab, and the session's name alone
+  ;; once its window closes.  A name another buffer has gets <2>, which
+  ;; stays put.  Tiled panes are named after the session, not the tab.
+  (tmux-control-test--with-controller "*tmux local:work*"
+    (let ((tmux-control-window-buffer-names 'tab)
+          (tmux-control-window-buffers t)
+          other window scrollback)
+      (unwind-protect
+          (progn
+            (tmux-control--update-windows '("0\tagent\t1\t0\t@5" "1\tbash\t0\t0\t@6"))
+            (should (equal (buffer-name ctrl) "*tmux local:work 0:agent*"))
+            (should (equal (tmux-control--session-buffer-base-name) "*tmux local:work*"))
+            (setq window (tmux-control--make-window-buffer "@6" ctrl))
+            (should (equal (buffer-name window) "*tmux local:work 1:bash*"))
+            (setq scrollback (tmux-control--scrollback-buffer-for window))
+            (with-current-buffer scrollback
+              (tmux-control-scrollback-mode)
+              (setq-local tmux-control--live-buffer window))
+            (tmux-control--update-windows '("0\tagent\t1\t0\t@5" "1\tpython\t0\t0\t@6"))
+            (should (equal (buffer-name window) "*tmux local:work 1:python*"))
+            (should (equal (buffer-name scrollback) "*tmux local:work 1:python scrollback*"))
+            (tmux-control--update-windows '("0\tagent\t1\t0\t@5" "4\tpython\t0\t0\t@6"))
+            (should (equal (buffer-name window) "*tmux local:work 4:python*"))
+            (setq other (generate-new-buffer "*tmux local:work 4:zsh*"))
+            (dotimes (_ 2)
+              (tmux-control--update-windows '("0\tagent\t1\t0\t@5" "4\tzsh\t0\t0\t@6"))
+              (should (equal (buffer-name window) "*tmux local:work 4:zsh*<2>")))
+            (should (equal (buffer-name other) "*tmux local:work 4:zsh*"))
+            ;; The controller's window closes: it keeps the process, homeless.
+            (cl-letf (((symbol-function 'tmux-control--flush-output-batch) #'ignore)
+                      ((symbol-function 'tmux-control--refresh-windows) #'ignore)
+                      ((symbol-function 'tmux-control--refresh-pane-window-map) #'ignore))
+              (tmux-control--handle-line "%window-close @5"))
+            (tmux-control--update-windows '("4\tzsh\t1\t0\t@6"))
+            (should (equal (buffer-name ctrl) "*tmux local:work*")))
+        (when (buffer-live-p other) (kill-buffer other))))))
+
+(ert-deftest tmux-control-test-window-buffer-names-by-id-stay ()
+  ;; By default a window's buffer is named by its tmux ID, and a window
+  ;; list renames nothing, not even a buffer you renamed yourself.
+  (tmux-control-test--with-controller "*tmux local:work*"
+    (let ((tmux-control-window-buffers t))
+      (tmux-control--update-windows '("0\tagent\t1\t0\t@5" "1\tbash\t0\t0\t@6"))
+      (let ((window (tmux-control--make-window-buffer "@6" ctrl)))
+        (should (equal (buffer-name window) "*tmux local:work @6*"))
+        (with-current-buffer window (rename-buffer "mine"))
+        (tmux-control--update-windows '("0\tagent\t1\t0\t@5" "1\tpython\t0\t0\t@6"))
+        (should (equal (buffer-name window) "mine"))
+        (should (equal (buffer-name ctrl) "*tmux local:work*"))))))
+
 (ert-deftest tmux-control-test-batch-pane-output-routes-to-window-buffer ()
   ;; Output for a pane whose window has a render buffer accumulates in THAT
   ;; buffer; panes without one keep the controller's active-pane behavior.

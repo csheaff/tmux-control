@@ -215,6 +215,13 @@ session* to `tmux-control-switch-session-functions` that shows the session
 its own way and returns non-nil.  `tmux-control-connect-or-switch` doesn't run
 them.
 
+A package that groups buffers, by perspective or project, say, can add a
+function of *buffer* to `tmux-control-window-buffer-functions` (0.9.0) to
+place each new window's buffer.  It runs once the buffer knows its connection
+and window, and before it shows anything: when you first visit the window, or,
+with `tmux-control-window-buffers` set to `all`, as soon as the window is
+known, when the buffer isn't displayed.
+
 Replies are matched to commands in order, so each *command* must be exactly
 one tmux command on one line, starting with the bare command name.  Lines
 tmux would not answer exactly once are refused: blank or comment-only lines,
