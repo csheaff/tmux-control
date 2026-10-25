@@ -75,8 +75,10 @@ bound in the live buffer; the rest are `M-x`, bind them to taste):
   windows apart in a buffer list, and find one by typing its name, set
   `tmux-control-window-buffer-names` to `tab`: each buffer is then named as
   its tab reads, `*tmux dev:work 1:bash*`, and renamed when tmux renames or
-  renumbers the window.  Under tmux's `automatic-rename`, that is whenever the
-  program running in the window changes.
+  moves the window.  Under tmux's `automatic-rename`, that is whenever the
+  program running in the window changes.  tmux doesn't report
+  `move-window -r`: a buffer, like its tab, keeps the old number until the
+  session's windows next change.
 
   Arriving at a window always shows its **live screen** (tmux's own rule;
   the history above stays one wheel-up away) — however the buffer reaches

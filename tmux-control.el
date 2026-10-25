@@ -378,8 +378,10 @@ The symbol `id' names it by the window's tmux ID, as in
 it as its tab in the tab bar reads, index and name, as in
 \"*tmux dev:work 1:bash*\": you can then tell windows apart in a
 buffer list and type a window's name to find it.  Such a name changes
-when tmux renames or renumbers the window, which under tmux's
-`automatic-rename' happens whenever the program running in it does.
+when tmux renames the window, which under tmux's `automatic-rename'
+happens whenever the program running in it does, or moves it.  tmux
+says nothing of `move-window -r', so a buffer, like its tab, keeps
+the old number until the session's windows next change.
 A session's own buffer takes its window's tab too.  Window names come
 from the programs running in them, so control characters are dropped
 and long names are cut short."
@@ -9641,7 +9643,7 @@ its window's tab: then it is the session's name alone."
   "Name the session's window buffers as their tabs read.
 For `tmux-control-window-buffer-names' `tab'.  Runs in the controller
 after each window list, so a buffer's name follows tmux renaming or
-renumbering its window.  The controller takes its own window's tab,
+moving its window.  The controller takes its own window's tab,
 or the session's name alone when it has no window."
   (let ((base (tmux-control--buffer-name tmux-control--host tmux-control--socket-name
                                          tmux-control--session)))

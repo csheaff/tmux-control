@@ -3957,7 +3957,12 @@ killed with it."
           (progn
             (tmux-control--update-windows '("0\tagent\t1\t0\t@5" "1\tbash\t0\t0\t@6"))
             (should (equal (buffer-name ctrl) "*tmux local:work 0:agent*"))
-            (should (equal (tmux-control--session-buffer-base-name) "*tmux local:work*"))
+            (let ((pane (tmux-control--make-pane-buffer
+                         "%3" '(:w 40 :h 10) ctrl
+                         (list :socket "sock" :session "work"
+                               :local-directory default-directory))))
+              (should (equal (buffer-name pane) "*tmux local:work %3*"))
+              (kill-buffer pane))
             (setq window (tmux-control--make-window-buffer "@6" ctrl))
             (should (equal (buffer-name window) "*tmux local:work 1:bash*"))
             (setq scrollback (tmux-control--scrollback-buffer-for window))
