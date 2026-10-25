@@ -6565,16 +6565,17 @@ the matching pane's render buffer instead, so every pane updates at once."
       (with-current-buffer buf
         (push (tmux-control--decode-output payload) tmux-control--output-batch))))
   (if tmux-control--tiled
-      (let ((buf (and (not (assoc pane tmux-control--pane-buffers))
-                      (if (assoc pane tmux-control--panes)
-                          (cdr (assoc pane tmux-control--panes))
-                        ;; Another window's pane: its window's buffer keeps
-                        ;; streaming behind the tiled view.
-                        (let ((wbuf (tmux-control--pane-window-buffer pane)))
-                          (and wbuf (not (eq wbuf (current-buffer)))
-                               (equal pane (buffer-local-value
-                                            'tmux-control--active-pane wbuf))
-                               wbuf))))))
+      (let ((buf (if (assoc pane tmux-control--panes)
+                     ;; A cached pane buffer had its copy above.
+                     (and (not (assoc pane tmux-control--pane-buffers))
+                          (cdr (assoc pane tmux-control--panes)))
+                   ;; Another window's pane: its window's buffer keeps
+                   ;; streaming behind the tiled view, as untiled.
+                   (let ((wbuf (tmux-control--pane-window-buffer pane)))
+                     (and wbuf (not (eq wbuf (current-buffer)))
+                          (equal pane (buffer-local-value
+                                       'tmux-control--active-pane wbuf))
+                          wbuf)))))
         ;; The tabs over the tiled view flag the other windows' output too.
         (tmux-control--note-pane-activity pane)
         (when (buffer-live-p buf)
@@ -6728,7 +6729,11 @@ backing off to the cap."
       (let* ((win-id (match-string 1 line))
              (pane (match-string 2 line))
              (wbuf (and tmux-control-window-buffers
-                        (not tmux-control--tiled)
+                        ;; While tiled, the tiled window's panes are the
+                        ;; view's own; another window's buffer follows its
+                        ;; window as it does untiled.
+                        (not (and tmux-control--tiled
+                                  (assoc pane tmux-control--panes)))
                         (tmux-control--window-buffer win-id))))
         (cond
          ((and wbuf (not (eq wbuf (current-buffer))))
@@ -9697,7 +9702,8 @@ Its scrollback buffer, if it has one, is renamed after it."
         (rename-buffer name t)
         (when-let* ((scrollback (tmux-control--scrollback-buffer-of buffer)))
           (with-current-buffer scrollback
-            (rename-buffer (tmux-control--derived-buffer-name name "scrollback")
+            (rename-buffer (tmux-control--derived-buffer-name (buffer-name buffer)
+                                                              "scrollback")
                            t)))))))
 
 (defun tmux-control--window-buffer-killed ()

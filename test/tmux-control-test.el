@@ -3907,6 +3907,8 @@ killed with it."
   ;; flushes both.
   (let ((tile (generate-new-buffer " *tc-tile*"))
         (window (generate-new-buffer " *tc-behind*"))
+        (cached (generate-new-buffer " *tc-cached*"))
+        (earlier (generate-new-buffer " *tc-earlier*"))
         flushed)
     (unwind-protect
         (with-temp-buffer
@@ -3915,16 +3917,21 @@ killed with it."
                                          :noquery t)))
             (unwind-protect
                 (progn
+                  ;; Window @7 was tiled before: its pane %4 keeps a cached
+                  ;; pane buffer, and has a window buffer too.
                   (setq-local tmux-control--tiled t
                               tmux-control--panes (list (cons "%0" tile))
-                              tmux-control--pane-buffers nil
+                              tmux-control--pane-buffers (list (cons "%4" cached))
                               tmux-control--pane-window (make-hash-table :test 'equal))
                   (puthash "%0" (cons "0" "@5") tmux-control--pane-window)
                   (puthash "%1" (cons "1" "@6") tmux-control--pane-window)
-                  (dolist (buffer (list tile window))
+                  (puthash "%4" (cons "2" "@7") tmux-control--pane-window)
+                  (dolist (buffer (list tile window cached earlier))
                     (with-current-buffer buffer (setq-local tmux-control--output-batch nil)))
                   (with-current-buffer window (setq-local tmux-control--active-pane "%1"))
+                  (with-current-buffer earlier (setq-local tmux-control--active-pane "%4"))
                   (tmux-control--register-window-buffer "@6" window)
+                  (tmux-control--register-window-buffer "@7" earlier)
                   (cl-letf (((symbol-function 'tmux-control--note-pane-activity) #'ignore)
                             ((symbol-function 'tmux-control--current-sync-windows) #'ignore)
                             ((symbol-function 'tmux-control--flush-tiled-panes)
@@ -3934,12 +3941,47 @@ killed with it."
                     (tmux-control--batch-pane-output "%0" "tiled")
                     (tmux-control--batch-pane-output "%1" "behind")
                     (tmux-control--batch-pane-output "%2" "nobody's")
+                    (tmux-control--batch-pane-output "%4" "cached")
                     (tmux-control--filter proc "%continue %1\n"))
                   (should (equal (buffer-local-value 'tmux-control--output-batch tile) '("tiled")))
                   (should (equal (buffer-local-value 'tmux-control--output-batch window) '("behind")))
+                  (should (equal (buffer-local-value 'tmux-control--output-batch cached) '("cached")))
+                  (should (equal (buffer-local-value 'tmux-control--output-batch earlier) '("cached")))
                   (should (equal (sort flushed #'string<) '(panes windows))))
               (delete-process proc))))
-      (kill-buffer tile)
+      (mapc #'kill-buffer (list tile window cached earlier)))))
+
+(ert-deftest tmux-control-test-window-buffer-follows-its-pane-behind-tiled-view ()
+  ;; While tiled, a background window that changes its active pane retargets
+  ;; and repaints its buffer, as untiled, so the new pane's output reaches it
+  ;; and keys go to it.  A tiled pane's change still only moves the view's
+  ;; pointer, with no repaint.
+  (let ((window (generate-new-buffer " *tc-pane-behind*"))
+        seeded)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((tmux-control-window-buffers t))
+            (setq-local tmux-control--tiled t
+                        tmux-control--panes (list (cons "%0" (current-buffer)))
+                        tmux-control--active-pane "%0")
+            (with-current-buffer window (setq-local tmux-control--active-pane "%1"))
+            (tmux-control--register-window-buffer "@6" window)
+            (cl-letf (((symbol-function 'tmux-control--flush-output-batch) #'ignore)
+                      ((symbol-function 'tmux-control--seed-window-buffer)
+                       (lambda (buffer id &rest _) (push (list buffer id) seeded)))
+                      ((symbol-function 'tmux-control--seed-screen)
+                       (lambda () (push 'view seeded)))
+                      ((symbol-function 'tmux-control--refresh-pane-size) #'ignore))
+              (tmux-control--handle-line "%window-pane-changed @6 %3")
+              (should (equal (buffer-local-value 'tmux-control--active-pane window) "%3"))
+              (should (equal seeded (list (list window "@6"))))
+              (should (equal tmux-control--active-pane "%0"))
+              (setq seeded nil)
+              (setq-local tmux-control--panes (list (cons "%0" (current-buffer))
+                                                    (cons "%5" (current-buffer))))
+              (tmux-control--handle-line "%window-pane-changed @5 %5")
+              (should (equal tmux-control--active-pane "%5"))
+              (should-not seeded))))
       (kill-buffer window))))
 
 (ert-deftest tmux-control-test-window-buffer-heals-on-arrival-beside-tiled-view ()
@@ -4072,7 +4114,8 @@ killed with it."
             (setq other (generate-new-buffer "*tmux local:work 4:zsh*"))
             (dotimes (_ 2)
               (tmux-control--update-windows '("0\tagent\t1\t0\t@5" "4\tzsh\t0\t0\t@6"))
-              (should (equal (buffer-name window) "*tmux local:work 4:zsh*<2>")))
+              (should (equal (buffer-name window) "*tmux local:work 4:zsh*<2>"))
+              (should (equal (buffer-name scrollback) "*tmux local:work 4:zsh*<2> scrollback")))
             (should (equal (buffer-name other) "*tmux local:work 4:zsh*"))
             ;; The controller's window closes: it keeps the process, homeless.
             (cl-letf (((symbol-function 'tmux-control--flush-output-batch) #'ignore)
