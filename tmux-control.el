@@ -10481,11 +10481,13 @@ last column is kept for the `$' of a truncated line, and
 `tmux-control--tile-arrange-node' gives each pane window its tmux width and
 one more.  Every pane but the last on a row takes that column from the
 separator tmux puts after it; the last takes it from this one.  Reduced by any
-foreign window sharing the frame: a full-height neighbor steals columns, a
-full-width one steals rows.  Computed from frame-level measures (stable across
-the split, whether called before tiling from the controller's window or while
-tiled from a pane window), so the size never disagrees with itself and never
-forces a spurious re-tile."
+foreign window sharing the frame: one beside the tiling, on rows CONTROLLER's
+windows have, steals columns, and any other steals rows.  With none of
+CONTROLLER's windows on FRAME, a full-height foreign window is the one beside
+it.  Computed from frame-level measures (stable across the split, whether
+called before tiling from the controller's window or while tiled from a pane
+window), so the size never disagrees with itself and never forces a spurious
+re-tile."
   (let* ((char-h (max 1 (frame-char-height frame)))
          (windows (window-list frame 'no-mini))
          ;; The mode line's real pixel height, read from one of our own
@@ -10521,11 +10523,27 @@ forces a spurious re-tile."
          (rows (max 1 (floor (- (frame-inner-height frame)
                                 mini-h ml-h hl-h stacked)
                              char-h))))
-    (dolist (w windows)
-      (unless (tmux-control--our-tiling-window-p w controller)
-        (if (>= (window-total-height w) usable-rows)
-            (setq cols (- cols (window-total-width w)))     ; a side column
-          (setq rows (- rows (window-total-height w))))))    ; a top/bottom band
+    (let ((rows-of-ours
+           (and ours (let ((edges (mapcar #'window-edges ours)))
+                       (cons (apply #'min (mapcar #'cadr edges))
+                             (apply #'max (mapcar (lambda (e) (nth 3 e)) edges))))))
+          counted)
+      (dolist (w windows)
+        (unless (tmux-control--our-tiling-window-p w controller)
+          (let ((edges (window-edges w)))
+            (if (if rows-of-ours
+                    ;; Beside the tiling, on rows of its own: a column over
+                    ;; a band that spans the frame, as a sidebar over a
+                    ;; menu, is short of the frame's height.
+                    (and (< (nth 1 edges) (cdr rows-of-ours))
+                         (> (nth 3 edges) (car rows-of-ours)))
+                  (>= (window-total-height w) usable-rows))
+                ;; A side column, once for windows stacked in it.
+                (let ((columns (cons (car edges) (nth 2 edges))))
+                  (unless (member columns counted)
+                    (push columns counted)
+                    (setq cols (- cols (window-total-width w)))))
+              (setq rows (- rows (window-total-height w))))))))  ; a top/bottom band
     (cons (max 1 (1- cols)) (max 1 rows))))
 
 (defun tmux-control--collapse-tile-windows (keep)

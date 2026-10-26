@@ -2990,6 +2990,28 @@ foreign-subtraction logic, which is display-independent."
       (kill-buffer ctrl-buf)
       (kill-buffer foreign-buf))))
 
+(ert-deftest tmux-control-test-tiled-region-size-beside-a-column-over-a-band ()
+  ;; A column beside the tiling, as a sidebar, and a band below both that
+  ;; spans the frame, as a menu: the column is no longer as tall as the
+  ;; frame, and was taken for a band too, its height off the rows rather
+  ;; than its width off the columns.  tmux was asked for a window one row
+  ;; high, which pushed the panes' screens into history.
+  (let ((ctrl-buf (generate-new-buffer " tc-test-ctrl"))
+        (foreign-buf (generate-new-buffer " tc-test-foreign")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (let ((cw (selected-window)))
+            (set-window-buffer cw ctrl-buf)
+            (set-window-buffer (split-window (frame-root-window) -6 'below) foreign-buf)
+            (set-window-buffer (split-window cw -20 'left) foreign-buf)
+            (let ((size (tmux-control--tiled-region-size (selected-frame) ctrl-buf)))
+              (should (= (car size) (1- (window-total-width cw))))
+              (should (>= (cdr size) (1- (window-body-height cw))))
+              (should (<= (cdr size) (window-body-height cw))))))
+      (kill-buffer ctrl-buf)
+      (kill-buffer foreign-buf))))
+
 ;;; Pane-directory-aware file commands.
 
 (ert-deftest tmux-control-test-remote-file-method-honors-config ()
