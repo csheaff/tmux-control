@@ -1666,6 +1666,61 @@ them as tmux has them, rather than as Eat rewrapped them."
     (should (tmux-control-it--resize-to controller pane 35 60))
     (should (tmux-control-it--resize-to controller pane 35 100))))
 
+(ert-deftest tmux-control-it-a-resized-tile-shows-its-screen-at-once ()
+  "A tiled pane its layout resizes shows its new screen as tmux has it,
+from the screen's top, once the layout is built, rather than a round trip
+later when its seed paints.  Narrower, tmux rewraps a long first row and
+the row's first part goes into history; shorter, it drops the rows below
+the cursor."
+  (save-window-excursion
+    (tmux-control-it--with-runner
+      (tmux-control-it--tmux "split-window" "-h" "-t" pane)
+      (tmux-control-it--tmux "select-pane" "-t" pane)
+      (tmux-control-it--pump 0.3)
+      (with-current-buffer controller (tmux-control-tile))
+      (should (tmux-control-it--settle-tiles controller 2))
+      (should (tmux-control-it--ready controller))
+      (let* ((buffer (cdr (assoc pane (buffer-local-value 'tmux-control--panes controller))))
+             (size (mapcar #'string-to-number
+                           (split-string (tmux-control-it--tmux "display-message" "-p" "-t" pane
+                                                                "#{pane_width} #{pane_height}"))))
+             (width (car size))
+             (height (cadr size))
+             ;; Two panes this wide, side by side.
+             (narrow (- width 10))
+             built
+             (record (lambda (build &rest args)
+                       (let ((size (eat-term-size (buffer-local-value 'tmux-control--terminal buffer))))
+                         (apply build args)
+                         (with-current-buffer buffer
+                           (unless (equal size (eat-term-size tmux-control--terminal))
+                             (push (list (tmux-control-it--screen buffer)
+                                         (= (window-start (get-buffer-window buffer))
+                                            (tmux-control--term-screen-start)))
+                                   built)))))))
+        (should (> height 4))
+        ;; A first row the narrower pane wraps, something on the last row,
+        ;; as a repaint of the whole screen leaves, and the cursor back below
+        ;; the second row.
+        (tmux-control-it--tmux "send-keys" "-t" pane "-l"
+                               (format "printf 'x%%.0s' $(seq 1 %d); printf '\\nTWO\\n\\033[%d;1HLAST\\033[3;1H'"
+                                       (- width 5) height))
+        (tmux-control-it--tmux "send-keys" "-t" pane "Enter")
+        (should (tmux-control-it--pump-until
+                 5 (lambda () (member "LAST" (tmux-control-it--screen buffer)))))
+        (advice-add 'tmux-control--build-tiling-apply :around record)
+        (unwind-protect
+            (dolist (size (list (cons (1+ (* 2 narrow)) height)
+                                (cons (1+ (* 2 narrow)) (- height 4))))
+              (setq built nil)
+              (with-current-buffer controller
+                (tmux-control--send-command (format "refresh-client -C %dx%d" (car size) (cdr size))))
+              (should (tmux-control-it--settle-tiles controller 2))
+              (should built)
+              (should (equal (car built)
+                             (list (tmux-control-it--capture-lines pane) t))))
+          (advice-remove 'tmux-control--build-tiling-apply record))))))
+
 (ert-deftest tmux-control-it-growing-repaints-the-other-windows-buffers ()
   "With per-window buffers, a resize grows every window's buffer, and each
 one tmux grew back out of its history is painted again."

@@ -8973,6 +8973,21 @@ Return non-nil when a resize actually happened, so callers can repaint."
              (tmux-control--term-following-windows))))
         t))))
 
+(defun tmux-control--resize-tiled-pane (width height)
+  "Resize this tiled pane's terminal to WIDTH by HEIGHT, as tmux resizes it.
+Shorter, it loses the rows below the cursor first, as untiled (see
+`tmux-control--apply-term-size'), where it pushed the screen's top rows
+into history.  Narrower, a long first row rewraps and its first part
+goes into history, in tmux and the terminal alike.  So a window that
+showed the live screen is set to the new screen's top: left where it
+was, it showed that row above the screen until the pane's seed painted,
+a round trip later.  A window reading history keeps its place."
+  (let ((following (and (tmux-control--term-follows-cursor-p)
+                        (tmux-control--term-following-windows))))
+    (when (tmux-control--apply-term-size width height)
+      (tmux-control--anchor-windows-to-screen-top following)
+      (tmux-control--keep-cursor-visible following))))
+
 (defun tmux-control--parse-pane-size (output)
   "Parse a WxH pane size from control-mode reply OUTPUT lines.
 OUTPUT is the raw (reverse-order) reply line list.  Return a (WIDTH . HEIGHT)
@@ -10912,9 +10927,7 @@ once the in-band window-state reply has been parsed."
                               ;; resize, so Eat reflows.
                               (unless tmux-control--pane-fed-live
                                 (setq seed t))
-                              (let ((inhibit-read-only t))
-                                (tmux-control--term-resize w h))
-                              (tmux-control--screen-on-its-own-line))))
+                              (tmux-control--resize-tiled-pane w h))))
                         ;; The fed-live skip is for the opening placement only.
                         ;; Clear it now so a LATER resize reseeds normally: by
                         ;; then the pane is quiescent (no seed/stream race), and
