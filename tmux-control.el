@@ -10482,12 +10482,12 @@ last column is kept for the `$' of a truncated line, and
 one more.  Every pane but the last on a row takes that column from the
 separator tmux puts after it; the last takes it from this one.  Reduced by any
 foreign window sharing the frame: one beside the tiling, on rows CONTROLLER's
-windows have, steals its columns, each column once, and any other steals rows.  With none of
-CONTROLLER's windows on FRAME, a full-height foreign window is the one beside
-it.  Computed from frame-level measures (stable across the split, whether
-called before tiling from the controller's window or while tiled from a pane
-window), so the size never disagrees with itself and never forces a spurious
-re-tile."
+windows have, steals its columns, each column once, and any other steals
+rows.  With none of CONTROLLER's windows on FRAME, a full-height foreign
+window is the one beside it.  Computed from frame-level measures (stable
+across the split, whether called before tiling from the controller's window
+or while tiled from a pane window), so the size never disagrees with itself
+and never forces a spurious re-tile."
   (let* ((char-h (max 1 (frame-char-height frame)))
          (windows (window-list frame 'no-mini))
          ;; The mode line's real pixel height, read from one of our own
