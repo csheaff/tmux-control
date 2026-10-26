@@ -3012,6 +3012,25 @@ foreign-subtraction logic, which is display-independent."
       (kill-buffer ctrl-buf)
       (kill-buffer foreign-buf))))
 
+(ert-deftest tmux-control-test-tiled-region-size-counts-a-split-column-once ()
+  ;; A column beside the tiling split into two windows side by side over a
+  ;; third: its columns come off once, not once a window.
+  (let ((ctrl-buf (generate-new-buffer " tc-test-ctrl"))
+        (foreign-buf (generate-new-buffer " tc-test-foreign")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (let* ((cw (selected-window))
+                 (column (split-window cw -30 'left)))
+            (set-window-buffer cw ctrl-buf)
+            (set-window-buffer column foreign-buf)
+            (set-window-buffer (split-window (split-window column nil 'below) nil 'right)
+                               foreign-buf)
+            (should (= (car (tmux-control--tiled-region-size (selected-frame) ctrl-buf))
+                       (1- (window-total-width cw))))))
+      (kill-buffer ctrl-buf)
+      (kill-buffer foreign-buf))))
+
 ;;; Pane-directory-aware file commands.
 
 (ert-deftest tmux-control-test-remote-file-method-honors-config ()

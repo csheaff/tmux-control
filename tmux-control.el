@@ -10482,7 +10482,7 @@ last column is kept for the `$' of a truncated line, and
 one more.  Every pane but the last on a row takes that column from the
 separator tmux puts after it; the last takes it from this one.  Reduced by any
 foreign window sharing the frame: one beside the tiling, on rows CONTROLLER's
-windows have, steals columns, and any other steals rows.  With none of
+windows have, steals its columns, each column once, and any other steals rows.  With none of
 CONTROLLER's windows on FRAME, a full-height foreign window is the one beside
 it.  Computed from frame-level measures (stable across the split, whether
 called before tiling from the controller's window or while tiled from a pane
@@ -10527,7 +10527,7 @@ re-tile."
            (and ours (let ((edges (mapcar #'window-edges ours)))
                        (cons (apply #'min (mapcar #'cadr edges))
                              (apply #'max (mapcar (lambda (e) (nth 3 e)) edges))))))
-          counted)
+          beside)
       (dolist (w windows)
         (unless (tmux-control--our-tiling-window-p w controller)
           (let ((edges (window-edges w)))
@@ -10538,12 +10538,16 @@ re-tile."
                     (and (< (nth 1 edges) (cdr rows-of-ours))
                          (> (nth 3 edges) (car rows-of-ours)))
                   (>= (window-total-height w) usable-rows))
-                ;; A side column, once for windows stacked in it.
-                (let ((columns (cons (car edges) (nth 2 edges))))
-                  (unless (member columns counted)
-                    (push columns counted)
-                    (setq cols (- cols (window-total-width w)))))
-              (setq rows (- rows (window-total-height w))))))))  ; a top/bottom band
+                (push (cons (car edges) (nth 2 edges)) beside)   ; a side column
+              (setq rows (- rows (window-total-height w)))))))  ; a top/bottom band
+      ;; The columns those take, each once, however the windows in them
+      ;; are split.
+      (let ((end 0))
+        (dolist (columns (sort beside (lambda (a b) (< (car a) (car b)))))
+          (let ((from (max (car columns) end)))
+            (when (> (cdr columns) from)
+              (setq cols (- cols (- (cdr columns) from))
+                    end (cdr columns)))))))
     (cons (max 1 (1- cols)) (max 1 rows))))
 
 (defun tmux-control--collapse-tile-windows (keep)
