@@ -5657,8 +5657,9 @@ Batch Emacs lays out no window, so `posn-at-point' can't make one."
   "Tile pane %1 at FROM, shown from its screen's top, then rebuild at TO.
 FROM and TO are (WIDTH . HEIGHT).  The pane shows LINES, its cursor at
 CURSOR, (X . Y), and the rebuild splits a pane %2 off beside it.  Return
-the window showing %1 once the build is done, before any seed paints,
-with %1's buffer current.  The caller kills the buffers."
+the window showing %1 once the build is done, before any seed paints.
+Call in the controller, which keeps the pane buffers for the caller to
+kill."
   (delete-other-windows)
   (let* ((controller (current-buffer))
          (process (make-pipe-process :name "tc-retile" :buffer controller :noquery t))
@@ -5683,7 +5684,6 @@ with %1's buffer current.  The caller kills the buffers."
                (car to) (cdr to) (1+ (car to)))
        (list (cons "%1" (list :left 0 :top 0))
              (cons "%2" (list :left (1+ (car to)) :top 0)))))
-    (set-buffer pane)
     (get-buffer-window pane)))
 
 (ert-deftest tmux-control-test-retile-narrower-keeps-a-shown-pane-on-its-screen ()
@@ -5699,9 +5699,10 @@ with %1's buffer current.  The caller kills the buffers."
           (let ((window (tmux-control-test--retile-shown-pane
                          (cons (make-string 34 ?a) (mapcar #'number-to-string (number-sequence 2 8)))
                          '(1 . 7) '(40 . 8) '(30 . 8))))
-            ;; Its first row's first 30 columns went into history.
-            (should (string-prefix-p "aaaa\n2\n" (tmux-control--term-screen-text)))
-            (should (= (window-start window) (tmux-control--term-screen-start))))
+            (with-current-buffer (window-buffer window)
+              ;; Its first row's first 30 columns went into history.
+              (should (string-prefix-p "aaaa\n2\n" (tmux-control--term-screen-text)))
+              (should (= (window-start window) (tmux-control--term-screen-start)))))
         (dolist (entry tmux-control--pane-buffers)
           (tmux-control--forget-pane-buffer (car entry)))))))
 
@@ -5716,8 +5717,9 @@ with %1's buffer current.  The caller kills the buffers."
       (unwind-protect
           (let ((window (tmux-control-test--retile-shown-pane
                          '("one" "two" "three" "" "" "" "" "") '(0 . 3) '(30 . 8) '(30 . 5))))
-            (should (equal (tmux-control--term-screen-text) "one\ntwo\nthree\n"))
-            (should (= (window-start window) (tmux-control--term-screen-start))))
+            (with-current-buffer (window-buffer window)
+              (should (equal (tmux-control--term-screen-text) "one\ntwo\nthree\n"))
+              (should (= (window-start window) (tmux-control--term-screen-start)))))
         (dolist (entry tmux-control--pane-buffers)
           (tmux-control--forget-pane-buffer (car entry)))))))
 

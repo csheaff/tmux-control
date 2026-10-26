@@ -8985,6 +8985,9 @@ a round trip later.  A window reading history keeps its place."
   (let ((following (and (tmux-control--term-follows-cursor-p)
                         (tmux-control--term-following-windows))))
     (when (tmux-control--apply-term-size width height)
+      (dolist (window following)
+        (when (windowp window)
+          (set-window-point window (tmux-control--term-cursor))))
       (tmux-control--anchor-windows-to-screen-top following)
       (tmux-control--keep-cursor-visible following))))
 

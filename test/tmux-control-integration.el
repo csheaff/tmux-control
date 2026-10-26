@@ -1695,8 +1695,10 @@ the cursor."
                          (with-current-buffer buffer
                            (unless (equal size (eat-term-size tmux-control--terminal))
                              (push (list (tmux-control-it--screen buffer)
-                                         (= (window-start (get-buffer-window buffer))
-                                            (tmux-control--term-screen-start)))
+                                         (let ((window (get-buffer-window buffer)))
+                                           (and window
+                                                (= (window-start window)
+                                                   (tmux-control--term-screen-start)))))
                                    built)))))))
         (should (> height 4))
         ;; A first row the narrower pane wraps, something on the last row,
