@@ -4576,6 +4576,46 @@ killed with it."
           (kill-buffer sb)
           (kill-buffer live))))))
 
+(ert-deftest tmux-control-test-connect-sizes-tmux-once-settled ()
+  ;; A connection's terminal takes its window's size at once, and tmux the
+  ;; size the window keeps once the command is done: a caller can dock a
+  ;; panel beside it first.  A size Emacs or tiling asked for since stands.
+  (let (sent later)
+    (cl-letf (((symbol-function 'tmux-control--send-command)
+               (lambda (cmd &optional _kind) (push cmd sent)))
+              ((symbol-function 'tmux-control--refresh-pane-size) #'ignore)
+              ((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'run-at-time)
+               (lambda (_time _repeat fn &rest args)
+                 (push (lambda () (apply fn args)) later))))
+      (tmux-control-test--with-pane 80 24
+        (let ((panel (get-buffer-create " *tc-test-panel*")))
+          (unwind-protect
+              (save-window-excursion
+                (delete-other-windows)
+                (set-window-buffer (selected-window) (current-buffer))
+                (let ((wide (tmux-control--window-size (selected-window))))
+                  (tmux-control--resize-to-settled-window)
+                  (should (equal (tmux-control--term-size) wide))
+                  (should-not sent)
+                  (set-window-buffer (split-window nil -30 'right) panel)
+                  (let ((narrow (tmux-control--window-size (selected-window)))
+                        (settled (car (last later))))
+                    (should (< (car narrow) (car wide)))
+                    (funcall settled)
+                    (should (equal sent (list (format "refresh-client -C %dx%d"
+                                                      (car narrow) (cdr narrow)))))
+                    (setq sent nil)
+                    (setq tmux-control--requested-client-size nil
+                          tmux-control--tiled-client-size '(120 . 40))
+                    (funcall settled)
+                    (should-not sent)
+                    (setq tmux-control--tiled-client-size nil
+                          tmux-control--requested-client-size narrow)
+                    (funcall settled)
+                    (should-not sent))))
+            (kill-buffer panel)))))))
+
 (ert-deftest tmux-control-test-resize-skips-unchanged ()
   ;; Emacs core fires the window-size hook on many redisplays where the size
   ;; did not change; a same-size resize must not re-send refresh-client or

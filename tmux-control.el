@@ -2015,7 +2015,7 @@ session (tmux attaches if it exists, otherwise creates it)."
         (setq-local header-line-format '(:eval (tmux-control--header-line)))
         ;; The connect seed repaints every pane; don't let that flag everything.
         (tmux-control--quiet-activity 1.5))
-      (tmux-control--resize-to-window)
+      (tmux-control--resize-to-settled-window)
       ;; Learn the server version first so the screen seed knows whether it
       ;; can ask `capture-pane' to preserve trailing background cells (-N,
       ;; tmux 3.1+).  The reply lands before the :pane-id reply that seeds.
@@ -8819,6 +8819,31 @@ decides, as it does on a switch.  Installed on
      (max 1 (window-max-chars-per-line window))
      (max 1 (with-selected-window window
               (floor (window-screen-lines)))))))
+
+(defun tmux-control--resize-to-settled-window ()
+  "Size the terminal to its window now, and tmux once the command is done.
+The command that connects can go on to change the window, as a caller
+docking a panel beside it does.  tmux rewraps a pane at each width it
+is given, and a line it unwraps at a wider width and wraps again at the
+narrower pushes the screen's first row into history, out of sight.  So
+tmux gets only the size the window keeps: from Emacs resizing the
+connection at the next redisplay (see `tmux-control--adjust-window-size'),
+or else from a timer that runs once the command is done."
+  (let ((buffer (current-buffer)))
+    (when-let* ((window (get-buffer-window buffer t)))
+      (set-window-margins window 0 0)
+      (let ((size (tmux-control--window-size window)))
+        (tmux-control--apply-term-size (car size) (cdr size))))
+    (run-at-time
+     0 nil
+     (lambda ()
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           ;; Unless tmux was sized since, by Emacs or by tiling.
+           (when (and (process-live-p tmux-control--process)
+                      (null tmux-control--requested-client-size)
+                      (null tmux-control--tiled-client-size))
+             (tmux-control--resize-to-window))))))))
 
 (defun tmux-control--resize (width height)
   "Resize the local renderer and request WIDTH by HEIGHT from tmux.

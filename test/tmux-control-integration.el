@@ -272,6 +272,64 @@ the full async pipeline (process filter -> batch -> Eat), not just the seed."
         (kill-buffer buf))
       (tmux-control-it--tmux-ok "kill-server"))))
 
+(defun tmux-control-it--screen (buf)
+  "Return BUF's live screen, without the history above it, as a capture."
+  (with-current-buffer buf
+    (let ((start (save-excursion (goto-char (tmux-control--term-screen-start))
+                                 (line-beginning-position))))
+      (tmux-control-it--rtrim
+       (split-string (tmux-control-it--visible-text start (tmux-control--term-end))
+                     "\n")))))
+
+(ert-deftest tmux-control-it-connect-sizes-tmux-for-the-settled-window ()
+  "A window narrowed right after connecting is the only size tmux gets.
+A caller can show a new connection in a window and dock a panel beside
+it in the same command.  tmux rewraps a pane at each width it is given,
+and a line it unwraps at a wider one and wraps again at the narrower
+pushes the screen's first row into history.  Asked for the passing
+width too, tmux showed a wrapped line from its second row."
+  (skip-unless (tmux-control-it--available-p))
+  (let ((frame-size (cons (frame-width) (frame-height)))
+        (panel (get-buffer-create " *tc-it-panel*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (set-frame-size (selected-frame) 130 30)
+          (let* ((tmux-control-window-tab-bar nil)
+                 (tmux-control-session-activity nil)
+                 (tmux-control-scroll-position-indicator nil)
+                 (tmux-control-session-label nil)
+                 (dock (lambda ()
+                         (let ((side (split-window (selected-window) -40 'right)))
+                           (set-window-buffer side panel)
+                           side)))
+                 (size (let ((side (funcall dock)))
+                         (prog1 (tmux-control--window-size (selected-window))
+                           (delete-window side))))
+                 (line (concat "FIRST_ROW " (make-string (car size) ?x) " SECOND_ROW")))
+            (tmux-control-it--with-pane (concat line "\n") (car size) (cdr size)
+              (let ((buf (tmux-control-connect-or-switch nil tmux-control-it--socket "t")))
+                (unwind-protect
+                    (progn
+                      (funcall dock)
+                      ;; What redisplay does once the command is done.
+                      (window--adjust-process-windows)
+                      (should (tmux-control-it--pump-until
+                               5 (lambda ()
+                                   (string-match-p "SECOND_ROW" (tmux-control-it--buffer-text buf)))))
+                      (tmux-control-it--pump 1)
+                      (should (equal (tmux-control-it--tmux
+                                      "display-message" "-p" "-t" pane
+                                      "#{pane_width}x#{pane_height} #{history_size}")
+                                     (format "%dx%d 0\n" (car size) (cdr size))))
+                      (should (string-prefix-p "FIRST_ROW "
+                                               (car (tmux-control-it--screen buf)))))
+                  (when (buffer-live-p buf)
+                    (with-current-buffer buf (ignore-errors (tmux-control-disconnect)))
+                    (kill-buffer buf)))))))
+      (kill-buffer panel)
+      (set-frame-size (selected-frame) (car frame-size) (cdr frame-size)))))
+
 (defun tmux-control-it--link-on (buf text)
   "The hyperlink on an occurrence of TEXT in BUF, or nil."
   (with-current-buffer buf
