@@ -8973,6 +8973,24 @@ Return non-nil when a resize actually happened, so callers can repaint."
              (tmux-control--term-following-windows))))
         t))))
 
+(defun tmux-control--resize-tiled-pane (width height)
+  "Resize this tiled pane's terminal to WIDTH by HEIGHT, as tmux resizes it.
+Shorter, it loses the rows below the cursor first, as untiled (see
+`tmux-control--apply-term-size'), where it pushed the screen's top rows
+into history.  Narrower, a long first row rewraps and its first part
+goes into history, in tmux and the terminal alike.  So a window that
+showed the live screen is set to the new screen's top: left where it
+was, it showed that row above the screen until the pane's seed painted,
+a round trip later.  A window reading history keeps its place."
+  (let ((following (and (tmux-control--term-follows-cursor-p)
+                        (tmux-control--term-following-windows))))
+    (when (tmux-control--apply-term-size width height)
+      (dolist (window following)
+        (when (windowp window)
+          (set-window-point window (tmux-control--term-cursor))))
+      (tmux-control--anchor-windows-to-screen-top following)
+      (tmux-control--keep-cursor-visible following))))
+
 (defun tmux-control--parse-pane-size (output)
   "Parse a WxH pane size from control-mode reply OUTPUT lines.
 OUTPUT is the raw (reverse-order) reply line list.  Return a (WIDTH . HEIGHT)
@@ -10463,11 +10481,13 @@ last column is kept for the `$' of a truncated line, and
 `tmux-control--tile-arrange-node' gives each pane window its tmux width and
 one more.  Every pane but the last on a row takes that column from the
 separator tmux puts after it; the last takes it from this one.  Reduced by any
-foreign window sharing the frame: a full-height neighbor steals columns, a
-full-width one steals rows.  Computed from frame-level measures (stable across
-the split, whether called before tiling from the controller's window or while
-tiled from a pane window), so the size never disagrees with itself and never
-forces a spurious re-tile."
+foreign window sharing the frame: one beside the tiling, on rows CONTROLLER's
+windows have, steals its columns, each column once, and any other steals
+rows.  With none of CONTROLLER's windows on FRAME, a full-height foreign
+window is the one beside it.  Computed from frame-level measures (stable
+across the split, whether called before tiling from the controller's window
+or while tiled from a pane window), so the size never disagrees with itself
+and never forces a spurious re-tile."
   (let* ((char-h (max 1 (frame-char-height frame)))
          (windows (window-list frame 'no-mini))
          ;; The mode line's real pixel height, read from one of our own
@@ -10503,11 +10523,31 @@ forces a spurious re-tile."
          (rows (max 1 (floor (- (frame-inner-height frame)
                                 mini-h ml-h hl-h stacked)
                              char-h))))
-    (dolist (w windows)
-      (unless (tmux-control--our-tiling-window-p w controller)
-        (if (>= (window-total-height w) usable-rows)
-            (setq cols (- cols (window-total-width w)))     ; a side column
-          (setq rows (- rows (window-total-height w))))))    ; a top/bottom band
+    (let ((rows-of-ours
+           (and ours (let ((edges (mapcar #'window-edges ours)))
+                       (cons (apply #'min (mapcar #'cadr edges))
+                             (apply #'max (mapcar (lambda (e) (nth 3 e)) edges))))))
+          beside)
+      (dolist (w windows)
+        (unless (tmux-control--our-tiling-window-p w controller)
+          (let ((edges (window-edges w)))
+            (if (if rows-of-ours
+                    ;; Beside the tiling, on rows of its own: a column over
+                    ;; a band that spans the frame, as a sidebar over a
+                    ;; menu, is short of the frame's height.
+                    (and (< (nth 1 edges) (cdr rows-of-ours))
+                         (> (nth 3 edges) (car rows-of-ours)))
+                  (>= (window-total-height w) usable-rows))
+                (push (cons (car edges) (nth 2 edges)) beside)   ; a side column
+              (setq rows (- rows (window-total-height w)))))))  ; a top/bottom band
+      ;; The columns those take, each once, however the windows in them
+      ;; are split.
+      (let ((end 0))
+        (dolist (columns (sort beside (lambda (a b) (< (car a) (car b)))))
+          (let ((from (max (car columns) end)))
+            (when (> (cdr columns) from)
+              (setq cols (- cols (- (cdr columns) from))
+                    end (cdr columns)))))))
     (cons (max 1 (1- cols)) (max 1 rows))))
 
 (defun tmux-control--collapse-tile-windows (keep)
@@ -10912,9 +10952,7 @@ once the in-band window-state reply has been parsed."
                               ;; resize, so Eat reflows.
                               (unless tmux-control--pane-fed-live
                                 (setq seed t))
-                              (let ((inhibit-read-only t))
-                                (tmux-control--term-resize w h))
-                              (tmux-control--screen-on-its-own-line))))
+                              (tmux-control--resize-tiled-pane w h))))
                         ;; The fed-live skip is for the opening placement only.
                         ;; Clear it now so a LATER resize reseeds normally: by
                         ;; then the pane is quiescent (no seed/stream race), and

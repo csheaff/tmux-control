@@ -2990,6 +2990,47 @@ foreign-subtraction logic, which is display-independent."
       (kill-buffer ctrl-buf)
       (kill-buffer foreign-buf))))
 
+(ert-deftest tmux-control-test-tiled-region-size-beside-a-column-over-a-band ()
+  ;; A column beside the tiling, as a sidebar, and a band below both that
+  ;; spans the frame, as a menu: the column is no longer as tall as the
+  ;; frame, and was taken for a band too, its height off the rows rather
+  ;; than its width off the columns.  tmux was asked for a window one row
+  ;; high, which pushed the panes' screens into history.
+  (let ((ctrl-buf (generate-new-buffer " tc-test-ctrl"))
+        (foreign-buf (generate-new-buffer " tc-test-foreign")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (let ((cw (selected-window)))
+            (set-window-buffer cw ctrl-buf)
+            (set-window-buffer (split-window (frame-root-window) -6 'below) foreign-buf)
+            (set-window-buffer (split-window cw -20 'left) foreign-buf)
+            (let ((size (tmux-control--tiled-region-size (selected-frame) ctrl-buf)))
+              (should (= (car size) (1- (window-total-width cw))))
+              (should (>= (cdr size) (1- (window-body-height cw))))
+              (should (<= (cdr size) (window-body-height cw))))))
+      (kill-buffer ctrl-buf)
+      (kill-buffer foreign-buf))))
+
+(ert-deftest tmux-control-test-tiled-region-size-counts-a-split-column-once ()
+  ;; A column beside the tiling split into two windows side by side over a
+  ;; third: its columns come off once, not once a window.
+  (let ((ctrl-buf (generate-new-buffer " tc-test-ctrl"))
+        (foreign-buf (generate-new-buffer " tc-test-foreign")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (let* ((cw (selected-window))
+                 (column (split-window cw -30 'left)))
+            (set-window-buffer cw ctrl-buf)
+            (set-window-buffer column foreign-buf)
+            (set-window-buffer (split-window (split-window column nil 'below) nil 'right)
+                               foreign-buf)
+            (should (= (car (tmux-control--tiled-region-size (selected-frame) ctrl-buf))
+                       (1- (window-total-width cw))))))
+      (kill-buffer ctrl-buf)
+      (kill-buffer foreign-buf))))
+
 ;;; Pane-directory-aware file commands.
 
 (ert-deftest tmux-control-test-remote-file-method-honors-config ()
@@ -5652,6 +5693,77 @@ Batch Emacs lays out no window, so `posn-at-point' can't make one."
                   (should (= (window-total-width window)
                              (+ pane-width (if (eq leaf (car (last leaves))) 0 1)))))))
           (dolist (entry panes) (tmux-control--forget-pane-buffer (car entry))))))))
+
+(defun tmux-control-test--retile-shown-pane (lines cursor from to)
+  "Tile pane %1 at FROM, shown from its screen's top, then rebuild at TO.
+FROM and TO are (WIDTH . HEIGHT).  The pane shows LINES, its cursor at
+CURSOR, (X . Y), and the rebuild splits a pane %2 off beside it.  Return
+the window showing %1 once the build is done, before any seed paints.
+Call in the controller, which keeps the pane buffers for the caller to
+kill."
+  (delete-other-windows)
+  (let* ((controller (current-buffer))
+         (process (make-pipe-process :name "tc-retile" :buffer controller :noquery t))
+         (pane (tmux-control--make-pane-buffer
+                "%1" (list :w (car from) :h (cdr from)) controller
+                (list :process process :local-directory default-directory))))
+    (setq-local tmux-control--process process
+                tmux-control--tiled t
+                tmux-control--panes (list (cons "%1" pane)))
+    (with-current-buffer pane
+      (tmux-control--write-terminal
+       (tmux-control--screen-seed-sequence (string-join lines "\n") cursor))
+      (set-window-buffer (selected-window) pane)
+      (set-window-start (selected-window) (tmux-control--term-screen-start))
+      (set-window-point (selected-window) (tmux-control--term-cursor)))
+    (cl-letf (((symbol-function 'tmux-control--seed-pane-buffer-async) #'ignore)
+              ((symbol-function 'tmux-control--refresh-pane-window-map) #'ignore))
+      (tmux-control--build-tiling-apply
+       controller
+       (format "%dx%d,0,0{%dx%d,0,0,1,%dx%d,%d,0,2}"
+               (+ (car to) 1 (car to)) (cdr to) (car to) (cdr to)
+               (car to) (cdr to) (1+ (car to)))
+       (list (cons "%1" (list :left 0 :top 0))
+             (cons "%2" (list :left (1+ (car to)) :top 0)))))
+    (get-buffer-window pane)))
+
+(ert-deftest tmux-control-test-retile-narrower-keeps-a-shown-pane-on-its-screen ()
+  ;; A tiled pane on screen, made narrower by a new layout, is shown from
+  ;; the top of its new screen at once, not a round trip later when its
+  ;; seed paints.  tmux and the terminal rewrap its first row and push the
+  ;; row's first part into history, which the window went on showing above
+  ;; the screen.
+  (save-window-excursion
+    (with-temp-buffer
+      (tmux-control-mode)
+      (unwind-protect
+          (let ((window (tmux-control-test--retile-shown-pane
+                         (cons (make-string 34 ?a) (mapcar #'number-to-string (number-sequence 2 8)))
+                         '(1 . 7) '(40 . 8) '(30 . 8))))
+            (with-current-buffer (window-buffer window)
+              ;; Its first row's first 30 columns went into history.
+              (should (string-prefix-p "aaaa\n2\n" (tmux-control--term-screen-text)))
+              (should (= (window-start window) (tmux-control--term-screen-start)))))
+        (dolist (entry tmux-control--pane-buffers)
+          (tmux-control--forget-pane-buffer (car entry)))))))
+
+(ert-deftest tmux-control-test-retile-shorter-keeps-a-shown-pane-on-its-screen ()
+  ;; A tiled pane on screen, made shorter by a new layout, loses the rows
+  ;; below its cursor, as tmux has it.  The terminal pushed the screen's
+  ;; top rows into history instead, so until the pane's seed painted, the
+  ;; window showed them above a screen gone blank.
+  (save-window-excursion
+    (with-temp-buffer
+      (tmux-control-mode)
+      (unwind-protect
+          (let ((window (tmux-control-test--retile-shown-pane
+                         '("one" "two" "three" "" "" "" "" "") '(0 . 3) '(30 . 8) '(30 . 5))))
+            (with-current-buffer (window-buffer window)
+              (should (equal (tmux-control--term-screen-text) "one\ntwo\nthree\n"))
+              (should (= (window-start window) (tmux-control--term-screen-start)))))
+        (dolist (entry tmux-control--pane-buffers)
+          (tmux-control--forget-pane-buffer (car entry)))))))
+
 (ert-deftest tmux-control-test-tiles-put-the-tabs-over-the-top-row ()
   ;; A pane beside another over a third: the top-left window has the header
   ;; line with the tabs, the one beside it a blank one to stay in line, and
