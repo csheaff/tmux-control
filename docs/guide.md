@@ -677,10 +677,15 @@ drop a couple of volatile per-frame lines:
 
 ## High-volume output (flow control)
 
-Live `%output` is rendered in batches (one repaint per process-filter chunk),
-so a flood — `cat` on a large file, a noisy build, `yes` — streams without
-freezing Emacs.  The view still replays every line, so a very large burst
-takes a while to drain.
+A terminal that keeps receiving output is redrawn at most 30 times a
+second, all terminals in the same redraw, so a flood — `cat` on a large
+file, a noisy build, `yes`, several agents streaming at once — streams
+without keeping Emacs busy redrawing.  The first output after a quiet spell
+is drawn at once, and so is everything for half a second after you type a
+key into the terminal, so typing feels the same.  Set the pace with
+`tmux-control-redisplay-interval` (seconds; nil draws every chunk as it
+comes).  The view still replays every line, so a very large burst takes a
+while to drain.
 
 For an upper bound on that, enable tmux's control-mode flow control:
 

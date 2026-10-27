@@ -3769,6 +3769,136 @@ output), :calls (side-effect invocations in order), :active-pane,
       (should (equal (tmux-control-test--run-filter-chunked chunks)
                      reference)))))
 
+;;; Redraw pace: a streaming terminal is drawn on a shared timer.
+
+(defmacro tmux-control-test--with-paced-controller (&rest body)
+  "Run BODY in a controller with a real terminal and the real filter.
+`proc' is its connection.  The redraw timer never fires on its own:
+BODY runs `tmux-control--run-deferred-flushes' itself."
+  (declare (indent 0))
+  `(with-temp-buffer
+     (tmux-control-mode)
+     (let ((proc (make-pipe-process :name "tc-pace" :buffer (current-buffer)
+                                    :noquery t))
+           (tmux-control-window-buffers nil)
+           (tmux-control-redisplay-interval 60)
+           (tmux-control--deferred-flushes nil)
+           (tmux-control--deferred-flush-timer nil))
+       (unwind-protect
+           (cl-letf (((symbol-function 'tmux-control--note-pane-activity) #'ignore)
+                     ((symbol-function 'tmux-control--note-session-activity) #'ignore))
+             (setq tmux-control--process proc
+                   tmux-control--terminal (eat-term-make (current-buffer) (point-min))
+                   tmux-control--active-pane "%0")
+             (eat-term-resize tmux-control--terminal 40 5)
+             ,@body)
+         (when (timerp tmux-control--deferred-flush-timer)
+           (cancel-timer tmux-control--deferred-flush-timer))
+         (delete-process proc)
+         (eat-term-delete tmux-control--terminal)))))
+
+(defun tmux-control-test--shown-p (text)
+  "Return non-nil when the current buffer's terminal shows TEXT."
+  (string-search text (buffer-substring-no-properties (point-min) (point-max))))
+
+(ert-deftest tmux-control-test-streaming-output-waits-for-the-redraw-timer ()
+  ;; Drawing every chunk of a fast stream kept Emacs busy redrawing: output
+  ;; that keeps coming waits for the timer, which draws it all at once.
+  (tmux-control-test--with-paced-controller
+    (tmux-control--filter proc "%output %0 one\\015\\012\n")
+    (should (tmux-control-test--shown-p "one"))
+    (tmux-control--filter proc "%output %0 two\\015\\012\n")
+    (tmux-control--filter proc "%output %0 three\\015\\012\n")
+    (should-not (tmux-control-test--shown-p "two"))
+    (should (equal tmux-control--deferred-flushes (list (current-buffer))))
+    (should (timerp tmux-control--deferred-flush-timer))
+    (tmux-control--run-deferred-flushes)
+    (should (tmux-control-test--shown-p "two"))
+    (should (tmux-control-test--shown-p "three"))
+    (should-not tmux-control--deferred-flushes)
+    (should-not tmux-control--deferred-flush-timer)))
+
+(ert-deftest tmux-control-test-quiet-output-and-typing-draw-at-once ()
+  (tmux-control-test--with-paced-controller
+    (tmux-control--filter proc "%output %0 one\\015\\012\n")
+    ;; The first output after a quiet spell.
+    (setq tmux-control--last-chunk (- (float-time) 61))
+    (tmux-control--filter proc "%output %0 two\\015\\012\n")
+    (should (tmux-control-test--shown-p "two"))
+    ;; Output that keeps coming waits...
+    (tmux-control--filter proc "%output %0 three\\015\\012\n")
+    (should-not (tmux-control-test--shown-p "three"))
+    (tmux-control--run-deferred-flushes)
+    ;; ...unless a key was just typed: its echo is drawn as it comes, for
+    ;; a while after the key.
+    (setq tmux-control--echo-due (float-time))
+    (tmux-control--filter proc "%output %0 four\\015\\012\n")
+    (tmux-control--filter proc "%output %0 five\\015\\012\n")
+    (should (tmux-control-test--shown-p "five"))
+    (setq tmux-control--echo-due (- (float-time) tmux-control--echo-window 1))
+    (tmux-control--filter proc "%output %0 six\\015\\012\n")
+    (should-not (tmux-control-test--shown-p "six"))
+    (tmux-control--run-deferred-flushes)
+    ;; nil draws every chunk.
+    (let ((tmux-control-redisplay-interval nil))
+      (tmux-control--filter proc "%output %0 seven\\015\\012\n")
+      (should (tmux-control-test--shown-p "seven")))))
+
+(ert-deftest tmux-control-test-control-line-draws-held-output-first ()
+  ;; A reply, a resize or a seed that follows output in tmux's stream must
+  ;; find that output drawn, as when every chunk was drawn as it came: the
+  ;; controller's own, and a cached pane's held in that pane's buffer.
+  (tmux-control-test--with-paced-controller
+    (let ((pane (generate-new-buffer " *tc-pace-pane*"))
+          seen)
+      (cl-flet ((reply-checks (check)
+                  (setq seen nil
+                        tmux-control--command-queue
+                        (list (cons (lambda (_lines) (setq seen (funcall check))) nil)))
+                  (tmux-control--filter proc "%begin 1 1 0\n%end 1 1 0\n")
+                  seen))
+        (unwind-protect
+            (progn
+              (with-current-buffer pane
+                (tmux-control-mode)
+                (setq tmux-control--terminal (eat-term-make pane (point-min)))
+                (eat-term-resize tmux-control--terminal 40 5))
+              (setq tmux-control--pane-buffers (list (cons "%1" pane)))
+              (tmux-control--filter proc "%output %0 one\\015\\012\n")
+              (tmux-control--filter proc "%output %0 two\\015\\012\n")
+              (should-not (tmux-control-test--shown-p "two"))
+              (should (reply-checks (lambda () (tmux-control-test--shown-p "two"))))
+              (should-not tmux-control--deferred-flushes)
+              ;; Only the pane has output waiting.
+              (tmux-control--filter proc "%output %1 pane-two\\015\\012\n")
+              (should (memq (current-buffer) tmux-control--deferred-flushes))
+              (should (reply-checks
+                       (lambda () (with-current-buffer pane
+                                    (tmux-control-test--shown-p "pane-two")))))
+              (should-not tmux-control--deferred-flushes))
+          (setq tmux-control--pane-buffers nil)
+          (with-current-buffer pane (eat-term-delete tmux-control--terminal))
+          (kill-buffer pane))))))
+
+(ert-deftest tmux-control-test-repaint-draws-held-output-first ()
+  ;; Held output drawn after a repaint would be drawn over it.
+  (tmux-control-test--with-paced-controller
+    (tmux-control--filter proc "%output %0 one\\015\\012\n")
+    (tmux-control--filter proc "%output %0 two\\015\\012\n")
+    (tmux-control--write-terminal "\e[H\e[2JSEED")
+    (should-not tmux-control--deferred-flushes)
+    (let ((after-repaint (buffer-string)))
+      (tmux-control--run-deferred-flushes)
+      (should (equal (buffer-string) after-repaint)))))
+
+(ert-deftest tmux-control-test-typing-marks-its-echo-due ()
+  (tmux-control-test--with-paced-controller
+    (cl-letf (((symbol-function 'tmux-control--send-command) #'ignore)
+              ((symbol-function 'tmux-control--ensure-input-ready) #'ignore))
+      (setq tmux-control--echo-due nil)
+      (tmux-control--send-input tmux-control--terminal "x")
+      (should tmux-control--echo-due))))
+
 ;;; Per-window render buffers.
 
 (ert-deftest tmux-control-test-arrival-verifies-live-screen ()
@@ -3989,11 +4119,10 @@ killed with it."
                              (lambda () (push 'panes flushed)))
                             ((symbol-function 'tmux-control--flush-window-buffers)
                              (lambda () (push 'windows flushed))))
-                    (tmux-control--batch-pane-output "%0" "tiled")
-                    (tmux-control--batch-pane-output "%1" "behind")
-                    (tmux-control--batch-pane-output "%2" "nobody's")
-                    (tmux-control--batch-pane-output "%4" "cached")
-                    (tmux-control--filter proc "%continue %1\n"))
+                    (tmux-control--filter
+                     proc (concat "%output %0 tiled\n" "%output %1 behind\n"
+                                  "%output %2 nobody's\n" "%output %4 cached\n"
+                                  "%continue %1\n")))
                   (should (equal (buffer-local-value 'tmux-control--output-batch tile) '("tiled")))
                   (should (equal (buffer-local-value 'tmux-control--output-batch shown) '("tiled")))
                   (should (equal (buffer-local-value 'tmux-control--output-batch window) '("behind")))

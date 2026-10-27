@@ -1174,6 +1174,53 @@ initial+extend instead of initial)."
            (kill-buffer controller))
          (tmux-control-it--tmux-ok "kill-server")))))
 
+(ert-deftest tmux-control-it-stream-redraws-at-the-redisplay-pace ()
+  "A pane printing a line every few milliseconds, as an agent at work
+does, is drawn about 1/`tmux-control-redisplay-interval' times a second,
+not once a chunk, and its view still ends on tmux's screen with its
+window following."
+  (skip-unless (executable-find "python3"))
+  ;; Emacs would otherwise wait to read a connection that sends little at
+  ;; a time, gathering lines into a chunk.
+  (let ((process-adaptive-read-buffering nil))
+   (tmux-control-it--with-session
+    (let* ((redraws 0) (chunks 0)
+           (count-redraw (lambda (&rest _) (setq redraws (1+ redraws))))
+           (count-chunk (lambda (&rest _) (setq chunks (1+ chunks))))
+           start elapsed)
+      (advice-add 'tmux-control--term-redisplay :before count-redraw)
+      (advice-add 'tmux-control--filter :before count-chunk)
+      (unwind-protect
+          (progn
+            (setq start (float-time))
+            ;; 500 lines a second.  Not "FLOOD-2" itself in the command:
+            ;; the shell echoes it first.
+            (tmux-control-it--tmux
+             "send-keys" "-t" "t"
+             (concat "python3 -c \"import time; [(print('LINE-%d' % i, flush=True), "
+                     "time.sleep(0.002)) for i in range(1500)]; print('FLOOD-%d' % 2)\"")
+             "Enter")
+            (should (tmux-control-it--pump-until
+                     60 (lambda () (string-search
+                                    "FLOOD-2" (tmux-control-it--buffer-text controller)))))
+            (setq elapsed (- (float-time) start))
+            (message "stream: %d chunks, %d redraws in %.1f s" chunks redraws elapsed)
+            ;; A timer's redraw and the next chunk's, after a quiet spell,
+            ;; can come close together: allow twice the pace.
+            (should (<= redraws (+ 5 (* (/ 2.0 tmux-control-redisplay-interval) elapsed))))
+            (let ((h (string-to-number
+                      (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" pane
+                                                          "#{pane_height}")))))
+              (should (tmux-control-it--pump-until
+                       3 (lambda ()
+                           (equal (tmux-control-it--buffer-visible controller h)
+                                  (tmux-control-it--capture-lines pane))))))
+            (when-let* ((window (get-buffer-window controller)))
+              (with-current-buffer controller
+                (should (= (window-point window) (tmux-control--term-cursor))))))
+        (advice-remove 'tmux-control--term-redisplay count-redraw)
+        (advice-remove 'tmux-control--filter count-chunk))))))
+
 (ert-deftest tmux-control-it-same-session-on-different-sockets ()
   (tmux-control-it--with-session
     (let* ((other-socket (concat tmux-control-it--socket "-other"))
