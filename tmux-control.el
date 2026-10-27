@@ -842,14 +842,22 @@ the application (see `tmux-control-wheel-scroll').")
 (defconst tmux-control--pane-modes-format
   (concat "#{alternate_on},#{mouse_standard_flag},#{mouse_button_flag},"
           "#{mouse_all_flag},#{mouse_sgr_flag},#{keypad_cursor_flag},"
-          "#{wrap_flag}")
+          "#{wrap_flag},#{scroll_region_upper},#{scroll_region_lower},"
+          "#{pane_height}")
   "Format string folding a pane's terminal-mode flags into one reply field.
 Comma-separated so the whole state rides a single field of a
 `display-message'/`list-panes' reply; parse it with
 `tmux-control--parse-pane-modes'.  These are the DECSET modes tmux tracks
 per pane that Eat both understands and acts on: the alternate screen
 \(1049), the three mouse-tracking protocols (1000/1002/1003) with the SGR
-encoding (1006), application cursor keys (DECCKM), and autowrap (DECAWM).")
+encoding (1006), application cursor keys (DECCKM), and autowrap (DECAWM);
+then the scroll region (DECSTBM), with the pane's height to tell a
+region of the whole screen.")
+(defconst tmux-control--pane-modes-regexp
+  "\\`[01]?\\(?:,[01]?\\)\\{6\\}\\(?:,[0-9]*,[0-9]*,[0-9]*\\)?\\'"
+  "Regexp matching a `tmux-control--pane-modes-format' field.
+Its scroll region and height are optional: an older tmux-control asked
+for the seven flags alone.")
 (defvar-local tmux-control--capture-trailing-p nil
   "Non-nil when the connected tmux supports `capture-pane -N' (3.1+).
 With it, the screen seed preserves trailing background cells so full-width
@@ -3529,9 +3537,7 @@ two arbitrary fields without shifting columns."
          (mode-offset
           (cl-position-if
            (lambda (field)
-             (string-match-p
-              "\\`[01]?,[01]?,[01]?,[01]?,[01]?,[01]?,[01]?\\'"
-              field))
+             (string-match-p tmux-control--pane-modes-regexp field))
            mode-tail))
          (mode-index (if mode-offset (+ 11 mode-offset)
                        (and (>= (length parts) 13) 11))))
@@ -7125,7 +7131,7 @@ swallowed as content and the reply queue would desynchronize."
       (:capture
        ;; History printed while the pane was paused out of sight goes
        ;; first, before a mode replay can leave the normal screen.
-       (tmux-control--write-missed-history)
+       (tmux-control--write-missed-history tmux-control--seed-modes)
        ;; Mode replay first: entering the alternate display clears it,
        ;; and the screen paint that follows fills it in.
        (tmux-control--write-seed
@@ -7439,6 +7445,24 @@ historical drift at the next natural seed, whatever its cause."
 ;; pane printed meanwhile and a repaint of its screen, then tmux
 ;; continues it.
 
+(defvar tmux-control--command-batch nil
+  "While `tmux-control--with-one-write' runs, (PROCESS . LINES) to write.")
+
+(defmacro tmux-control--with-one-write (&rest body)
+  "Run BODY, writing the commands it sends this buffer's tmux in one go.
+tmux runs the commands it reads together before it reads any pane's
+output again, so their replies describe one moment: a pane printing
+meanwhile cannot move a row between one capture and the next.  Each
+stays a line of its own, so one that fails does not take the others
+with it."
+  (declare (indent 0) (debug t))
+  `(let ((tmux-control--command-batch (list tmux-control--process)))
+     (unwind-protect (progn ,@body)
+       (let ((process (car tmux-control--command-batch))
+             (lines (cdr tmux-control--command-batch)))
+         (when (and lines (process-live-p process))
+           (process-send-string process (apply #'concat (nreverse lines))))))))
+
 (defconst tmux-control--hidden-delay 1.0
   "Seconds a terminal stays out of sight before tmux pauses it.
 Long enough that passing through a buffer, or a window shown for a
@@ -7573,20 +7597,21 @@ from when shown again."
         (size nil))
     (setq tmux-control--hidden-pane pane
           tmux-control--hidden-tail tail)
-    (tmux-control--send-command
-     (format "refresh-client -A %s"
-             (tmux-control--quote-tmux-arg (concat pane ":pause"))))
-    (tmux-control--query (tmux-control--history-size-command pane)
-                         (lambda (lines)
-                           (setq size (tmux-control--parse-history-size lines))))
-    (tmux-control--query (tmux-control--history-rows-command
-                          pane tmux-control--hidden-tail-rows)
-                         (lambda (rows)
-                           (setcar tail (if (and rows size)
-                                            (cons size
-                                                  (last rows (min (car size)
-                                                                  (length rows))))
-                                          :failed))))))
+    (tmux-control--with-one-write
+      (tmux-control--send-command
+       (format "refresh-client -A %s"
+               (tmux-control--quote-tmux-arg (concat pane ":pause"))))
+      (tmux-control--query (tmux-control--history-size-command pane)
+                           (lambda (lines)
+                             (setq size (tmux-control--parse-history-size lines))))
+      (tmux-control--query (tmux-control--history-rows-command
+                            pane tmux-control--hidden-tail-rows)
+                           (lambda (rows)
+                             (setcar tail (if (and rows size)
+                                              (cons size
+                                                    (last rows (min (car size)
+                                                                    (length rows))))
+                                            :failed)))))))
 
 (defun tmux-control--resume-hidden ()
   "Continue the pane this buffer paused while out of sight, and repaint it.
@@ -7597,11 +7622,14 @@ paused is added first, for the repaint to bring."
     (setq tmux-control--hidden-pane nil
           tmux-control--hidden-tail nil)
     (when (process-live-p tmux-control--process)
-      (when (and tail
-                 (equal pane tmux-control--active-pane)
-                 (not tmux-control--tiled))
-        (tmux-control--fetch-missed-history pane tail))
-      (tmux-control--resync-paused-pane pane))))
+      ;; The history and the screen from one moment, so no row printed
+      ;; meanwhile falls between them.
+      (tmux-control--with-one-write
+        (when (and tail
+                   (equal pane tmux-control--active-pane)
+                   (not tmux-control--tiled))
+          (tmux-control--fetch-missed-history pane tail))
+        (tmux-control--resync-paused-pane pane)))))
 
 (defun tmux-control--fetch-missed-history (pane tail)
   "Ask tmux for the rows PANE added to its history after TAIL.
@@ -7683,19 +7711,23 @@ up into history, leaving the screen blank for the repaint that follows."
           (mapconcat (lambda (row) (concat row "\e[m")) rows "\r\n")
           (apply #'concat (make-list height "\r\n"))))
 
-(defun tmux-control--write-missed-history ()
+(defun tmux-control--write-missed-history (modes)
   "Add the history waiting for the active pane to the terminal's own.
-Only on the normal screen, scrolling as a whole: rows written elsewhere
-would not reach the history.  Run before a screen seed paints."
+Only on the normal screen, and scrolling it as a whole, since rows
+written elsewhere would not reach the history: a narrower scroll region
+is widened when the seed's MODES, replayed next, restore the pane's.
+Run before a screen seed paints."
   (when-let* ((waiting tmux-control--seed-history))
     (setq tmux-control--seed-history nil)
     (when (and (equal (car waiting) tmux-control--active-pane)
                (tmux-control--term-live-p)
-               (not (tmux-control--term-alt-screen-p))
-               (tmux-control--term-scrolls-whole-screen-p))
-      (tmux-control--write-terminal
-       (tmux-control--history-fill-sequence
-        (cdr waiting) (cdr (tmux-control--term-size)))))))
+               (not (tmux-control--term-alt-screen-p)))
+      (let ((whole (tmux-control--term-scrolls-whole-screen-p)))
+        (when (or whole (plist-get modes :scroll-region))
+          (tmux-control--write-terminal
+           (concat (unless whole "\e[r")
+                   (tmux-control--history-fill-sequence
+                    (cdr waiting) (cdr (tmux-control--term-size))))))))))
 
 (defun tmux-control--follow-hidden-pane ()
   "Continue a pane paused out of sight once it is not this buffer's own.
@@ -9123,8 +9155,10 @@ so every reply stays matched to the right handler on one queue."
           (when (eq kind :input)
             (setq tmux-control--echo-due (float-time)))
           (tmux-control--arm-command-watchdog)
-          (process-send-string tmux-control--process
-                               (concat command "\n")))))))
+          (if (eq (car-safe tmux-control--command-batch) tmux-control--process)
+              (push (concat command "\n") (cdr tmux-control--command-batch))
+            (process-send-string tmux-control--process
+                                 (concat command "\n"))))))))
 
 (defun tmux-control--arm-command-watchdog ()
   "Schedule a check that the oldest pending command gets its reply in time.
@@ -9476,17 +9510,33 @@ Return a plist mapping :alt-screen :mouse-standard :mouse-button
 :mouse-all :mouse-sgr :cursor-keys :wrap each to `:on', `:off', or nil
 when that flag is missing from the reply (an older tmux renders an
 unknown format variable as empty; nil makes the replay leave that mode
-alone rather than reset a state it does not actually know).  Return nil
-when no well-formed field is found.  Pure: no side effects, for unit
-testing the seed mode query."
+alone rather than reset a state it does not actually know).
+:scroll-region is `:full' for a region of the whole screen, (TOP .
+BOTTOM) rows counted from 0 for a narrower one, or nil when unknown --
+as it is in a reply of the seven flags alone.  Return nil when no
+well-formed field is found.  Pure: no side effects, for unit testing the
+seed mode query."
   (let ((val (car (cl-remove-if #'string-empty-p
                                 (mapcar #'string-trim output)))))
-    (when (and val (string-match-p "\\`[01]?\\(?:,[01]?\\)\\{6\\}\\'" val))
-      (cl-mapcan (lambda (key flag)
-                   (list key (pcase flag ("1" :on) ("0" :off) (_ nil))))
-                 '(:alt-screen :mouse-standard :mouse-button :mouse-all
-                   :mouse-sgr :cursor-keys :wrap)
-                 (split-string val ",")))))
+    (when (and val (string-match-p tmux-control--pane-modes-regexp val))
+      (let* ((fields (split-string val ","))
+             (region (mapcar (lambda (n) (and (string-match-p "\\`[0-9]+\\'" n)
+                                              (string-to-number n)))
+                             (nthcdr 7 fields)))
+             (top (nth 0 region))
+             (bottom (nth 1 region))
+             (height (nth 2 region)))
+        (append
+         (cl-mapcan (lambda (key flag)
+                      (list key (pcase flag ("1" :on) ("0" :off) (_ nil))))
+                    '(:alt-screen :mouse-standard :mouse-button :mouse-all
+                      :mouse-sgr :cursor-keys :wrap)
+                    (seq-take fields 7))
+         (list :scroll-region
+               (and top bottom height (< top bottom height)
+                    (if (and (= top 0) (= bottom (1- height)))
+                        :full
+                      (cons top bottom)))))))))
 
 (defun tmux-control--mode-seed-sequence (modes)
   "Return terminal escapes replaying pane MODES into Eat.
@@ -9527,7 +9577,13 @@ Pure, for unit testing."
        (:off "\e[?1l"))
      (pcase (plist-get modes :wrap)
        (:on "\e[?7h")
-       (:off "\e[?7l")))))
+       (:off "\e[?7l"))
+     ;; A program can narrow the scroll region and keep it while Eat is
+     ;; not watching; then line feeds would scroll other rows in Eat than
+     ;; in tmux.  Setting it moves the cursor, which the paint places.
+     (pcase (plist-get modes :scroll-region)
+       (:full "\e[r")
+       (`(,top . ,bottom) (format "\e[%d;%dr" (1+ top) (1+ bottom)))))))
 
 (defun tmux-control--version-at-least-p (version major minor)
   "Return non-nil when tmux VERSION is MAJOR.MINOR or later.
@@ -10824,7 +10880,7 @@ Used by the in-band pane seed path."
         (setq tmux-control--seed-cursor-visible (or cursor-visible :unknown))
         ;; History printed while the pane was paused out of sight, for a
         ;; buffer kept from a tiled view.
-        (tmux-control--write-missed-history)
+        (tmux-control--write-missed-history modes)
         ;; Repaint only the live screen.  Clearing history here made every
         ;; resize/reseed discard output the user had already accumulated.
         (tmux-control--write-seed

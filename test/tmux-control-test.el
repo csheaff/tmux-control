@@ -1125,6 +1125,17 @@ each wrapped in an evolving prompt line and a status bar.")
   ;; Malformed or empty replies yield nil rather than a bogus mode set.
   (should-not (tmux-control--parse-pane-modes '("1,0,0,1,1,0"))) ; six flags
   (should-not (tmux-control--parse-pane-modes '("1,0,0,1,1,0,1,0"))) ; eight
+  ;; The scroll region, with the pane's height to tell the whole screen.
+  (should (eq :full (plist-get (tmux-control--parse-pane-modes '("0,0,0,0,0,0,1,0,23,24"))
+                               :scroll-region)))
+  (should (equal '(2 . 20) (plist-get (tmux-control--parse-pane-modes
+                                       '("0,0,0,0,0,0,1,2,20,24"))
+                                      :scroll-region)))
+  ;; Seven flags alone, from an older client, or a region unknown.
+  (should (eq :on (plist-get (tmux-control--parse-pane-modes '("0,0,0,0,0,0,1")) :wrap)))
+  (should-not (plist-get (tmux-control--parse-pane-modes '("0,0,0,0,0,0,1")) :scroll-region))
+  (should-not (plist-get (tmux-control--parse-pane-modes '("0,0,0,0,0,0,1,,,24"))
+                         :scroll-region))
   (should-not (tmux-control--parse-pane-modes '("can't find pane")))
   (should-not (tmux-control--parse-pane-modes '("")))
   (should-not (tmux-control--parse-pane-modes nil)))
@@ -1161,7 +1172,28 @@ each wrapped in an evolving prompt line and a status bar.")
                                        (tmux-control--parse-pane-modes
                                         '("0,0,,0,0,0,1")))))
   ;; No modes at all (query failed): nil, so the seed paints contents only.
-  (should-not (tmux-control--mode-seed-sequence nil)))
+  (should-not (tmux-control--mode-seed-sequence nil))
+  ;; A scroll region set while Eat was not watching is restored, and one
+  ;; of the whole screen resets Eat's.
+  (should (string-suffix-p "\e[3;21r" (tmux-control--mode-seed-sequence
+                                       (tmux-control--parse-pane-modes
+                                        '("0,0,0,0,0,0,1,2,20,24")))))
+  (should (string-suffix-p "\e[r" (tmux-control--mode-seed-sequence
+                                   (tmux-control--parse-pane-modes
+                                    '("0,0,0,0,0,0,1,0,23,24"))))))
+
+(ert-deftest tmux-control-test-parse-window-state-modes-with-scroll-region ()
+  ;; The modes field with its scroll region is still found among fields
+  ;; whose text can hold the separator.
+  (let* ((sep tmux-control--field-separator)
+         (line (mapconcat #'identity
+                          (list "LAY" "%8" "0" "0" "80" "24" "1" "5" "6" "1"
+                                (concat "cmd" sep "part")
+                                "0,0,0,0,0,0,1,2,20,24" "title")
+                          sep))
+         (p (cdr (assoc "%8" (cdr (tmux-control--parse-window-state (list line)))))))
+    (should (equal (plist-get p :cmd) (concat "cmd" sep "part")))
+    (should (equal (plist-get (plist-get p :modes) :scroll-region) '(2 . 20)))))
 
 (ert-deftest tmux-control-test-capture-n-supported-p ()
   ;; capture-pane -N landed in tmux 3.1.
@@ -9387,7 +9419,7 @@ buffer.  The pause timer is cancelled afterwards."
             (eat-term-resize term 20 3)
             (tmux-control--write-terminal "h1\r\nh2\r\ns1\r\ns2\r\ns3")
             (setq tmux-control--seed-history '("%3" "\e[31mn1\e[39m" "n2"))
-            (tmux-control--write-missed-history)
+            (tmux-control--write-missed-history nil)
             (tmux-control--write-terminal seed)
             (should-not tmux-control--seed-history)
             (should (equal (string-trim-right
@@ -9398,15 +9430,76 @@ buffer.  The pause timer is cancelled afterwards."
             (should (get-text-property (match-beginning 0) 'face))
             ;; Another pane's rows, or the alternate screen: nothing added.
             (setq tmux-control--seed-history '("%9" "x1"))
-            (tmux-control--write-missed-history)
+            (tmux-control--write-missed-history nil)
             (tmux-control--write-terminal "\e[?1049h")
             (setq tmux-control--seed-history '("%3" "x2"))
-            (tmux-control--write-missed-history)
+            (tmux-control--write-missed-history nil)
             (should-not tmux-control--seed-history)
             (tmux-control--write-terminal "\e[?1049l")
             (should-not (string-search "x" (buffer-substring-no-properties
                                             (point-min) (point-max)))))
         (eat-term-delete term)))))
+
+(ert-deftest tmux-control-test-missed-history-widens-a-narrow-scroll-region ()
+  ;; With a narrower scroll region, rows written would not reach the
+  ;; history: the region is widened for them when the seed restores the
+  ;; pane's own, and they are dropped when it cannot.
+  (with-temp-buffer
+    (tmux-control-mode)
+    (let ((term (eat-term-make (current-buffer) (point-min))))
+      (unwind-protect
+          (progn
+            (setq tmux-control--terminal term
+                  tmux-control--active-pane "%3")
+            (eat-term-resize term 20 3)
+            (tmux-control--write-terminal "h1\r\nh2\r\ns1\r\ns2\r\ns3\e[1;2r")
+            (setq tmux-control--seed-history '("%3" "x1"))
+            (tmux-control--write-missed-history '(:wrap :on))
+            (should-not (string-search "x1" (buffer-string)))
+            (setq tmux-control--seed-history '("%3" "n1"))
+            (tmux-control--write-missed-history '(:scroll-region :full))
+            (tmux-control--write-terminal "\e[r\e[H\e[2J\e[1;1Hc1\e[2;1Hc2\e[3;1Hc3")
+            (should (equal (string-trim-right
+                            (buffer-substring-no-properties (point-min) (point-max)))
+                           "h1\nh2\nn1\nc1\nc2\nc3")))
+        (eat-term-delete term)))))
+
+(ert-deftest tmux-control-test-hidden-terminal-snapshots-go-in-one-write ()
+  ;; tmux runs the commands it reads together before reading pane output
+  ;; again: the pause with its history query, and the return's history
+  ;; with the seed that paints the screen, each go in one write.
+  (tmux-control-test--with-controller " *tc-one-write*"
+    (let ((tmux-control-pause-hidden t)
+          (tmux-control-session-activity nil)
+          (tmux-control-window-tab-bar nil)
+          writes)
+      (setq tmux-control--active-pane "%3"
+            tmux-control--server-version "3.6a")
+      (unwind-protect
+          (cl-letf (((symbol-function 'process-send-string)
+                     (lambda (_process string) (push string writes))))
+            (tmux-control--update-hidden-terminals t)
+            (should (= (length writes) 1))
+            (should (equal (split-string (car writes) "\n" t)
+                           '("refresh-client -A \"%3:pause\""
+                             "display-message -p -t %3 '#{history_size} #{pane_width}'"
+                             "capture-pane -p -e -S -20 -E -1 -t %3")))
+            (setq writes nil)
+            (save-window-excursion
+              (switch-to-buffer ctrl)
+              (tmux-control--hidden-windows-changed))
+            (should (= (length writes) 1))
+            (let ((lines (split-string (car writes) "\n" t)))
+              (should (equal (seq-take lines 2)
+                             '("display-message -p -t %3 '#{history_size} #{pane_width}'"
+                               "capture-pane -p -e -S -2000 -E -1 -t %3")))
+              (should (seq-some (lambda (line) (string-prefix-p "capture-pane -p -e -t %3" line))
+                                lines))
+              (should (equal (car (last lines)) "refresh-client -A \"%3:continue\""))))
+        (setq tmux-control--command-queue nil)
+        (when (timerp tmux-control--hidden-timer)
+          (cancel-timer tmux-control--hidden-timer))
+        (setq tmux-control--hidden-timer nil)))))
 
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

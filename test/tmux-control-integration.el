@@ -1277,6 +1277,46 @@ every line printed meanwhile, once."
                                              (equal want (string-trim-right line)))))))))
       (kill-buffer other))))
 
+(ert-deftest tmux-control-it-hidden-terminal-comes-back-with-its-scroll-region ()
+  "A scroll region the program set while its terminal was paused out of
+sight is the terminal's when it is shown again, so line feeds scroll the
+same rows in Eat as in tmux."
+  (skip-unless (and (tmux-control-it--available-p)
+                    (tmux-control--version-at-least-p
+                     (with-temp-buffer
+                       (call-process "tmux" nil t nil "-V")
+                       (buffer-string))
+                     3 2)))
+  (let ((tmux-control-pause-hidden t)
+        (tmux-control-session-activity nil)
+        (other (get-buffer-create " *tc-it-other*"))
+        window)
+    (unwind-protect
+        (tmux-control-it--with-session
+          (delete-other-windows)
+          (setq window (selected-window))
+          (set-window-buffer window controller)
+          (tmux-control-it--pump 0.5)
+          (set-window-buffer window other)
+          (tmux-control--pause-hidden-now)
+          (should (buffer-local-value 'tmux-control--hidden-pane controller))
+          (tmux-control-it--tmux "send-keys" "-t" "t" "printf '\\033[3;10r'; echo REGION-SET" "Enter")
+          (should (tmux-control-it--pump-until
+                   5 (lambda () (equal (string-trim
+                                        (tmux-control-it--tmux "display-message" "-p" "-t" pane
+                                                               "#{scroll_region_upper},#{scroll_region_lower}"))
+                                       "2,9"))))
+          (set-window-buffer window controller)
+          (tmux-control--hidden-windows-changed)
+          (should (tmux-control-it--pump-until
+                   5 (lambda ()
+                       (with-current-buffer controller
+                         (and (string-search "REGION-SET" (tmux-control-it--buffer-text controller))
+                              (equal (cons (eat--t-term-scroll-begin tmux-control--terminal)
+                                           (eat--t-term-scroll-end tmux-control--terminal))
+                                     '(3 . 10))))))))
+      (kill-buffer other))))
+
 (ert-deftest tmux-control-it-same-session-on-different-sockets ()
   (tmux-control-it--with-session
     (let* ((other-socket (concat tmux-control-it--socket "-other"))
