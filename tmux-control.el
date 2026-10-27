@@ -172,6 +172,17 @@ Must be a positive integer.  Counts allocations across Emacs, not just
 tmux-control, and is not a byte limit.  Used by `tmux-control-idle-gc-mode'."
   :type 'integer)
 
+(defcustom tmux-control-redisplay-interval (/ 1.0 30)
+  "Seconds between redraws of a terminal that keeps receiving output, or nil.
+A terminal streaming output is drawn at most once in this time, all
+terminals together: Emacs pays for each redraw cycle of a frame, so
+drawing every chunk of a fast stream kept it busy redrawing.  The
+first output after a quiet spell of this length is drawn at once, and
+so is all output for half a second after a key is typed into the
+terminal, so typing is not slowed.  nil draws every chunk as it comes."
+  :type '(choice (const :tag "Draw every chunk" nil)
+                 (number :tag "Seconds")))
+
 (defcustom tmux-control-pause-after nil
   "Enable tmux control-mode flow control after this many seconds, or nil.
 
@@ -1084,7 +1095,9 @@ the limit (see `tmux-control--term-set-history-limit') is dropped."
   (eat-term-size tmux-control--terminal))
 
 (defun tmux-control--term-resize (width height)
-  "Resize the terminal to WIDTH columns by HEIGHT rows."
+  "Resize the terminal to WIDTH columns by HEIGHT rows.
+Output held for the redraw timer is drawn first, at the size it came at."
+  (tmux-control--flush-deferred)
   (eat-term-resize tmux-control--terminal width height))
 
 (defun tmux-control--term-cursor ()
@@ -2819,6 +2832,8 @@ duplicate."
   (tmux-control--ensure-live)
   (unless (tmux-control--term-live-p)
     (user-error "No live tmux-control terminal in this buffer"))
+  ;; Held output could scroll rows into the history cleared here.
+  (tmux-control--flush-deferred)
   (let ((beg (tmux-control--term-screen-start))
         (end (tmux-control--term-end))
         (inhibit-read-only t))
@@ -6430,6 +6445,23 @@ when LEFT contains thousands of older history lines."
   "Collapse runs of more than two blank lines in TEXT."
   (replace-regexp-in-string "\\(?:[[:blank:]]*\n\\)\\{3,\\}" "\n\n" text))
 
+(defvar-local tmux-control--last-chunk 0.0
+  "When this controller last received a chunk with output in it.")
+(defvar-local tmux-control--echo-due nil
+  "When a key was last sent from this controller, or nil.
+For `tmux-control--echo-window' seconds after a key, output is drawn as
+it comes, so its echo is not held for the redraw timer.")
+(defconst tmux-control--echo-window 0.5
+  "Seconds after a key in which output is drawn as it comes.
+An echo can come a chunk or two after the key, behind other output,
+and over SSH a round trip later.")
+(defvar tmux-control--chunk-output nil
+  "Non-nil once the chunk the filter is reading has had pane output.")
+(defvar tmux-control--deferred-flushes nil
+  "Controllers whose output waits for the shared redraw timer.")
+(defvar tmux-control--deferred-flush-timer nil
+  "The shared redraw timer, or nil.")
+
 (defun tmux-control--filter (process chunk)
   "Handle tmux control mode output CHUNK from PROCESS."
   (when (buffer-live-p (process-buffer process))
@@ -6447,9 +6479,7 @@ when LEFT contains thousands of older history lines."
         (setq tmux-control--accumulator ""))
       (let ((start 0)
             line-end
-            ;; Capture follow-windows before any output is fed this pass, so
-            ;; windows tracking the live cursor are identified before it moves.
-            (sync-windows (tmux-control--current-sync-windows)))
+            (tmux-control--chunk-output nil))
         (while (setq line-end (string-match "\n" tmux-control--accumulator start))
           (let ((line (substring tmux-control--accumulator start line-end)))
             (when (and (> (length line) 0)
@@ -6459,23 +6489,19 @@ when LEFT contains thousands of older history lines."
           (setq start (1+ line-end)))
         (setq tmux-control--accumulator
               (substring tmux-control--accumulator start))
-        ;; Feed any output still batched at the end of the chunk, then do a
-        ;; single redisplay -- not one per %output message.  In tiling mode
-        ;; the controller renders nothing itself; it flushes each pane's
-        ;; render buffer instead.
-        (if tmux-control--tiled
-            (progn
-              (tmux-control--flush-tiled-panes)
-              (when tmux-control-window-buffers
-                (tmux-control--flush-window-buffers)))
-          (tmux-control--flush-output-batch)
-          (tmux-control--flush-display sync-windows)
-          ;; Per-window render buffers stream in the background; flush
-          ;; whichever of them accumulated output this chunk.
-          (when tmux-control-window-buffers
-            (tmux-control--flush-window-buffers))
-          (when tmux-control--pane-buffers
-            (tmux-control--flush-tiled-panes)))
+        ;; Draw now the first output after a quiet spell and the echo of a
+        ;; key; output that keeps coming waits for the shared redraw timer,
+        ;; so a streaming terminal redraws at most
+        ;; 1/`tmux-control-redisplay-interval' times a second.
+        (when tmux-control--chunk-output
+          (let ((now (float-time)))
+            (if (or (null tmux-control-redisplay-interval)
+                    (and tmux-control--echo-due
+                         (< (- now tmux-control--echo-due) tmux-control--echo-window))
+                    (> (- now tmux-control--last-chunk) tmux-control-redisplay-interval))
+                (tmux-control--flush-chunk)
+              (tmux-control--defer-flush (current-buffer)))
+            (setq tmux-control--last-chunk now)))
         ;; A %layout-change seen this chunk asked for a re-tile.  Debounce it
         ;; off the filter -- re-tiling makes blocking (possibly SSH) tmux
         ;; queries, so running it inline would freeze Emacs on every layout
@@ -6483,6 +6509,63 @@ when LEFT contains thousands of older history lines."
         (when tmux-control--retile-pending
           (setq tmux-control--retile-pending nil)
           (tmux-control--schedule-retile (current-buffer)))))))
+
+(defun tmux-control--flush-chunk ()
+  "Feed the controller's batched output to its terminals and redraw them."
+  (setq tmux-control--deferred-flushes
+        (delq (current-buffer) tmux-control--deferred-flushes))
+  ;; Nothing is fed between redraws, so the windows following the cursor
+  ;; now are those that followed it before this output.
+  (let ((sync-windows (tmux-control--current-sync-windows)))
+    ;; Feed any output still batched, then do a single redisplay -- not
+    ;; one per %output message.  In tiling mode the controller renders
+    ;; nothing itself; it flushes each pane's render buffer instead.
+    (if tmux-control--tiled
+        (progn
+          (tmux-control--flush-tiled-panes)
+          (when tmux-control-window-buffers
+            (tmux-control--flush-window-buffers)))
+      (tmux-control--flush-output-batch)
+      (tmux-control--flush-display sync-windows)
+      ;; Per-window render buffers stream in the background; flush
+      ;; whichever of them accumulated output this chunk.
+      (when tmux-control-window-buffers
+        (tmux-control--flush-window-buffers))
+      (when tmux-control--pane-buffers
+        (tmux-control--flush-tiled-panes)))))
+
+(defun tmux-control--defer-flush (controller)
+  "Redraw CONTROLLER's terminals when the shared redraw timer next fires."
+  (unless (memq controller tmux-control--deferred-flushes)
+    (push controller tmux-control--deferred-flushes))
+  (unless (timerp tmux-control--deferred-flush-timer)
+    (setq tmux-control--deferred-flush-timer
+          (run-at-time tmux-control-redisplay-interval nil
+                       #'tmux-control--run-deferred-flushes))))
+
+(defun tmux-control--flush-deferred ()
+  "Draw now the output this buffer's controller holds for the redraw timer.
+Anything that changes a terminal another way, such as a repaint, does
+this first, so the held output cannot be drawn over it afterwards."
+  (let ((controller (tmux-control--wb-controller)))
+    (when (memq controller tmux-control--deferred-flushes)
+      (with-current-buffer controller
+        (tmux-control--flush-chunk)))))
+
+(defun tmux-control--run-deferred-flushes ()
+  "Redraw every controller waiting for the shared redraw timer."
+  ;; Called directly, the timer is still to come.
+  (when (timerp tmux-control--deferred-flush-timer)
+    (cancel-timer tmux-control--deferred-flush-timer))
+  (setq tmux-control--deferred-flush-timer nil)
+  (let ((controllers (nreverse tmux-control--deferred-flushes)))
+    (setq tmux-control--deferred-flushes nil)
+    (dolist (controller controllers)
+      (when (buffer-live-p controller)
+        ;; One failing terminal leaves the others drawn.
+        (with-demoted-errors "tmux-control: redraw: %S"
+          (with-current-buffer controller
+            (tmux-control--flush-chunk)))))))
 
 (defun tmux-control--schedule-retile (controller)
   "Schedule a debounced re-tile of CONTROLLER on the idle timer.
@@ -6557,6 +6640,7 @@ output for other panes is dropped (rendering them all into one terminal
 would interleave them); when no active pane is resolved yet the first
 output bootstraps it.  In tiling mode the controller fans output out to
 the matching pane's render buffer instead, so every pane updates at once."
+  (setq tmux-control--chunk-output t)
   ;; Cached tiled panes keep receiving output even while another window is
   ;; current or the view is untiled.  Single-pane render buffers also receive
   ;; their usual copy below when tiling is off.
@@ -6654,7 +6738,12 @@ backing off to the cap."
    (t
     ;; Any control line: flush pending output first so it lands before the
     ;; state change (a resize, a seed, a pane switch) that follows it.
-    (tmux-control--flush-output-batch)
+    ;; Output waiting for the redraw timer, in this buffer or a window's
+    ;; or pane's, is drawn now, from the windows that follow the cursor
+    ;; before it moves.
+    (when (or tmux-control--output-batch
+              (memq (current-buffer) tmux-control--deferred-flushes))
+      (tmux-control--flush-chunk))
     (cond
      ;; Reply blocks never nest, so a %begin while already collecting is
      ;; pane CONTENT (a capture of a control-mode transcript), not protocol.
@@ -8409,9 +8498,11 @@ through a pixel scroll, and shows the cursor line."
 (defun tmux-control--write-terminal (output)
   "Process decoded terminal OUTPUT into Eat and redisplay immediately.
 For one-shot writes (screen seed, resize repaint) that are not part of a
-streamed flood; live %output is fed via `tmux-control--feed-terminal' and
-flushed once per filter chunk."
+streamed flood; live %output is fed via `tmux-control--feed-terminal'
+and drawn as `tmux-control-redisplay-interval' allows.  Output held for
+the redraw timer is drawn first."
   (when (tmux-control--term-live-p)
+    (tmux-control--flush-deferred)
     ;; A full repaint stands alone; drop any partial multibyte char carried
     ;; from streamed output so it cannot prefix the repaint.
     (setq tmux-control--utf8-carry ""
@@ -8691,6 +8782,10 @@ so every reply stays matched to the right handler on one queue."
           (setq tmux-control--command-queue
                 (append tmux-control--command-queue
                         (list (cons (or kind :ignore) (float-time)))))
+          ;; Input -- keys, named keys, a paste: what it echoes is drawn as
+          ;; soon as it comes.
+          (when (eq kind :input)
+            (setq tmux-control--echo-due (float-time)))
           (tmux-control--arm-command-watchdog)
           (process-send-string tmux-control--process
                                (concat command "\n")))))))
@@ -8956,8 +9051,11 @@ tmux still shows text."
 
 (defun tmux-control--apply-term-size (width height)
   "Resize the terminal grid to WIDTH by HEIGHT when it differs from the current.
-Return non-nil when a resize actually happened, so callers can repaint."
+Return non-nil when a resize actually happened, so callers can repaint.
+Output held for the redraw timer is drawn first, at the size it came at,
+before rows are dropped for it."
   (when (tmux-control--term-live-p)
+    (tmux-control--flush-deferred)
     (let ((size (tmux-control--term-size)))
       (unless (and size
                    (= (car size) width)
@@ -11400,6 +11498,10 @@ also does its usual cleanup."
   (advice-remove #'tmux-control-scrollback-mode
                  #'tmux-control--guard-scrollback-mode-command)
   (tmux-control--term-unload)
+  (when (timerp tmux-control--deferred-flush-timer)
+    (cancel-timer tmux-control--deferred-flush-timer))
+  (setq tmux-control--deferred-flush-timer nil
+        tmux-control--deferred-flushes nil)
   (remove-hook 'window-size-change-functions
                #'tmux-control--scrollback-follow-resize)
   (remove-hook 'window-size-change-functions #'tmux-control--on-frame-size-change)
