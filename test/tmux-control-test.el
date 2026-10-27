@@ -976,6 +976,19 @@ each wrapped in an evolving prompt line and a status bar.")
     (tmux-control-scrollback-mode)
     (should-not truncate-lines)))
 
+(ert-deftest tmux-control-test-no-editing-marks ()
+  ;; A fill-column bar, trailing-space colouring and empty-line marks from
+  ;; the user's global settings aren't the program's: a terminal turns them
+  ;; off once its mode is set, as a globalized mode turns on then.
+  (with-temp-buffer
+    (setq-local show-trailing-whitespace t
+                indicate-empty-lines t)
+    (display-fill-column-indicator-mode 1)
+    (tmux-control--no-editing-marks)
+    (should-not display-fill-column-indicator-mode)
+    (should-not show-trailing-whitespace)
+    (should-not indicate-empty-lines)))
+
 (ert-deftest tmux-control-test-direct-scrollback-mode-command-is-guarded ()
   "M-x scrollback-mode must not destroy a live connection buffer."
   (with-temp-buffer

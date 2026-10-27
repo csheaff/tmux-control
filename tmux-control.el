@@ -5506,6 +5506,19 @@ when the mode is set, so a mode-body setting would be undone at once."
   (setq-local word-wrap nil)
   (setq-local truncate-lines t))
 
+(defun tmux-control--no-editing-marks ()
+  "Turn off the marks for editing text that global settings draw on a terminal.
+A globalized `display-fill-column-indicator-mode' draws a bar down the
+terminal at `fill-column', through the program's screen, and
+`show-trailing-whitespace' colours the spaces a program fills its rows
+with; `indicate-empty-lines' marks the fringe below its last row.  Like
+`tmux-control--no-line-wrap', this runs after the major mode: a globalized
+mode turns itself on from `after-change-major-mode-hook'."
+  (when (bound-and-true-p display-fill-column-indicator-mode)
+    (display-fill-column-indicator-mode -1))
+  (setq-local show-trailing-whitespace nil
+              indicate-empty-lines nil))
+
 (defun tmux-control--protect-terminal-text (&optional input-method)
   "Make the current live buffer read-only unless INPUT-METHOD is active.
 The buffer text is Eat's model of the pane's screen, and Eat's cursor
@@ -5561,6 +5574,7 @@ window and pane render buffers all start this way, after
 `tmux-control-mode' (for a render buffer,
 `tmux-control--initialize-render-buffer-mode')."
   (tmux-control--no-line-wrap)
+  (tmux-control--no-editing-marks)
   (setq-local emulation-mode-map-alists
               (cons tmux-control--emulation-mode-map-alist
                     (delq tmux-control--emulation-mode-map-alist
