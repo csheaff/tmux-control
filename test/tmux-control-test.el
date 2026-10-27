@@ -9501,32 +9501,57 @@ buffer.  The pause timer is cancelled afterwards."
           (cancel-timer tmux-control--hidden-timer))
         (setq tmux-control--hidden-timer nil)))))
 
-(ert-deftest tmux-control-test-late-tile-seed-does-not-continue-a-repaused-pane ()
-  ;; A kept tile buffer's seed continues the pane once its reply comes.
-  ;; Shown and out of sight again before then, the pane was paused anew:
-  ;; the late reply must leave it paused.
-  (tmux-control-test--with-hidden-controller
-    (let ((tile (generate-new-buffer " *tc-kept-tile*"))
-          after)
+(ert-deftest tmux-control-test-kept-tile-resumes-in-the-snapshot-write ()
+  ;; With a buffer kept for the pane from a tiled view, the pane is
+  ;; continued in the same write as the history and both buffers' seeds,
+  ;; not once the tile's reply comes: no output falls between the
+  ;; snapshot and the stream, and no late reply can continue a pane paused
+  ;; again meanwhile.  The tile gets the missed history before its paint.
+  (tmux-control-test--with-controller " *tc-kept-tile-write*"
+    (let ((tmux-control-pause-hidden t)
+          (tmux-control-session-activity nil)
+          (tmux-control-window-tab-bar nil)
+          (tile (generate-new-buffer " *tc-kept-tile*"))
+          writes)
+      (setq tmux-control--active-pane "%3"
+            tmux-control--server-version "3.6a")
       (unwind-protect
-          (cl-letf (((symbol-function 'tmux-control--seed-screen) #'ignore)
-                    ((symbol-function 'tmux-control--seed-pane-buffer-async)
-                     (lambda (_buffer _controller &optional then) (setq after then))))
+          (cl-letf (((symbol-function 'process-send-string)
+                     (lambda (_process string) (push string writes))))
             (with-current-buffer tile
               (setq-local tmux-control--active-pane "%3"))
             (setq tmux-control--pane-buffers (list (cons "%3" tile)))
+            (setq tmux-control--command-queue nil)
             (tmux-control--update-hidden-terminals t)
-            (save-window-excursion
-              (switch-to-buffer ctrl)
-              (tmux-control--hidden-windows-changed))
-            (should-not tmux-control--hidden-pane)
-            (tmux-control--update-hidden-terminals t)
-            (should (equal tmux-control--hidden-pane "%3"))
-            (setq sent nil)
-            (funcall after)
-            (should-not (assoc "refresh-client -A \"%3:continue\"" sent))
-            (should (equal tmux-control--hidden-pane "%3")))
-        (kill-buffer tile)))))
+            ;; The pause's history size and last rows.
+            (funcall (car (nth 1 tmux-control--command-queue)) '("1 80 24"))
+            (funcall (car (nth 2 tmux-control--command-queue)) '("old"))
+            (setq writes nil)
+            (let ((queue-before (length tmux-control--command-queue)))
+              (save-window-excursion
+                (switch-to-buffer ctrl)
+                (tmux-control--hidden-windows-changed))
+              (should (= (length writes) 1))
+              (let ((lines (split-string (car writes) "\n" t)))
+                (should (equal (car (last lines)) "refresh-client -A \"%3:continue\""))
+                (should (= 1 (cl-count "refresh-client -A \"%3:continue\"" lines
+                                       :test #'equal)))
+                ;; Both buffers' screens are captured before it.
+                (should (= 2 (cl-count-if (lambda (line)
+                                            (string-match-p "\\`capture-pane -p -e\\(?: -N\\)? -t %3" line))
+                                          lines))))
+              ;; Answer the replies in order: size, history, then the rest.
+              (let ((pending (nthcdr queue-before tmux-control--command-queue)))
+                (setq tmux-control--command-queue nil)
+                (funcall (car (nth 0 pending)) '("2 80 24"))
+                (funcall (car (nth 1 pending)) '("old" "new"))))
+            (should (equal (buffer-local-value 'tmux-control--seed-history tile)
+                           '("%3" "new"))))
+        (setq tmux-control--command-queue nil)
+        (kill-buffer tile)
+        (when (timerp tmux-control--hidden-timer)
+          (cancel-timer tmux-control--hidden-timer))
+        (setq tmux-control--hidden-timer nil)))))
 
 (ert-deftest tmux-control-test-hidden-pane-resumes-when-its-tab-flag-clears ()
   ;; Another client made the paused pane's window current and left it,

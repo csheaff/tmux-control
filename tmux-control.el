@@ -7645,7 +7645,7 @@ it is untiled, and the pane's buffer from a tiled view."
       (tmux-control--with-one-write
         (when (and tail buffers)
           (tmux-control--fetch-missed-history pane tail buffers))
-        (tmux-control--resync-paused-pane pane)))))
+        (tmux-control--resync-paused-pane pane t)))))
 
 (defun tmux-control--fetch-missed-history (pane tail buffers)
   "Ask tmux for the rows PANE added to its history after TAIL.
@@ -7773,8 +7773,12 @@ A pane paused because no window shows it waits until one does."
   (unless (equal pane tmux-control--hidden-pane)
     (tmux-control--resync-paused-pane pane)))
 
-(defun tmux-control--resync-paused-pane (pane)
-  "Repaint each buffer showing paused PANE, then ask tmux to continue it."
+(defun tmux-control--resync-paused-pane (pane &optional now)
+  "Repaint each buffer showing paused PANE, then ask tmux to continue it.
+A buffer kept for PANE from a tiled view is otherwise continued once its
+seed's reply comes; with NOW, straight after the seeds' commands, as
+part of a snapshot `tmux-control--with-one-write' sends in one go, so no
+output falls between the snapshot and the stream."
   (let* ((controller (current-buffer))
          (process tmux-control--process)
          (buffer (cdr (assoc pane (or tmux-control--pane-buffers tmux-control--panes))))
@@ -7794,7 +7798,7 @@ A pane paused because no window shows it waits until one does."
       ;; The capture includes these buffered bytes.  Do not replay stale
       ;; output over it when this filter chunk finishes.
       (with-current-buffer buffer (setq tmux-control--output-batch nil))
-      (tmux-control--seed-pane-buffer-async buffer controller resume))
+      (tmux-control--seed-pane-buffer-async buffer controller (unless now resume)))
     ;; Untiling retains a cached copy AND the usual single-pane renderer.
     ;; A dropped backlog must be repaired in both, not just the hidden cache.
     (when (or (not tmux-control--tiled) (not cached))
@@ -7808,7 +7812,7 @@ A pane paused because no window shows it waits until one does."
             (tmux-control--seed-window-buffer sibling id)
             t)))
        ((equal pane tmux-control--active-pane) (tmux-control--seed-screen))))
-    (unless cached (funcall resume))))
+    (when (or now (not cached)) (funcall resume))))
 
 (defconst tmux-control--ansi-control-regexp
   (concat "\e][^\a\e]*\\(?:\a\\|\e\\\\\\)"      ; OSC: ESC ] ... (BEL or ST)
