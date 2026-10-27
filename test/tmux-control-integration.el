@@ -1221,6 +1221,102 @@ window following."
         (advice-remove 'tmux-control--term-redisplay count-redraw)
         (advice-remove 'tmux-control--filter count-chunk))))))
 
+(ert-deftest tmux-control-it-hidden-terminal-pauses-and-catches-up ()
+  "With `tmux-control-pause-hidden', a terminal no window shows has tmux
+pause it, not turn it off: the program in it runs on while the buffer
+gets nothing.  Shown again, its screen is tmux's, and its history has
+every line printed meanwhile, once."
+  (skip-unless (executable-find "python3"))
+  ;; tmux pauses a client's pane from 3.2.
+  (skip-unless (and (tmux-control-it--available-p)
+                    (tmux-control--version-at-least-p
+                     (with-temp-buffer
+                       (call-process "tmux" nil t nil "-V")
+                       (buffer-string))
+                     3 2)))
+  (let ((tmux-control-pause-hidden t)
+        (tmux-control-session-activity nil)
+        (other (get-buffer-create " *tc-it-other*"))
+        window)
+    (unwind-protect
+        (tmux-control-it--with-session
+          ;; Connecting can split the frame to show the session.
+          (delete-other-windows)
+          (setq window (selected-window))
+          (set-window-buffer window controller)
+          (tmux-control-it--pump 0.5)
+          (set-window-buffer window other)
+          (tmux-control--pause-hidden-now)
+          (should (equal (buffer-local-value 'tmux-control--hidden-pane controller)
+                         pane))
+          ;; More lines than the screen has rows, so most go to history.
+          ;; Not "DONE-1" itself in the command: the shell echoes it.
+          (tmux-control-it--tmux
+           "send-keys" "-t" "t"
+           "python3 -c \"[print('LINE-%d' % i) for i in range(300)]; print('DONE-%d' % 1)\""
+           "Enter")
+          (should (tmux-control-it--pump-until
+                   10 (lambda () (string-search
+                                  "DONE-1" (tmux-control-it--tmux "capture-pane" "-p" "-t" pane)))))
+          (tmux-control-it--pump 0.5)
+          (should-not (string-search "LINE-" (tmux-control-it--buffer-text controller)))
+          (set-window-buffer window controller)
+          (tmux-control--hidden-windows-changed)
+          (should-not (buffer-local-value 'tmux-control--hidden-pane controller))
+          (let ((h (string-to-number
+                    (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" pane
+                                                        "#{pane_height}")))))
+            (should (tmux-control-it--pump-until
+                     5 (lambda ()
+                         (equal (tmux-control-it--buffer-visible controller h)
+                                (tmux-control-it--capture-lines pane))))))
+          (let ((lines (split-string (tmux-control-it--buffer-text controller) "\n")))
+            (dotimes (i 300)
+              (should (= 1 (cl-count (format "LINE-%d" i) lines
+                                     :test (lambda (want line)
+                                             (equal want (string-trim-right line)))))))))
+      (kill-buffer other))))
+
+(ert-deftest tmux-control-it-hidden-terminal-comes-back-with-its-scroll-region ()
+  "A scroll region the program set while its terminal was paused out of
+sight is the terminal's when it is shown again, so line feeds scroll the
+same rows in Eat as in tmux."
+  (skip-unless (and (tmux-control-it--available-p)
+                    (tmux-control--version-at-least-p
+                     (with-temp-buffer
+                       (call-process "tmux" nil t nil "-V")
+                       (buffer-string))
+                     3 2)))
+  (let ((tmux-control-pause-hidden t)
+        (tmux-control-session-activity nil)
+        (other (get-buffer-create " *tc-it-other*"))
+        window)
+    (unwind-protect
+        (tmux-control-it--with-session
+          (delete-other-windows)
+          (setq window (selected-window))
+          (set-window-buffer window controller)
+          (tmux-control-it--pump 0.5)
+          (set-window-buffer window other)
+          (tmux-control--pause-hidden-now)
+          (should (buffer-local-value 'tmux-control--hidden-pane controller))
+          (tmux-control-it--tmux "send-keys" "-t" "t" "printf '\\033[3;10r'; echo REGION-SET" "Enter")
+          (should (tmux-control-it--pump-until
+                   5 (lambda () (equal (string-trim
+                                        (tmux-control-it--tmux "display-message" "-p" "-t" pane
+                                                               "#{scroll_region_upper},#{scroll_region_lower}"))
+                                       "2,9"))))
+          (set-window-buffer window controller)
+          (tmux-control--hidden-windows-changed)
+          (should (tmux-control-it--pump-until
+                   5 (lambda ()
+                       (with-current-buffer controller
+                         (and (string-search "REGION-SET" (tmux-control-it--buffer-text controller))
+                              (equal (cons (eat--t-term-scroll-begin tmux-control--terminal)
+                                           (eat--t-term-scroll-end tmux-control--terminal))
+                                     '(3 . 10))))))))
+      (kill-buffer other))))
+
 (ert-deftest tmux-control-it-same-session-on-different-sockets ()
   (tmux-control-it--with-session
     (let* ((other-socket (concat tmux-control-it--socket "-other"))
