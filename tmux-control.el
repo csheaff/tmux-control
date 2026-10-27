@@ -7597,8 +7597,9 @@ the cursor the association is lost.  Captured at the start of a render
 pass and replayed by `tmux-control--flush-display'.
 
 With `tmux-control-wheel-scrolls-live-history' the follow set is keyed on
-CURSOR VISIBILITY instead: every window of this buffer that currently shows
-the live cursor follows, the rest do not.  So a window scrolled up off the
+CURSOR VISIBILITY instead: every window of this buffer that shows the live
+cursor, as Emacs last drew it (see `tmux-control--cursor-seen-p'), follows,
+the rest do not.  So a window scrolled up off the
 live screen holds (output accumulates below without yanking the reader back),
 and one scrolled back down to it resumes following -- both regardless of where
 point happens to sit, which a mouse-wheel scroll under
@@ -7623,8 +7624,9 @@ actually sees.  Eat's `buffer' point decision is preserved."
                ;; At least partly: under `pixel-scroll-precision-mode' the
                ;; cursor line at the bottom is often a few pixels clipped;
                ;; without that it reads as not visible and following never
-               ;; resumes.
-               (lambda (w) (tmux-control--cursor-visible-p w cursor top))
+               ;; resumes.  And as last drawn: a window made shorter since
+               ;; then has not been fitted yet.
+               (lambda (w) (tmux-control--cursor-seen-p w cursor top))
                (get-buffer-window-list (current-buffer) nil t))))))))
 
 (defun tmux-control--snap-to-live-screen (window)
@@ -8482,6 +8484,30 @@ below the window; such a window is following the live screen anyway, and
         (< (count-lines start (save-excursion (goto-char cursor) (pos-bol)))
            (window-body-height window))
       (pos-visible-in-window-p cursor window t))))
+
+(defun tmux-control--cursor-seen-p (window cursor screen-top)
+  "Return non-nil when WINDOW showed the line of CURSOR when last drawn.
+That is `tmux-control--cursor-visible-p', except for a window made
+shorter since Emacs last drew it, which is judged at the height it was
+drawn at.  The terminal is fitted to its window when Emacs next draws
+the window (see `tmux-control--adjust-window-size'), so until then the
+window is shorter than the screen, and the cursor on the screen's last
+row is below it.  Output drawn before then, say by the redraw timer
+right after a timer or a process made the window shorter, found the
+cursor out of view and left the window where it was; the output moved
+the cursor on, and the window stopped following it for good.
+SCREEN-TOP is the start of the terminal's current screen."
+  (or (tmux-control--cursor-visible-p window cursor screen-top)
+      (let ((drawn (window-old-body-pixel-height window)))
+        (and (> drawn (window-body-height window t))
+             (let ((start (window-start window))
+                   (row (save-excursion (goto-char cursor) (pos-bol))))
+               (and (<= start row)
+                    ;; The height of the lines above the cursor's, measured
+                    ;; no further than the window was drawn.
+                    (< (- (cdr (window-text-pixel-size window start row nil drawn))
+                          (window-vscroll window t))
+                       drawn)))))))
 
 (defun tmux-control--window-following-p (window cursor screen-top)
   "Return non-nil when WINDOW already shows the live terminal cursor.
