@@ -3898,7 +3898,9 @@ BODY runs `tmux-control--run-deferred-flushes' itself."
         drawn)
     (unwind-protect
         (let ((tmux-control--deferred-flushes (list fine broken))
-              (tmux-control--deferred-flush-timer nil))
+              (tmux-control--deferred-flush-timer nil)
+              ;; ERT sets it, which would let the error through.
+              (debug-on-error nil))
           (cl-letf (((symbol-function 'tmux-control--flush-chunk)
                      (lambda ()
                        (if (eq (current-buffer) broken)
