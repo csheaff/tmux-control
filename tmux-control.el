@@ -7460,9 +7460,9 @@ rows printed while it was paused begin.")
 (defvar-local tmux-control--hidden-tail nil
   "A one-element list of what the paused pane's history ended with, or nil.
 Its element is :pending until tmux answers, :failed if it could not,
-and otherwise (WIDTH . ROWS): the pane's width and its last history rows
-as `capture-pane -e' gave them.  A list, so a return that comes before
-the answer still reads it.")
+and otherwise ((SIZE . WIDTH) . ROWS): the history's size, the pane's
+width and its last history rows as `capture-pane -e' gave them.  A list,
+so a return that comes before the answer still reads it.")
 
 (defvar-local tmux-control--seed-history nil
   "History rows for the next screen seed to add first, as (PANE . ROWS).")
@@ -7583,7 +7583,7 @@ from when shown again."
                           pane tmux-control--hidden-tail-rows)
                          (lambda (rows)
                            (setcar tail (if (and rows size)
-                                            (cons (cdr size)
+                                            (cons size
                                                   (last rows (min (car size)
                                                                   (length rows))))
                                           :failed))))))
@@ -7606,8 +7606,10 @@ paused is added first, for the repaint to bring."
 (defun tmux-control--fetch-missed-history (pane tail)
   "Ask tmux for the rows PANE added to its history after TAIL.
 TAIL is the list `tmux-control--pause-hidden' fills.  The rows go to
-`tmux-control--seed-history', for the screen seed that follows."
-  (let ((buffer (current-buffer))
+`tmux-control--seed-history', for the screen seed that follows, in this
+buffer and in a buffer kept for PANE from a tiled view."
+  (let ((buffers (delq nil (list (current-buffer)
+                                 (cdr (assoc pane tmux-control--pane-buffers)))))
         (size nil))
     (tmux-control--query (tmux-control--history-size-command pane)
                          (lambda (lines)
@@ -7615,15 +7617,20 @@ TAIL is the list `tmux-control--pause-hidden' fills.  The rows go to
     (tmux-control--query
      (tmux-control--history-rows-command pane tmux-control--hidden-history-rows)
      (lambda (rows)
-       ;; At another width tmux has rewrapped its history, so the rows
-       ;; it ended with are not found, and all would come back again.
-       (when (and rows size (consp (car tail)) (buffer-live-p buffer)
-                  (equal (cdr size) (car (car tail))))
-         (when-let* ((missed (tmux-control--rows-after
-                              (cdr (car tail))
-                              (last rows (min (car size) (length rows))))))
-           (with-current-buffer buffer
-             (setq tmux-control--seed-history (cons pane missed)))))))))
+       (let ((then (car-safe (car tail))))
+         ;; At another width tmux has rewrapped its history, so the rows
+         ;; it ended with are not found, and all would come back again.
+         (when (and rows size then (equal (cdr size) (cdr then)))
+           (let* ((rows (last rows (min (car size) (length rows))))
+                  ;; Where they end in ROWS if nothing scrolled out of
+                  ;; the history meanwhile.
+                  (end (- (car then) (- (car size) (length rows))))
+                  (missed (tmux-control--rows-after (cdr (car tail)) rows end)))
+             (when missed
+               (dolist (buffer buffers)
+                 (when (buffer-live-p buffer)
+                   (with-current-buffer buffer
+                     (setq tmux-control--seed-history (cons pane missed)))))))))))))
 
 (defun tmux-control--history-size-command (pane)
   "Return the control command that asks for PANE's history size and width."
@@ -7645,23 +7652,27 @@ answer with the history size asked for just before it."
           (if tmux-control--capture-trailing-p " -N" "")
           rows pane))
 
-(defun tmux-control--rows-after (tail rows)
-  "Return the ROWS that follow the last place TAIL appears in them.
+(defun tmux-control--rows-after (tail rows &optional end)
+  "Return the ROWS that follow TAIL in them.
 TAIL is the end of a pane's history when it was paused and ROWS the end
-of it now.  When TAIL is empty or not in ROWS -- nothing was in history
-then, or more than ROWS has scrolled in since -- all of ROWS follow it.
-Pure, for unit testing."
-  (let ((n (length tail))
-        (all (vconcat rows))
-        (found nil))
+of it now.  END is where TAIL ends in ROWS if no row has left the
+history since, counting from the first.  TAIL is looked for there
+first, then at the last place before it, since rows leave the history
+only from its top: output that repeats TAIL's rows is not taken for it.
+When TAIL is empty or not in ROWS -- nothing was in history then, or
+more than ROWS has scrolled in since -- all of ROWS follow it.  Pure,
+for unit testing."
+  (let* ((n (length tail))
+         (all (vconcat rows))
+         (want (vconcat tail))
+         (i (- (min (or end (length all)) (length all)) n))
+         (found nil))
     (when (> n 0)
-      (let ((want (vconcat tail))
-            (i (- (length all) n)))
-        (while (and (not found) (>= i 0))
-          (when (cl-loop for j below n
-                         always (equal (aref all (+ i j)) (aref want j)))
-            (setq found (+ i n)))
-          (setq i (1- i)))))
+      (while (and (not found) (>= i 0))
+        (when (cl-loop for j below n
+                       always (equal (aref all (+ i j)) (aref want j)))
+          (setq found (+ i n)))
+        (setq i (1- i))))
     (if found (nthcdr found rows) rows)))
 
 (defun tmux-control--history-fill-sequence (rows height)
@@ -10811,6 +10822,9 @@ Used by the in-band pane seed path."
       (when (tmux-control--term-live-p)
         (setq tmux-control--seed-cursor cursor)
         (setq tmux-control--seed-cursor-visible (or cursor-visible :unknown))
+        ;; History printed while the pane was paused out of sight, for a
+        ;; buffer kept from a tiled view.
+        (tmux-control--write-missed-history)
         ;; Repaint only the live screen.  Clearing history here made every
         ;; resize/reseed discard output the user had already accumulated.
         (tmux-control--write-seed

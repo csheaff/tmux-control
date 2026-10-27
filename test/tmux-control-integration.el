@@ -1227,6 +1227,13 @@ pause it, not turn it off: the program in it runs on while the buffer
 gets nothing.  Shown again, its screen is tmux's, and its history has
 every line printed meanwhile, once."
   (skip-unless (executable-find "python3"))
+  ;; tmux pauses a client's pane from 3.2.
+  (skip-unless (and (tmux-control-it--available-p)
+                    (tmux-control--version-at-least-p
+                     (with-temp-buffer
+                       (call-process "tmux" nil t nil "-V")
+                       (buffer-string))
+                     3 2)))
   (let ((tmux-control-pause-hidden t)
         (tmux-control-session-activity nil)
         (other (get-buffer-create " *tc-it-other*"))

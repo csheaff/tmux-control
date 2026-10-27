@@ -9132,7 +9132,65 @@ buffer.  The pause timer is cancelled afterwards."
                  '("z")))
   (should (equal (tmux-control--rows-after nil '("a" "b")) '("a" "b")))
   (should (equal (tmux-control--rows-after '("q") '("a" "b")) '("a" "b")))
-  (should (equal (tmux-control--rows-after '("a" "b" "c") '("b" "c")) '("b" "c"))))
+  (should (equal (tmux-control--rows-after '("a" "b" "c") '("b" "c")) '("b" "c")))
+  ;; Where the history size says the tail ends, before any later place
+  ;; the same rows were printed again.
+  (should (equal (tmux-control--rows-after '("t" "t") '("t" "t" "t" "t" "t") 2)
+                 '("t" "t" "t")))
+  ;; Rows left the history's top meanwhile: the last place before there.
+  (should (equal (tmux-control--rows-after '("b" "c") '("b" "c" "d" "b" "c" "e") 4)
+                 '("d" "b" "c" "e")))
+  ;; More scrolled in than ROWS holds: all of them.
+  (should (equal (tmux-control--rows-after '("b" "c") '("x" "b" "c") -5)
+                 '("x" "b" "c"))))
+
+(ert-deftest tmux-control-test-hidden-terminal-keeps-repeated-output ()
+  ;; A pane printing the same row over and over: the history size says
+  ;; where the rows it had when paused end, so the repeats printed since
+  ;; are not taken for them.
+  (tmux-control-test--with-hidden-controller
+    (cl-letf (((symbol-function 'tmux-control--seed-screen) #'ignore))
+      (tmux-control--update-hidden-terminals t)
+      (tmux-control-test--reply sent "display-message -p -t %3 '#{history_size} #{pane_width}'" '("3 80"))
+      (tmux-control-test--reply sent "capture-pane -p -e -S -20 -E -1 -t %3" '("tick" "tick" "tick"))
+      (setq sent nil)
+      (save-window-excursion
+        (switch-to-buffer ctrl)
+        (tmux-control--hidden-windows-changed))
+      (tmux-control-test--reply sent "display-message -p -t %3 '#{history_size} #{pane_width}'" '("5 80"))
+      (tmux-control-test--reply sent "capture-pane -p -e -S -2000 -E -1 -t %3"
+                                (make-list 5 "tick"))
+      (should (equal tmux-control--seed-history '("%3" "tick" "tick"))))))
+
+(ert-deftest tmux-control-test-hidden-pane-history-reaches-its-kept-tile ()
+  ;; A buffer kept for the pane from a tiled view stopped streaming too:
+  ;; it gets the missed history before its own repaint.
+  (tmux-control-test--with-hidden-controller
+    (let ((tile (generate-new-buffer " *tc-kept-tile*"))
+          painted)
+      (unwind-protect
+          (cl-letf (((symbol-function 'tmux-control--seed-screen) #'ignore)
+                    ((symbol-function 'tmux-control--seed-pane-buffer-async)
+                     (lambda (buffer _controller &optional after)
+                       (setq painted buffer)
+                       (when after (funcall after)))))
+            (with-current-buffer tile
+              (setq-local tmux-control--active-pane "%3"))
+            (setq tmux-control--pane-buffers (list (cons "%3" tile)))
+            (tmux-control--update-hidden-terminals t)
+            (tmux-control-test--reply sent "display-message -p -t %3 '#{history_size} #{pane_width}'" '("1 80"))
+            (tmux-control-test--reply sent "capture-pane -p -e -S -20 -E -1 -t %3" '("old"))
+            (setq sent nil)
+            (save-window-excursion
+              (switch-to-buffer ctrl)
+              (tmux-control--hidden-windows-changed))
+            (should (eq painted tile))
+            (tmux-control-test--reply sent "display-message -p -t %3 '#{history_size} #{pane_width}'" '("2 80"))
+            (tmux-control-test--reply sent "capture-pane -p -e -S -2000 -E -1 -t %3" '("old" "new"))
+            (should (equal tmux-control--seed-history '("%3" "new")))
+            (should (equal (buffer-local-value 'tmux-control--seed-history tile)
+                           '("%3" "new"))))
+        (kill-buffer tile)))))
 
 (ert-deftest tmux-control-test-hidden-terminal-pauses-and-comes-back ()
   ;; Out of sight, the session's pane is paused and its history's last
@@ -9157,7 +9215,7 @@ buffer.  The pause timer is cancelled afterwards."
                          "capture-pane -p -e -S -20 -E -1 -t %3")))
         (tmux-control-test--reply sent "display-message -p -t %3 '#{history_size} #{pane_width}'" '("2 80"))
         (tmux-control-test--reply sent "capture-pane -p -e -S -20 -E -1 -t %3" '("h1" "h2"))
-        (should (equal tmux-control--hidden-tail '((80 "h1" "h2"))))
+        (should (equal tmux-control--hidden-tail '(((2 . 80) "h1" "h2"))))
         (setq sent nil)
         (tmux-control--handle-pause "%3")
         (should-not sent)
@@ -9185,7 +9243,7 @@ buffer.  The pause timer is cancelled afterwards."
       (tmux-control--update-hidden-terminals t)
       (tmux-control-test--reply sent "display-message -p -t %3 '#{history_size} #{pane_width}'" '("0 80"))
       (tmux-control-test--reply sent "capture-pane -p -e -S -20 -E -1 -t %3" '("$ prompt"))
-      (should (equal tmux-control--hidden-tail '((80))))
+      (should (equal tmux-control--hidden-tail '(((0 . 80)))))
       (setq sent nil)
       (save-window-excursion
         (switch-to-buffer ctrl)
