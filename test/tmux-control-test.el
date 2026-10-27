@@ -3891,6 +3891,24 @@ BODY runs `tmux-control--run-deferred-flushes' itself."
       (tmux-control--run-deferred-flushes)
       (should (equal (buffer-string) after-repaint)))))
 
+(ert-deftest tmux-control-test-redraw-timer-survives-a-failing-terminal ()
+  ;; One terminal failing to draw must not leave the others' output held.
+  (let ((broken (generate-new-buffer " *tc-broken*"))
+        (fine (generate-new-buffer " *tc-fine*"))
+        drawn)
+    (unwind-protect
+        (let ((tmux-control--deferred-flushes (list fine broken))
+              (tmux-control--deferred-flush-timer nil))
+          (cl-letf (((symbol-function 'tmux-control--flush-chunk)
+                     (lambda ()
+                       (if (eq (current-buffer) broken)
+                           (error "Broken")
+                         (push (current-buffer) drawn)))))
+            (tmux-control--run-deferred-flushes))
+          (should (equal drawn (list fine))))
+      (kill-buffer broken)
+      (kill-buffer fine))))
+
 (ert-deftest tmux-control-test-typing-marks-its-echo-due ()
   (tmux-control-test--with-paced-controller
     (cl-letf (((symbol-function 'tmux-control--send-command) #'ignore)

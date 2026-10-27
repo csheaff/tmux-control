@@ -6451,6 +6451,8 @@ it comes, so its echo is not held for the redraw timer.")
   "Seconds after a key in which output is drawn as it comes.
 An echo can come a chunk or two after the key, behind other output,
 and over SSH a round trip later.")
+(defvar tmux-control--chunk-output nil
+  "Non-nil once the chunk the filter is reading has had pane output.")
 (defvar tmux-control--deferred-flushes nil
   "Controllers whose output waits for the shared redraw timer.")
 (defvar tmux-control--deferred-flush-timer nil
@@ -6473,15 +6475,12 @@ and over SSH a round trip later.")
         (setq tmux-control--accumulator ""))
       (let ((start 0)
             line-end
-            output)
+            (tmux-control--chunk-output nil))
         (while (setq line-end (string-match "\n" tmux-control--accumulator start))
           (let ((line (substring tmux-control--accumulator start line-end)))
             (when (and (> (length line) 0)
                        (= (aref line (1- (length line))) ?\r))
               (setq line (substring line 0 -1)))
-            (when (or (string-prefix-p "%output " line)
-                      (string-prefix-p "%extended-output " line))
-              (setq output t))
             (tmux-control--handle-line line))
           (setq start (1+ line-end)))
         (setq tmux-control--accumulator
@@ -6490,7 +6489,7 @@ and over SSH a round trip later.")
         ;; key; output that keeps coming waits for the shared redraw timer,
         ;; so a streaming terminal redraws at most
         ;; 1/`tmux-control-redisplay-interval' times a second.
-        (when output
+        (when tmux-control--chunk-output
           (let ((now (float-time)))
             (if (or (null tmux-control-redisplay-interval)
                     (and tmux-control--echo-due
@@ -6556,8 +6555,10 @@ this first, so the held output cannot be drawn over it afterwards."
     (setq tmux-control--deferred-flushes nil)
     (dolist (controller controllers)
       (when (buffer-live-p controller)
-        (with-current-buffer controller
-          (tmux-control--flush-chunk))))))
+        ;; One failing terminal leaves the others drawn.
+        (with-demoted-errors "tmux-control: redraw: %S"
+          (with-current-buffer controller
+            (tmux-control--flush-chunk)))))))
 
 (defun tmux-control--schedule-retile (controller)
   "Schedule a debounced re-tile of CONTROLLER on the idle timer.
@@ -6632,6 +6633,7 @@ output for other panes is dropped (rendering them all into one terminal
 would interleave them); when no active pane is resolved yet the first
 output bootstraps it.  In tiling mode the controller fans output out to
 the matching pane's render buffer instead, so every pane updates at once."
+  (setq tmux-control--chunk-output t)
   ;; Cached tiled panes keep receiving output even while another window is
   ;; current or the view is untiled.  Single-pane render buffers also receive
   ;; their usual copy below when tiling is off.
