@@ -8498,16 +8498,16 @@ cursor out of view and left the window where it was; the output moved
 the cursor on, and the window stopped following it for good.
 SCREEN-TOP is the start of the terminal's current screen."
   (or (tmux-control--cursor-visible-p window cursor screen-top)
-      (let ((drawn (window-old-body-pixel-height window))
-            (start (window-start window))
-            (row (save-excursion (goto-char cursor) (pos-bol))))
+      (let ((drawn (window-old-body-pixel-height window)))
         (and (> drawn (window-body-height window t))
-             (<= start row)
-             ;; The height of the lines above the cursor's, measured no
-             ;; further than the window was drawn.
-             (< (- (cdr (window-text-pixel-size window start row nil drawn))
-                   (window-vscroll window t))
-                drawn)))))
+             (let ((start (window-start window))
+                   (row (save-excursion (goto-char cursor) (pos-bol))))
+               (and (<= start row)
+                    ;; The height of the lines above the cursor's, measured
+                    ;; no further than the window was drawn.
+                    (< (- (cdr (window-text-pixel-size window start row nil drawn))
+                          (window-vscroll window t))
+                       drawn)))))))
 
 (defun tmux-control--window-following-p (window cursor screen-top)
   "Return non-nil when WINDOW already shows the live terminal cursor.

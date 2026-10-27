@@ -7803,6 +7803,19 @@ Return the window."
             (draw)
             (stream 5)
             (should (following-p))
+            ;; Scrolled up within a screen taller than the window, as one
+            ;; sized to another window is, the cursor below the window.
+            (tmux-control--apply-term-size 40 (+ 4 (window-body-height window)))
+            (stream 20)
+            (let ((top (+ 0 (tmux-control--term-screen-start))))
+              (set-window-start window top)
+              (set-window-point window top)
+              (should-not (tmux-control--cursor-visible-p
+                           window (tmux-control--term-cursor) top))
+              (window-resize window -1)
+              (stream 1)
+              (should (= (window-start window) top))
+              (should (= (window-point window) top)))
             ;; Reading history.
             (set-window-start window (point-min))
             (set-window-point window (point-min))
