@@ -1711,6 +1711,8 @@ fits the terminal to it."
   (tmux-control-it--with-runner
     (save-window-excursion
       (delete-other-windows)
+      ;; The terminal in the lower window only, as in a window of its own.
+      (switch-to-buffer (get-buffer-create "*scratch*"))
       (let ((window (split-window nil nil 'below))
             (tmux-control-wheel-scrolls-live-history t)
             ;; Batch Emacs never draws, so it keeps no height a window was
@@ -1746,6 +1748,8 @@ fits the terminal to it."
             (tmux-control-it--pump-until 0.5 #'ignore)
             (should (following-p))
             (draw)
+            (should (= (cdr (with-current-buffer controller (tmux-control--term-size)))
+                       (window-body-height window)))
             (should (tmux-control-it--pump-until
                      20 (lambda () (string-search
                                     "DONE" (tmux-control-it--buffer-text controller)))))
