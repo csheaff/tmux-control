@@ -2832,6 +2832,8 @@ duplicate."
   (tmux-control--ensure-live)
   (unless (tmux-control--term-live-p)
     (user-error "No live tmux-control terminal in this buffer"))
+  ;; Held output could scroll rows into the history cleared here.
+  (tmux-control--flush-deferred)
   (let ((beg (tmux-control--term-screen-start))
         (end (tmux-control--term-end))
         (inhibit-read-only t))
@@ -9049,8 +9051,11 @@ tmux still shows text."
 
 (defun tmux-control--apply-term-size (width height)
   "Resize the terminal grid to WIDTH by HEIGHT when it differs from the current.
-Return non-nil when a resize actually happened, so callers can repaint."
+Return non-nil when a resize actually happened, so callers can repaint.
+Output held for the redraw timer is drawn first, at the size it came at,
+before rows are dropped for it."
   (when (tmux-control--term-live-p)
+    (tmux-control--flush-deferred)
     (let ((size (tmux-control--term-size)))
       (unless (and size
                    (= (car size) width)

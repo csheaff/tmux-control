@@ -3924,22 +3924,43 @@ BODY runs `tmux-control--run-deferred-flushes' itself."
         (should tmux-control--echo-due)))))
 
 (ert-deftest tmux-control-test-resize-draws-held-output-first ()
-  ;; Held output was printed for the old size, so it is drawn at that size.
+  ;; Held output was printed for the old size, so it is drawn at that size,
+  ;; before a shorter terminal drops the rows below its cursor.
   (tmux-control-test--with-paced-controller
     (tmux-control--filter proc "%output %0 one\\015\\012\n")
     (tmux-control--filter proc "%output %0 two\\015\\012\n")
     (should-not (tmux-control-test--shown-p "two"))
-    (let (size-when-drawn)
-      (cl-letf (((symbol-function 'tmux-control--flush-output-batch)
-                 (let ((orig (symbol-function 'tmux-control--flush-output-batch)))
-                   (lambda ()
-                     (when tmux-control--output-batch
-                       (setq size-when-drawn (tmux-control--term-size)))
-                     (funcall orig)))))
-        (tmux-control--term-resize 30 4))
-      (should (equal size-when-drawn '(40 . 5))))
+    (let (events)
+      (cl-letf* ((flush (symbol-function 'tmux-control--flush-output-batch))
+                 (drop (symbol-function 'tmux-control--drop-rows-below-cursor))
+                 ((symbol-function 'tmux-control--flush-output-batch)
+                  (lambda ()
+                    (when tmux-control--output-batch
+                      (push (cons 'drawn (tmux-control--term-size)) events))
+                    (funcall flush)))
+                 ((symbol-function 'tmux-control--drop-rows-below-cursor)
+                  (lambda (n) (push 'dropped events) (funcall drop n))))
+        (should (tmux-control--apply-term-size 30 3)))
+      (should (equal (reverse events) '((drawn 40 . 5) dropped))))
     (should (tmux-control-test--shown-p "two"))
     (should-not tmux-control--deferred-flushes)))
+
+(ert-deftest tmux-control-test-clear-scrollback-draws-held-output-first ()
+  ;; Held output that scrolls would put rows into the history just cleared.
+  (tmux-control-test--with-paced-controller
+    (cl-letf (((symbol-function 'tmux-control--ensure-live) #'ignore)
+              ((symbol-function 'tmux-control--send-command) #'ignore)
+              ((symbol-function 'tmux-control-clear-and-repaint) #'ignore))
+      (tmux-control--filter proc "%output %0 one\\015\\012\n")
+      (tmux-control--filter
+       proc (concat "%output %0 "
+                    (mapconcat (lambda (n) (format "line-%d\\015\\012" n))
+                               (number-sequence 2 9) "")
+                    "\n"))
+      (tmux-control-clear-scrollback)
+      (tmux-control--run-deferred-flushes)
+      (should (tmux-control-test--shown-p "line-9"))
+      (should (= (point-min) (tmux-control--term-screen-start))))))
 
 (ert-deftest tmux-control-test-running-the-redraws-cancels-their-timer ()
   ;; Run directly, the redraws leave no timer behind to run them again.
