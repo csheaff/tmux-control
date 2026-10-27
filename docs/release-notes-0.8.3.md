@@ -30,6 +30,9 @@
 
 ## Sizes and tiled views
 
+- A window made shorter keeps following its terminal's output. Output drawn
+  before Emacs next drew the window could leave it behind, falling further
+  back with each line until something repainted it.
 - A new connection asks tmux for its size once its window has settled. A
   package that changes the window right after connecting, as Roost does when
   it docks its task panel, had tmux rewrap the pane at two widths, and the
