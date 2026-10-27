@@ -7627,30 +7627,32 @@ from when shown again."
 
 (defun tmux-control--resume-hidden ()
   "Continue the pane this buffer paused while out of sight, and repaint it.
-When it is still the buffer's own pane, the history it printed while
-paused is added first, for the repaint to bring."
-  (let ((pane tmux-control--hidden-pane)
-        (tail tmux-control--hidden-tail))
+Each buffer the repaint seeds that showed the pane gets the history it
+printed while paused first: this one while the pane is still its own and
+it is untiled, and the pane's buffer from a tiled view."
+  (let* ((pane tmux-control--hidden-pane)
+         (tail tmux-control--hidden-tail)
+         (tile (cdr (assoc pane (or tmux-control--pane-buffers tmux-control--panes))))
+         (buffers (delq nil (list (and (equal pane tmux-control--active-pane)
+                                       (not tmux-control--tiled)
+                                       (current-buffer))
+                                  (and (buffer-live-p tile) tile)))))
     (setq tmux-control--hidden-pane nil
           tmux-control--hidden-tail nil)
     (when (process-live-p tmux-control--process)
       ;; The history and the screen from one moment, so no row printed
       ;; meanwhile falls between them.
       (tmux-control--with-one-write
-        (when (and tail
-                   (equal pane tmux-control--active-pane)
-                   (not tmux-control--tiled))
-          (tmux-control--fetch-missed-history pane tail))
+        (when (and tail buffers)
+          (tmux-control--fetch-missed-history pane tail buffers))
         (tmux-control--resync-paused-pane pane)))))
 
-(defun tmux-control--fetch-missed-history (pane tail)
+(defun tmux-control--fetch-missed-history (pane tail buffers)
   "Ask tmux for the rows PANE added to its history after TAIL.
-TAIL is the list `tmux-control--pause-hidden' fills.  The rows go to
-`tmux-control--seed-history', for the screen seed that follows, in this
-buffer and in a buffer kept for PANE from a tiled view."
-  (let ((buffers (delq nil (list (current-buffer)
-                                 (cdr (assoc pane tmux-control--pane-buffers)))))
-        (size nil))
+TAIL is the list `tmux-control--pause-hidden' fills.  The rows go to the
+`tmux-control--seed-history' of each of BUFFERS, for the screen seed
+that follows."
+  (let ((size nil))
     (tmux-control--query (tmux-control--history-size-command pane)
                          (lambda (lines)
                            (setq size (tmux-control--parse-history-size lines))))
@@ -7660,6 +7662,8 @@ buffer and in a buffer kept for PANE from a tiled view."
        (let ((then (car-safe (car tail))))
          ;; At another width tmux has rewrapped its history, so the rows
          ;; it ended with are not found, and all would come back again.
+         ;; At another height, rows the screen lost went to the history
+         ;; here as well as in tmux, and would come twice.
          (when (and rows size then (equal (cdr size) (cdr then)))
            (let* ((rows (last rows (min (car size) (length rows))))
                   ;; Where they end in ROWS if nothing scrolled out of
@@ -7673,16 +7677,18 @@ buffer and in a buffer kept for PANE from a tiled view."
                      (setq tmux-control--seed-history (cons pane missed)))))))))))))
 
 (defun tmux-control--history-size-command (pane)
-  "Return the control command that asks for PANE's history size and width."
-  (format "display-message -p -t %s '#{history_size} #{pane_width}'" pane))
+  "Return the control command that asks for PANE's history size and size."
+  (format "display-message -p -t %s '#{history_size} #{pane_width} #{pane_height}'"
+          pane))
 
 (defun tmux-control--parse-history-size (lines)
-  "Return the history size and pane width in reply LINES, or nil.
-The value is (SIZE . WIDTH)."
+  "Return the history size and pane size in reply LINES, or nil.
+The value is (SIZE WIDTH . HEIGHT)."
   (let ((line (string-trim (or (car lines) ""))))
-    (and (string-match "\\`\\([0-9]+\\) \\([0-9]+\\)\\'" line)
+    (and (string-match "\\`\\([0-9]+\\) \\([0-9]+\\) \\([0-9]+\\)\\'" line)
          (cons (string-to-number (match-string 1 line))
-               (string-to-number (match-string 2 line))))))
+               (cons (string-to-number (match-string 2 line))
+                     (string-to-number (match-string 3 line)))))))
 
 (defun tmux-control--history-rows-command (pane rows)
   "Return the control command that captures the last ROWS of PANE's history.
@@ -7728,12 +7734,15 @@ up into history, leaving the screen blank for the repaint that follows."
 Only on the normal screen, and scrolling it as a whole, since rows
 written elsewhere would not reach the history: a narrower scroll region
 is widened when the seed's MODES, replayed next, restore the pane's.
-Run before a screen seed paints."
+Not when MODES enter the alternate screen: that keeps the normal screen
+to come back to, which the rows would have cleared.  Run before a
+screen seed paints."
   (when-let* ((waiting tmux-control--seed-history))
     (setq tmux-control--seed-history nil)
     (when (and (equal (car waiting) tmux-control--active-pane)
                (tmux-control--term-live-p)
-               (not (tmux-control--term-alt-screen-p)))
+               (not (tmux-control--term-alt-screen-p))
+               (not (eq (plist-get modes :alt-screen) :on)))
       (let ((whole (tmux-control--term-scrolls-whole-screen-p)))
         (when (or whole (plist-get modes :scroll-region))
           (tmux-control--write-terminal

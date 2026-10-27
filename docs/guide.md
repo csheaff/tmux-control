@@ -725,9 +725,10 @@ CPU.
 - Only the pane a session's own buffer shows is paused: not tiled panes, nor
   the buffers of other windows (`tmux-control-window-buffers`).
 - History beyond 2,000 lines, or beyond tmux's own `history-limit`, does not
-  come back, nor does any when the terminal was paused on a full-screen
-  program's screen (the alternate screen).  The [scrollback view](#scrollback)
-  shows what tmux kept.
+  come back, nor does any when the pane changed size while paused, or when a
+  full-screen program's screen (the alternate screen) was showing when it was
+  paused or is when it comes back.  The [scrollback view](#scrollback) shows
+  what tmux kept.
 - Set it with `setq-local` in a session's buffer for that session alone.
 
 Off by default; needs tmux 3.2+.  It pauses the pane rather than turning its
