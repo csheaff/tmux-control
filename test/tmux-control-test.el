@@ -9501,5 +9501,53 @@ buffer.  The pause timer is cancelled afterwards."
           (cancel-timer tmux-control--hidden-timer))
         (setq tmux-control--hidden-timer nil)))))
 
+(ert-deftest tmux-control-test-late-tile-seed-does-not-continue-a-repaused-pane ()
+  ;; A kept tile buffer's seed continues the pane once its reply comes.
+  ;; Shown and out of sight again before then, the pane was paused anew:
+  ;; the late reply must leave it paused.
+  (tmux-control-test--with-hidden-controller
+    (let ((tile (generate-new-buffer " *tc-kept-tile*"))
+          after)
+      (unwind-protect
+          (cl-letf (((symbol-function 'tmux-control--seed-screen) #'ignore)
+                    ((symbol-function 'tmux-control--seed-pane-buffer-async)
+                     (lambda (_buffer _controller &optional then) (setq after then))))
+            (with-current-buffer tile
+              (setq-local tmux-control--active-pane "%3"))
+            (setq tmux-control--pane-buffers (list (cons "%3" tile)))
+            (tmux-control--update-hidden-terminals t)
+            (save-window-excursion
+              (switch-to-buffer ctrl)
+              (tmux-control--hidden-windows-changed))
+            (should-not tmux-control--hidden-pane)
+            (tmux-control--update-hidden-terminals t)
+            (should (equal tmux-control--hidden-pane "%3"))
+            (setq sent nil)
+            (funcall after)
+            (should-not (assoc "refresh-client -A \"%3:continue\"" sent))
+            (should (equal tmux-control--hidden-pane "%3")))
+        (kill-buffer tile)))))
+
+(ert-deftest tmux-control-test-hidden-pane-resumes-when-its-tab-flag-clears ()
+  ;; Another client made the paused pane's window current and left it,
+  ;; clearing the tab flag the pause waited for: the pane resumes, so
+  ;; its output can raise the flag again.
+  (tmux-control-test--with-hidden-controller
+    (let ((tmux-control-window-tab-bar t))
+      (cl-letf (((symbol-function 'tmux-control--seed-screen) #'ignore))
+        (setq tmux-control--current-window "1"
+              tmux-control--pane-window (make-hash-table :test 'equal)
+              tmux-control--activity (make-hash-table :test 'equal))
+        (puthash "%3" (cons "0" "@0") tmux-control--pane-window)
+        (puthash "0" t tmux-control--activity)
+        (tmux-control--update-hidden-terminals t)
+        (should (equal tmux-control--hidden-pane "%3"))
+        (tmux-control--update-windows '("0\tcode\t1\t0\t@0" "1\tbuild\t0\t0\t@1"))
+        (should (equal tmux-control--hidden-pane "%3"))
+        (setq sent nil)
+        (tmux-control--update-windows '("0\tcode\t0\t0\t@0" "1\tbuild\t1\t0\t@1"))
+        (should-not tmux-control--hidden-pane)
+        (should (assoc "refresh-client -A \"%3:continue\"" sent))))))
+
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

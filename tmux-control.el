@@ -1616,6 +1616,9 @@ Lets streamed %output be attributed to a window for the activity marker.")
   "Float-time before which background-activity flagging is suppressed.
 Set around client-driven full repaints (connect, switch, resize) so the
 resulting prompt/redraw burst in every pane does not flag every window.")
+(defvar-local tmux-control--hidden-pane nil
+  "The pane this buffer paused because no window showed it, or nil.")
+
 (defvar-local tmux-control--session-activity nil
   "Non-nil when this session produced output while it was off screen.
 The session-level analog of `tmux-control--activity': set on the hot output
@@ -3635,7 +3638,12 @@ the controller renders its own window, so a switch back to it swaps here."
     (when active
       (setq tmux-control--current-window active)
       (when (hash-table-p tmux-control--activity)
-        (remhash active tmux-control--activity)))
+        (remhash active tmux-control--activity))
+      ;; Another client can make the paused pane's window current and
+      ;; leave it, clearing the tab flag it waited for: resume it, for
+      ;; its output to raise the flag again.
+      (when tmux-control--hidden-pane
+        (tmux-control--update-hidden)))
     ;; The controller doubles as the render buffer for the window it was
     ;; connected on; bind it to that window's id once known.  ONLY that
     ;; once: a controller whose own window later closed has a nil id too,
@@ -7478,9 +7486,6 @@ of the pane's history, so more costs a larger reply over SSH.")
 Found again in the pane's history when it is shown, they mark where the
 rows printed while it was paused begin.")
 
-(defvar-local tmux-control--hidden-pane nil
-  "The pane this buffer paused because no window showed it, or nil.")
-
 (defvar-local tmux-control--hidden-tail nil
   "A one-element list of what the paused pane's history ended with, or nil.
 Its element is :pending until tmux answers, :failed if it could not,
@@ -7528,17 +7533,24 @@ could be paused once it has been out of sight long enough."
       (when (and (eq (buffer-local-value 'major-mode buffer) 'tmux-control-mode)
                  (null (buffer-local-value 'tmux-control--controller buffer)))
         (with-current-buffer buffer
-          (let ((pausable (tmux-control--hidden-pausable-p)))
-            (when (and tmux-control--hidden-pane
-                       (not (and pausable
-                                 (equal tmux-control--hidden-pane
-                                        tmux-control--active-pane))))
-              (tmux-control--resume-hidden))
-            (when (and pausable (not tmux-control--hidden-pane))
-              (if pause
-                  (tmux-control--pause-hidden)
-                (setq waiting t)))))))
+          (when (tmux-control--update-hidden pause)
+            (setq waiting t)))))
     waiting))
+
+(defun tmux-control--update-hidden (&optional pause)
+  "Resume this session buffer's paused pane if it must stream again.
+With PAUSE, pause it if it can be.  Return non-nil when it could be
+paused once it has been out of sight long enough."
+  (let ((pausable (tmux-control--hidden-pausable-p)))
+    (when (and tmux-control--hidden-pane
+               (not (and pausable
+                         (equal tmux-control--hidden-pane
+                                tmux-control--active-pane))))
+      (tmux-control--resume-hidden))
+    (when (and pausable (not tmux-control--hidden-pane))
+      (if pause
+          (tmux-control--pause-hidden)
+        t))))
 
 (defun tmux-control--hidden-pausable-p ()
   "Return non-nil when this session buffer's pane can be paused.
@@ -7760,7 +7772,11 @@ A pane paused because no window shows it waits until one does."
          (cached (buffer-live-p buffer))
          (resume (lambda ()
                    (when (and (buffer-live-p controller)
-                              (eq process (buffer-local-value 'tmux-control--process controller)))
+                              (eq process (buffer-local-value 'tmux-control--process controller))
+                              ;; Shown and out of sight again before this
+                              ;; seed's reply: it waits to be shown.
+                              (not (equal pane (buffer-local-value
+                                                'tmux-control--hidden-pane controller))))
                      (with-current-buffer controller
                        (tmux-control--send-command
                         (format "refresh-client -A %s"
