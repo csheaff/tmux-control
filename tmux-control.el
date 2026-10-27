@@ -1095,7 +1095,9 @@ the limit (see `tmux-control--term-set-history-limit') is dropped."
   (eat-term-size tmux-control--terminal))
 
 (defun tmux-control--term-resize (width height)
-  "Resize the terminal to WIDTH columns by HEIGHT rows."
+  "Resize the terminal to WIDTH columns by HEIGHT rows.
+Output held for the redraw timer is drawn first, at the size it came at."
+  (tmux-control--flush-deferred)
   (eat-term-resize tmux-control--terminal width height))
 
 (defun tmux-control--term-cursor ()
@@ -6550,6 +6552,9 @@ this first, so the held output cannot be drawn over it afterwards."
 
 (defun tmux-control--run-deferred-flushes ()
   "Redraw every controller waiting for the shared redraw timer."
+  ;; Called directly, the timer is still to come.
+  (when (timerp tmux-control--deferred-flush-timer)
+    (cancel-timer tmux-control--deferred-flush-timer))
   (setq tmux-control--deferred-flush-timer nil)
   (let ((controllers (nreverse tmux-control--deferred-flushes)))
     (setq tmux-control--deferred-flushes nil)
@@ -8559,12 +8564,6 @@ dialog box, asked again as soon as you answered."
              (> (length string) 0)
              (not tmux-control--suppress-responses))
     (tmux-control--ensure-input-ready)
-    ;; Its echo is drawn as soon as it comes.
-    (let ((controller (and (processp tmux-control--process)
-                           (process-buffer tmux-control--process))))
-      (when (buffer-live-p controller)
-        (with-current-buffer controller
-          (setq tmux-control--echo-due (float-time)))))
     (let ((target (tmux-control--input-target)))
       (if target
           (let* ((bytes (encode-coding-string string 'utf-8-unix))
@@ -8781,6 +8780,10 @@ so every reply stays matched to the right handler on one queue."
           (setq tmux-control--command-queue
                 (append tmux-control--command-queue
                         (list (cons (or kind :ignore) (float-time)))))
+          ;; Input -- keys, named keys, a paste: what it echoes is drawn as
+          ;; soon as it comes.
+          (when (eq kind :input)
+            (setq tmux-control--echo-due (float-time)))
           (tmux-control--arm-command-watchdog)
           (process-send-string tmux-control--process
                                (concat command "\n")))))))

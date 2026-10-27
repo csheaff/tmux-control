@@ -3911,13 +3911,45 @@ BODY runs `tmux-control--run-deferred-flushes' itself."
       (kill-buffer broken)
       (kill-buffer fine))))
 
-(ert-deftest tmux-control-test-typing-marks-its-echo-due ()
+(ert-deftest tmux-control-test-input-marks-its-echo-due ()
+  ;; Every kind of input goes to tmux as an `:input' command: keys, named
+  ;; keys such as Shift+Return, and pastes.
   (tmux-control-test--with-paced-controller
-    (cl-letf (((symbol-function 'tmux-control--send-command) #'ignore)
-              ((symbol-function 'tmux-control--ensure-input-ready) #'ignore))
-      (setq tmux-control--echo-due nil)
-      (tmux-control--send-input tmux-control--terminal "x")
-      (should tmux-control--echo-due))))
+    (let ((tmux-control-command-timeout nil))
+      (cl-letf (((symbol-function 'process-send-string) #'ignore))
+        (setq tmux-control--echo-due nil)
+        (tmux-control--send-command "display-message -p x" :query)
+        (should-not tmux-control--echo-due)
+        (tmux-control--send-command "send-keys -t %0 S-Enter" :input)
+        (should tmux-control--echo-due)))))
+
+(ert-deftest tmux-control-test-resize-draws-held-output-first ()
+  ;; Held output was printed for the old size, so it is drawn at that size.
+  (tmux-control-test--with-paced-controller
+    (tmux-control--filter proc "%output %0 one\\015\\012\n")
+    (tmux-control--filter proc "%output %0 two\\015\\012\n")
+    (should-not (tmux-control-test--shown-p "two"))
+    (let (size-when-drawn)
+      (cl-letf (((symbol-function 'tmux-control--flush-output-batch)
+                 (let ((orig (symbol-function 'tmux-control--flush-output-batch)))
+                   (lambda ()
+                     (when tmux-control--output-batch
+                       (setq size-when-drawn (tmux-control--term-size)))
+                     (funcall orig)))))
+        (tmux-control--term-resize 30 4))
+      (should (equal size-when-drawn '(40 . 5))))
+    (should (tmux-control-test--shown-p "two"))
+    (should-not tmux-control--deferred-flushes)))
+
+(ert-deftest tmux-control-test-running-the-redraws-cancels-their-timer ()
+  ;; Run directly, the redraws leave no timer behind to run them again.
+  (tmux-control-test--with-paced-controller
+    (tmux-control--filter proc "%output %0 one\\015\\012\n")
+    (tmux-control--filter proc "%output %0 two\\015\\012\n")
+    (let ((timer tmux-control--deferred-flush-timer))
+      (should (memq timer timer-list))
+      (tmux-control--run-deferred-flushes)
+      (should-not (memq timer timer-list)))))
 
 ;;; Per-window render buffers.
 
