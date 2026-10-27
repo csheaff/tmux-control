@@ -1703,6 +1703,54 @@ tmux brings them back as it grows again; so does the view."
     (should (tmux-control-it--resize-to controller pane 35))
     (should (equal (car (tmux-control-it--screen controller)) "27"))))
 
+(ert-deftest tmux-control-it-window-made-shorter-keeps-following ()
+  "A window made shorter while its pane prints keeps following the
+output, though the output comes before Emacs draws the window again and
+fits the terminal to it."
+  (skip-unless (executable-find "python3"))
+  (tmux-control-it--with-runner
+    (save-window-excursion
+      (delete-other-windows)
+      (let ((window (split-window nil nil 'below))
+            (tmux-control-wheel-scrolls-live-history t)
+            ;; Batch Emacs never draws, so it keeps no height a window was
+            ;; last drawn at: `draw' keeps it here.
+            (drawn 0))
+        (cl-flet ((draw ()
+                    ;; What drawing the window does: fit the terminal to it.
+                    (with-current-buffer controller (tmux-control--resize-to-window))
+                    (setq drawn (window-body-height window t))
+                    (tmux-control-it--ready controller))
+                  (following-p ()
+                    (with-current-buffer controller
+                      (let ((cursor (tmux-control--term-cursor)))
+                        (and (= (window-point window) cursor)
+                             (tmux-control--cursor-visible-p
+                              window cursor (tmux-control--term-screen-start)))))))
+          (cl-letf (((symbol-function 'window-old-body-pixel-height)
+                     (lambda (&optional w) (if (eq w window) drawn 0))))
+            (set-window-buffer window controller)
+            (draw)
+            ;; 200 lines a second for four seconds.
+            (tmux-control-it--tmux
+             "send-keys" "-t" pane "-l"
+             (concat "python3 -c \"import time; [(print('LINE-%d' % i, flush=True), "
+                     "time.sleep(0.005)) for i in range(800)]; print('DO' + 'NE')\""))
+            (tmux-control-it--tmux "send-keys" "-t" pane "Enter")
+            (should (tmux-control-it--pump-until
+                     15 (lambda () (string-search
+                                    "LINE-100" (tmux-control-it--buffer-text controller)))))
+            (should (following-p))
+            (window-resize window -3)
+            ;; Half a second of output, and no drawing.
+            (tmux-control-it--pump-until 0.5 #'ignore)
+            (should (following-p))
+            (draw)
+            (should (tmux-control-it--pump-until
+                     20 (lambda () (string-search
+                                    "DONE" (tmux-control-it--buffer-text controller)))))
+            (should (following-p))))))))
+
 (ert-deftest tmux-control-it-a-new-width-shows-lines-wrapped-as-tmux-has-them ()
   "tmux rewraps long lines at a new width in its own way; the view shows
 them as tmux has them, rather than as Eat rewrapped them."

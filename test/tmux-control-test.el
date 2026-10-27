@@ -7741,7 +7741,7 @@ Return the window."
             ((symbol-function 'get-buffer-window-list)
              (lambda (&rest _) (list 'win-a 'win-b)))
             ;; The live cursor is visible only in win-a.
-            ((symbol-function 'tmux-control--cursor-visible-p)
+            ((symbol-function 'tmux-control--cursor-seen-p)
              (lambda (w _cursor _top) (eq w 'win-a))))
     (let ((tmux-control--terminal 'term))
       (let ((tmux-control-wheel-scrolls-live-history nil))
@@ -7757,6 +7757,59 @@ Return the window."
         (let ((tmux-control-wheel-scrolls-live-history t))
           (should (equal (tmux-control--current-sync-windows)
                          '(buffer win-a win-b))))))))
+
+(ert-deftest tmux-control-test-window-made-shorter-keeps-following ()
+  ;; The terminal is fitted to its window when Emacs next draws the window,
+  ;; so a window made shorter is, until then, shorter than the screen, and
+  ;; the cursor on the screen's last row is below it.  Output drawn before
+  ;; then, as by the redraw timer, still scrolls the window; left where it
+  ;; was, the window stopped following for good.  A window reading history
+  ;; holds through the same.
+  (tmux-control-test--with-paced-controller
+    (save-window-excursion
+      (delete-other-windows)
+      (let ((window (split-window nil nil 'below))
+            (tmux-control-wheel-scrolls-live-history t)
+            ;; Batch Emacs never draws, so it keeps no height a window was
+            ;; last drawn at: `draw' keeps it here.
+            (drawn 0)
+            (line 0))
+        (cl-labels ((draw ()
+                      (tmux-control--apply-term-size 40 (window-body-height window))
+                      (setq drawn (window-body-height window t)))
+                    (stream (count)
+                      (tmux-control--filter
+                       proc (concat "%output %0 "
+                                    (mapconcat (lambda (_)
+                                                 (format "line %d\\015\\012" (cl-incf line)))
+                                               (number-sequence 1 count) "")
+                                    "\n"))
+                      (tmux-control--run-deferred-flushes))
+                    (following-p ()
+                      (let ((cursor (tmux-control--term-cursor)))
+                        (and (= (window-point window) cursor)
+                             (tmux-control--cursor-visible-p
+                              window cursor (tmux-control--term-screen-start))))))
+          (cl-letf (((symbol-function 'window-old-body-pixel-height)
+                     (lambda (&optional w) (if (eq w window) drawn 0))))
+            (set-window-buffer window (current-buffer))
+            (draw)
+            (stream 30)
+            (should (following-p))
+            (window-resize window -3)
+            (stream 5)
+            (should (following-p))
+            ;; Drawn, the terminal fits the window, which follows on.
+            (draw)
+            (stream 5)
+            (should (following-p))
+            ;; Reading history.
+            (set-window-start window (point-min))
+            (set-window-point window (point-min))
+            (window-resize window -2)
+            (stream 5)
+            (should (= (window-start window) (point-min)))
+            (should (= (window-point window) (point-min)))))))))
 
 (defvar tmux-control-test--audit-modal nil
   "Stands in for a modal minor mode in the key-audit test.")
