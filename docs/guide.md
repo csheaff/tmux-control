@@ -704,8 +704,8 @@ keeps up and never triggers it.  Off by default; needs tmux 3.2+.
 
 Emacs spends time on a terminal's output even when no window shows it, so a
 few busy terminals out of sight keep it busy: ten agents printing 200 lines a
-second, with one in view, kept Emacs at MAIN_CPU% CPU.  To have tmux hold that
-output instead:
+second, with one in view, kept Emacs at 62% CPU, a third of it collecting
+garbage.  To have tmux hold that output instead:
 
 ```elisp
 (setq tmux-control-pause-hidden t)
@@ -716,8 +716,8 @@ pane.  The program in it runs on, and tmux keeps its screen and history, but
 sends Emacs none of it.  When a window shows the buffer again, tmux continues
 the pane, the buffer gets back up to 2,000 lines of the history printed
 meanwhile, and its screen is repainted.  Until then, a round trip to tmux, it
-shows the screen it had when paused.  With the ten agents, Emacs went to
-ON_CPU% CPU.
+shows the screen it had when paused.  With the ten agents, Emacs went to 13%
+CPU.
 
 - A buffer is paused only once its output has raised the flags of
   [Which session wants you](#which-session-wants-you) and the

@@ -3740,14 +3740,17 @@ flagged one in its strip."
   (when (and tmux-control-session-activity
              (not tmux-control--session-activity)
              (> (float-time) tmux-control--activity-quiet-until)
-             ;; "Visible" means whichever buffer represents the session on
-             ;; screen -- the current window's render buffer when per-window
-             ;; buffers are on, not necessarily this controller.
-             (not (get-buffer-window (tmux-control--session-display-buffer)
-                                     'visible)))
+             (not (tmux-control--session-on-screen-p)))
     (setq tmux-control--session-activity t)
     (tmux-control--activity-flagged)
     (force-mode-line-update t)))
+
+(defun tmux-control--session-on-screen-p ()
+  "Return non-nil when a window on a visible frame shows this session.
+That is whichever buffer represents the session on screen -- the
+current window's render buffer when per-window buffers are on, not
+necessarily this controller."
+  (get-buffer-window (tmux-control--session-display-buffer) 'visible))
 
 (defun tmux-control--connection-name (host session)
   "Return SESSION qualified by its server, as HOST:SESSION.
@@ -7455,10 +7458,11 @@ rows printed while it was paused begin.")
   "The pane this buffer paused because no window showed it, or nil.")
 
 (defvar-local tmux-control--hidden-tail nil
-  "A one-element list of the paused pane's last history rows, or nil.
+  "A one-element list of what the paused pane's history ended with, or nil.
 Its element is :pending until tmux answers, :failed if it could not,
-and otherwise the rows as `capture-pane -e' gave them.  A list, so a
-return that comes before the answer still reads it.")
+and otherwise (WIDTH . ROWS): the pane's width and its last history rows
+as `capture-pane -e' gave them.  A list, so a return that comes before
+the answer still reads it.")
 
 (defvar-local tmux-control--seed-history nil
   "History rows for the next screen seed to add first, as (PANE . ROWS).")
@@ -7468,9 +7472,14 @@ return that comes before the answer still reads it.")
 
 (defun tmux-control--hidden-windows-changed (&optional _frame)
   "Resume the paused terminals a window shows, and pause hidden ones later.
-Runs from `window-buffer-change-functions' and `delete-frame-functions'."
+Runs from `window-buffer-change-functions'."
   (when (tmux-control--update-hidden-terminals)
     (tmux-control--pause-hidden-later)))
+
+(defun tmux-control--hidden-frame-deleted (_frame)
+  "Pause the terminals a deleted frame showed, once it has gone.
+Runs from `delete-frame-functions', before the frame goes."
+  (tmux-control--pause-hidden-later))
 
 (defun tmux-control--pause-hidden-later ()
   "Pause the terminals still out of sight in `tmux-control--hidden-delay'.
@@ -7536,7 +7545,10 @@ Output from a session out of sight flags it for
 the session's current one flags its tab.  Pausing the pane before then
 would hide that it printed."
   (and (or (not tmux-control-session-activity)
-           tmux-control--session-activity)
+           tmux-control--session-activity
+           ;; Shown through another of its buffers, the session is not
+           ;; flagged.  Out of sight again, it is resumed to be.
+           (tmux-control--session-on-screen-p))
        (or (not tmux-control-window-tab-bar)
            (null tmux-control--current-window)
            (let ((window (car-safe (and (hash-table-p tmux-control--pane-window)
@@ -7548,7 +7560,8 @@ would hide that it printed."
 
 (defun tmux-control--activity-flagged ()
   "Pause this session's pane soon if an activity flag was all it waited for."
-  (when (and tmux-control-pause-hidden (not tmux-control--hidden-pane))
+  (when (and (not tmux-control--hidden-pane)
+             (tmux-control--hidden-pausable-p))
     (tmux-control--pause-hidden-later)))
 
 (defun tmux-control--pause-hidden ()
@@ -7570,7 +7583,9 @@ from when shown again."
                           pane tmux-control--hidden-tail-rows)
                          (lambda (rows)
                            (setcar tail (if (and rows size)
-                                            (last rows (min size (length rows)))
+                                            (cons (cdr size)
+                                                  (last rows (min (car size)
+                                                                  (length rows))))
                                           :failed))))))
 
 (defun tmux-control--resume-hidden ()
@@ -7600,21 +7615,27 @@ TAIL is the list `tmux-control--pause-hidden' fills.  The rows go to
     (tmux-control--query
      (tmux-control--history-rows-command pane tmux-control--hidden-history-rows)
      (lambda (rows)
-       (when (and rows size (listp (car tail)) (buffer-live-p buffer))
+       ;; At another width tmux has rewrapped its history, so the rows
+       ;; it ended with are not found, and all would come back again.
+       (when (and rows size (consp (car tail)) (buffer-live-p buffer)
+                  (equal (cdr size) (car (car tail))))
          (when-let* ((missed (tmux-control--rows-after
-                              (car tail) (last rows (min size (length rows))))))
+                              (cdr (car tail))
+                              (last rows (min (car size) (length rows))))))
            (with-current-buffer buffer
              (setq tmux-control--seed-history (cons pane missed)))))))))
 
 (defun tmux-control--history-size-command (pane)
-  "Return the control command that asks for PANE's history size."
-  (format "display-message -p -t %s '#{history_size}'" pane))
+  "Return the control command that asks for PANE's history size and width."
+  (format "display-message -p -t %s '#{history_size} #{pane_width}'" pane))
 
 (defun tmux-control--parse-history-size (lines)
-  "Return the history size in reply LINES, or nil."
+  "Return the history size and pane width in reply LINES, or nil.
+The value is (SIZE . WIDTH)."
   (let ((line (string-trim (or (car lines) ""))))
-    (and (string-match-p "\\`[0-9]+\\'" line)
-         (string-to-number line))))
+    (and (string-match "\\`\\([0-9]+\\) \\([0-9]+\\)\\'" line)
+         (cons (string-to-number (match-string 1 line))
+               (string-to-number (match-string 2 line))))))
 
 (defun tmux-control--history-rows-command (pane rows)
   "Return the control command that captures the last ROWS of PANE's history.
@@ -7680,7 +7701,7 @@ its turn once it has been out of sight long enough."
 The first tmux-control buffer adds these global hooks, rather than
 loading the package; `tmux-control-unload-function' removes them."
   (add-hook 'window-buffer-change-functions #'tmux-control--hidden-windows-changed)
-  (add-hook 'delete-frame-functions #'tmux-control--hidden-windows-changed))
+  (add-hook 'delete-frame-functions #'tmux-control--hidden-frame-deleted))
 
 (defun tmux-control--handle-pause (pane)
   "Resync paused PANE in-band, then resume streaming without blocking SSH.
@@ -11811,7 +11832,7 @@ also does its usual cleanup."
   (remove-hook 'window-size-change-functions #'tmux-control--on-frame-size-change)
   (remove-hook 'window-size-change-functions #'tmux-control--follow-window-buffer-sizes)
   (remove-hook 'window-buffer-change-functions #'tmux-control--hidden-windows-changed)
-  (remove-hook 'delete-frame-functions #'tmux-control--hidden-windows-changed)
+  (remove-hook 'delete-frame-functions #'tmux-control--hidden-frame-deleted)
   (when (timerp tmux-control--hidden-timer)
     (cancel-timer tmux-control--hidden-timer))
   (setq tmux-control--hidden-timer nil)
