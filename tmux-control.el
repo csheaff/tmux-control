@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026  Clay Sheaff
 
 ;; Author: Clay Sheaff
-;; Version: 0.8.2
+;; Version: 0.8.3
 ;; Package-Requires: ((emacs "29.1") (eat "0.9.4"))
 ;; Keywords: terminals, tmux
 ;; URL: https://github.com/csheaff/tmux-control
@@ -59,7 +59,7 @@
 (require 'subr-x)
 (require 'ucs-normalize)
 
-(defconst tmux-control-version "0.8.2"
+(defconst tmux-control-version "0.8.3"
   "Version of tmux-control, included in diagnostic reports.")
 
 ;; Optional: `consult' drives the per-candidate preview for the `inline'
