@@ -200,6 +200,28 @@ error) and never pause."
   :type '(choice (const :tag "Off (stream everything)" nil)
                  (integer :tag "Seconds behind before pausing")))
 
+(defcustom tmux-control-pause-hidden nil
+  "Non-nil to have tmux pause a terminal's output while no window shows it.
+Emacs spends time on output even in a buffer no window shows, so a few
+busy terminals out of sight keep it busy.  With this on, once no window
+has shown a terminal for a second, tmux pauses its output.  The program
+in it runs on, and tmux keeps its screen and history.  When a window
+shows the terminal again, tmux continues it: the buffer gets back up to
+2000 lines of the history printed meanwhile, and its screen is
+repainted.  Until then, a round trip to tmux, it shows the screen it
+had when paused.
+
+A terminal is paused only once its output has raised the flags of
+`tmux-control-session-activity' and the tab bar, so they still say it
+printed.  Only the pane a session's own buffer shows is paused, not
+tiled panes or the buffers of other windows.  Needs tmux 3.2 or newer.
+Set it with `setq-local' in a session's buffer for that session alone."
+  :type 'boolean
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         (when (fboundp 'tmux-control--hidden-windows-changed)
+           (tmux-control--hidden-windows-changed))))
+
 (defvar tmux-control--heal-timer nil
   "The shared idle timer driving `tmux-control-auto-heal-drift'.")
 
@@ -1124,6 +1146,17 @@ which case seed verification quietly disables itself."
         ;; Eat's cursor is 1-indexed; tmux's is 0-indexed.
         (cons (1- (eat--t-cur-x cur)) (1- (eat--t-cur-y cur)))))))
 
+(defun tmux-control--term-scrolls-whole-screen-p ()
+  "Return non-nil when the terminal's scroll region is its whole screen.
+Then a line feed on its last row moves the top row into history.  Nil
+when Eat's internals are unavailable."
+  (when (and (tmux-control--term-live-p)
+             (fboundp 'eat--t-term-scroll-begin)
+             (fboundp 'eat--t-term-scroll-end))
+    (and (= (eat--t-term-scroll-begin tmux-control--terminal) 1)
+         (= (eat--t-term-scroll-end tmux-control--terminal)
+            (cdr (tmux-control--term-size))))))
+
 (defun tmux-control--term-screen-start ()
   "Return where the terminal's live screen starts in the buffer.
 Above it is the history the terminal keeps.  The value can be a marker,
@@ -1816,6 +1849,7 @@ It builds on Eat's `eat-mode', so `eat-mode-hook' runs too, before
   (when (fboundp 'evil-set-initial-state)
     (evil-set-initial-state 'tmux-control-mode tmux-control-evil-state))
   (tmux-control--add-resize-hooks)
+  (tmux-control--add-hidden-hooks)
   (tmux-control--disable-line-numbers)
   (tmux-control--disable-margins)
   (tmux-control--show-no-break-spaces-as-spaces)
@@ -3692,6 +3726,7 @@ path costs nothing then, and during the quiet period after a full repaint
           (setq tmux-control--activity (make-hash-table :test 'equal)))
         (unless (gethash win tmux-control--activity)
           (puthash win t tmux-control--activity)
+          (tmux-control--activity-flagged)
           ;; All buffers: the on-screen tab bar may be a render buffer's.
           (force-mode-line-update t))))))
 
@@ -3711,6 +3746,7 @@ flagged one in its strip."
              (not (get-buffer-window (tmux-control--session-display-buffer)
                                      'visible)))
     (setq tmux-control--session-activity t)
+    (tmux-control--activity-flagged)
     (force-mode-line-update t)))
 
 (defun tmux-control--connection-name (host session)
@@ -6872,6 +6908,7 @@ backing off to the cap."
           ;; the event unconditionally (pre-window-buffers semantics, a
           ;; load-bearing affordance).  Follow it.
           (setq tmux-control--active-pane pane)
+          (tmux-control--follow-hidden-pane)
           (when tmux-control-pane-directory-mode
             (tmux-control--schedule-pane-directory-sync t))
           (unless tmux-control--tiled
@@ -7044,6 +7081,7 @@ swallowed as content and the reply queue would desynchronize."
                                output)))
          (when pane
            (setq tmux-control--active-pane pane)
+           (tmux-control--follow-hidden-pane)
            (when tmux-control-pane-directory-mode
              (tmux-control--schedule-pane-directory-sync t))
            (tmux-control--seed-screen)
@@ -7082,6 +7120,9 @@ swallowed as content and the reply queue would desynchronize."
        (setq tmux-control--seed-modes
              (tmux-control--parse-pane-modes output)))
       (:capture
+       ;; History printed while the pane was paused out of sight goes
+       ;; first, before a mode replay can leave the normal screen.
+       (tmux-control--write-missed-history)
        ;; Mode replay first: entering the alternate display clears it,
        ;; and the screen paint that follows fills it in.
        (tmux-control--write-seed
@@ -7384,8 +7425,271 @@ historical drift at the next natural seed, whatever its cause."
                       (t
                        (setq tmux-control--seed-verify-retries 0))))))))))))))
 
+;;;; Pausing terminals no window shows
+;;
+;; With `tmux-control-pause-hidden' on, a session's buffer that no window
+;; shows has tmux pause its active pane (`refresh-client -A %P:pause'),
+;; not turn it off: from tmux's only client, `off' stops tmux reading the
+;; pane, and the program blocks on its next write.  A paused pane runs
+;; on and tmux keeps its screen and history, sending this client nothing
+;; until `:continue'.  Shown again, the buffer gets back the history the
+;; pane printed meanwhile and a repaint of its screen, then tmux
+;; continues it.
+
+(defconst tmux-control--hidden-delay 1.0
+  "Seconds a terminal stays out of sight before tmux pauses it.
+Long enough that passing through a buffer, or a window shown for a
+moment over it, does not pause and repaint it.")
+
+(defconst tmux-control--hidden-history-rows 2000
+  "Most history rows a paused terminal gets back when shown again.
+tmux's own default `history-limit'.  Each return captures this many rows
+of the pane's history, so more costs a larger reply over SSH.")
+
+(defconst tmux-control--hidden-tail-rows 20
+  "History rows remembered when a terminal is paused.
+Found again in the pane's history when it is shown, they mark where the
+rows printed while it was paused begin.")
+
+(defvar-local tmux-control--hidden-pane nil
+  "The pane this buffer paused because no window showed it, or nil.")
+
+(defvar-local tmux-control--hidden-tail nil
+  "A one-element list of the paused pane's last history rows, or nil.
+Its element is :pending until tmux answers, :failed if it could not,
+and otherwise the rows as `capture-pane -e' gave them.  A list, so a
+return that comes before the answer still reads it.")
+
+(defvar-local tmux-control--seed-history nil
+  "History rows for the next screen seed to add first, as (PANE . ROWS).")
+
+(defvar tmux-control--hidden-timer nil
+  "Timer that pauses the terminals still out of sight.")
+
+(defun tmux-control--hidden-windows-changed (&optional _frame)
+  "Resume the paused terminals a window shows, and pause hidden ones later.
+Runs from `window-buffer-change-functions' and `delete-frame-functions'."
+  (when (tmux-control--update-hidden-terminals)
+    (tmux-control--pause-hidden-later)))
+
+(defun tmux-control--pause-hidden-later ()
+  "Pause the terminals still out of sight in `tmux-control--hidden-delay'.
+Each call restarts the wait."
+  (when (timerp tmux-control--hidden-timer)
+    (cancel-timer tmux-control--hidden-timer))
+  (setq tmux-control--hidden-timer
+        (run-with-timer tmux-control--hidden-delay nil
+                        #'tmux-control--pause-hidden-now)))
+
+(defun tmux-control--pause-hidden-now ()
+  "Pause the terminals out of sight, for `tmux-control-pause-hidden'."
+  (setq tmux-control--hidden-timer nil)
+  (tmux-control--update-hidden-terminals t))
+
+(defun tmux-control--update-hidden-terminals (&optional pause)
+  "Resume each paused session buffer that must stream again.
+With PAUSE, also pause those that can be.  Return non-nil when a buffer
+could be paused once it has been out of sight long enough."
+  (let (waiting)
+    (dolist (buffer (buffer-list))
+      (when (and (eq (buffer-local-value 'major-mode buffer) 'tmux-control-mode)
+                 (null (buffer-local-value 'tmux-control--controller buffer)))
+        (with-current-buffer buffer
+          (let ((pausable (tmux-control--hidden-pausable-p)))
+            (when (and tmux-control--hidden-pane
+                       (not (and pausable
+                                 (equal tmux-control--hidden-pane
+                                        tmux-control--active-pane))))
+              (tmux-control--resume-hidden))
+            (when (and pausable (not tmux-control--hidden-pane))
+              (if pause
+                  (tmux-control--pause-hidden)
+                (setq waiting t)))))))
+    waiting))
+
+(defun tmux-control--hidden-pausable-p ()
+  "Return non-nil when this session buffer's pane can be paused.
+That is when `tmux-control-pause-hidden' is on here, the buffer shows the
+active pane of a live connection to tmux 3.2 or newer, untiled, no
+window shows it, and its output can raise no activity flag that is down."
+  (and tmux-control-pause-hidden
+       (process-live-p tmux-control--process)
+       tmux-control--active-pane
+       (not tmux-control--tiled)
+       (tmux-control--version-at-least-p tmux-control--server-version 3 2)
+       (not (tmux-control--pane-shown-p tmux-control--active-pane))
+       (tmux-control--activity-noted-p tmux-control--active-pane)))
+
+(defun tmux-control--pane-shown-p (pane)
+  "Return non-nil when a window shows this buffer or a pane buffer of PANE."
+  (or (get-buffer-window (current-buffer) t)
+      (seq-some (lambda (entry)
+                  (and (equal (car entry) pane)
+                       (buffer-live-p (cdr entry))
+                       (get-buffer-window (cdr entry) t)))
+                (append tmux-control--pane-buffers tmux-control--panes))))
+
+(defun tmux-control--activity-noted-p (pane)
+  "Return non-nil when PANE's output can raise no activity flag that is down.
+Output from a session out of sight flags it for
+`tmux-control-session-activity', and output from a window that is not
+the session's current one flags its tab.  Pausing the pane before then
+would hide that it printed."
+  (and (or (not tmux-control-session-activity)
+           tmux-control--session-activity)
+       (or (not tmux-control-window-tab-bar)
+           (null tmux-control--current-window)
+           (let ((window (car-safe (and (hash-table-p tmux-control--pane-window)
+                                        (gethash pane tmux-control--pane-window)))))
+             (or (null window)
+                 (equal window tmux-control--current-window)
+                 (and (hash-table-p tmux-control--activity)
+                      (gethash window tmux-control--activity)))))))
+
+(defun tmux-control--activity-flagged ()
+  "Pause this session's pane soon if an activity flag was all it waited for."
+  (when (and tmux-control-pause-hidden (not tmux-control--hidden-pane))
+    (tmux-control--pause-hidden-later)))
+
+(defun tmux-control--pause-hidden ()
+  "Have tmux pause this buffer's active pane until a window shows it.
+Also ask for the last rows of its history, to find where it goes on
+from when shown again."
+  (let ((pane tmux-control--active-pane)
+        (tail (list :pending))
+        (size nil))
+    (setq tmux-control--hidden-pane pane
+          tmux-control--hidden-tail tail)
+    (tmux-control--send-command
+     (format "refresh-client -A %s"
+             (tmux-control--quote-tmux-arg (concat pane ":pause"))))
+    (tmux-control--query (tmux-control--history-size-command pane)
+                         (lambda (lines)
+                           (setq size (tmux-control--parse-history-size lines))))
+    (tmux-control--query (tmux-control--history-rows-command
+                          pane tmux-control--hidden-tail-rows)
+                         (lambda (rows)
+                           (setcar tail (if (and rows size)
+                                            (last rows (min size (length rows)))
+                                          :failed))))))
+
+(defun tmux-control--resume-hidden ()
+  "Continue the pane this buffer paused while out of sight, and repaint it.
+When it is still the buffer's own pane, the history it printed while
+paused is added first, for the repaint to bring."
+  (let ((pane tmux-control--hidden-pane)
+        (tail tmux-control--hidden-tail))
+    (setq tmux-control--hidden-pane nil
+          tmux-control--hidden-tail nil)
+    (when (process-live-p tmux-control--process)
+      (when (and tail
+                 (equal pane tmux-control--active-pane)
+                 (not tmux-control--tiled))
+        (tmux-control--fetch-missed-history pane tail))
+      (tmux-control--resync-paused-pane pane))))
+
+(defun tmux-control--fetch-missed-history (pane tail)
+  "Ask tmux for the rows PANE added to its history after TAIL.
+TAIL is the list `tmux-control--pause-hidden' fills.  The rows go to
+`tmux-control--seed-history', for the screen seed that follows."
+  (let ((buffer (current-buffer))
+        (size nil))
+    (tmux-control--query (tmux-control--history-size-command pane)
+                         (lambda (lines)
+                           (setq size (tmux-control--parse-history-size lines))))
+    (tmux-control--query
+     (tmux-control--history-rows-command pane tmux-control--hidden-history-rows)
+     (lambda (rows)
+       (when (and rows size (listp (car tail)) (buffer-live-p buffer))
+         (when-let* ((missed (tmux-control--rows-after
+                              (car tail) (last rows (min size (length rows))))))
+           (with-current-buffer buffer
+             (setq tmux-control--seed-history (cons pane missed)))))))))
+
+(defun tmux-control--history-size-command (pane)
+  "Return the control command that asks for PANE's history size."
+  (format "display-message -p -t %s '#{history_size}'" pane))
+
+(defun tmux-control--parse-history-size (lines)
+  "Return the history size in reply LINES, or nil."
+  (let ((line (string-trim (or (car lines) ""))))
+    (and (string-match-p "\\`[0-9]+\\'" line)
+         (string-to-number line))))
+
+(defun tmux-control--history-rows-command (pane rows)
+  "Return the control command that captures the last ROWS of PANE's history.
+With no history, tmux answers with the screen's first row, so read the
+answer with the history size asked for just before it."
+  (format "capture-pane -p -e%s -S -%d -E -1 -t %s"
+          (if tmux-control--capture-trailing-p " -N" "")
+          rows pane))
+
+(defun tmux-control--rows-after (tail rows)
+  "Return the ROWS that follow the last place TAIL appears in them.
+TAIL is the end of a pane's history when it was paused and ROWS the end
+of it now.  When TAIL is empty or not in ROWS -- nothing was in history
+then, or more than ROWS has scrolled in since -- all of ROWS follow it.
+Pure, for unit testing."
+  (let ((n (length tail))
+        (all (vconcat rows))
+        (found nil))
+    (when (> n 0)
+      (let ((want (vconcat tail))
+            (i (- (length all) n)))
+        (while (and (not found) (>= i 0))
+          (when (cl-loop for j below n
+                         always (equal (aref all (+ i j)) (aref want j)))
+            (setq found (+ i n)))
+          (setq i (1- i)))))
+    (if found (nthcdr found rows) rows)))
+
+(defun tmux-control--history-fill-sequence (rows height)
+  "Return escapes that add ROWS to a HEIGHT-row terminal's history.
+They clear the screen, write the rows from its top, and scroll them all
+up into history, leaving the screen blank for the repaint that follows."
+  (concat "\e[m\e[H\e[2J"
+          (mapconcat (lambda (row) (concat row "\e[m")) rows "\r\n")
+          (apply #'concat (make-list height "\r\n"))))
+
+(defun tmux-control--write-missed-history ()
+  "Add the history waiting for the active pane to the terminal's own.
+Only on the normal screen, scrolling as a whole: rows written elsewhere
+would not reach the history.  Run before a screen seed paints."
+  (when-let* ((waiting tmux-control--seed-history))
+    (setq tmux-control--seed-history nil)
+    (when (and (equal (car waiting) tmux-control--active-pane)
+               (tmux-control--term-live-p)
+               (not (tmux-control--term-alt-screen-p))
+               (tmux-control--term-scrolls-whole-screen-p))
+      (tmux-control--write-terminal
+       (tmux-control--history-fill-sequence
+        (cdr waiting) (cdr (tmux-control--term-size)))))))
+
+(defun tmux-control--follow-hidden-pane ()
+  "Continue a pane paused out of sight once it is not this buffer's own.
+Called where the buffer's active pane changes: the new one is paused in
+its turn once it has been out of sight long enough."
+  (when (and tmux-control--hidden-pane
+             (not (equal tmux-control--hidden-pane tmux-control--active-pane)))
+    (tmux-control--resume-hidden))
+  (when tmux-control-pause-hidden
+    (tmux-control--pause-hidden-later)))
+
+(defun tmux-control--add-hidden-hooks ()
+  "Pause and resume terminals as windows stop and start showing them.
+The first tmux-control buffer adds these global hooks, rather than
+loading the package; `tmux-control-unload-function' removes them."
+  (add-hook 'window-buffer-change-functions #'tmux-control--hidden-windows-changed)
+  (add-hook 'delete-frame-functions #'tmux-control--hidden-windows-changed))
+
 (defun tmux-control--handle-pause (pane)
-  "Resync paused PANE in-band, then resume streaming without blocking SSH."
+  "Resync paused PANE in-band, then resume streaming without blocking SSH.
+A pane paused because no window shows it waits until one does."
+  (unless (equal pane tmux-control--hidden-pane)
+    (tmux-control--resync-paused-pane pane)))
+
+(defun tmux-control--resync-paused-pane (pane)
+  "Repaint each buffer showing paused PANE, then ask tmux to continue it."
   (let* ((controller (current-buffer))
          (process tmux-control--process)
          (buffer (cdr (assoc pane (or tmux-control--pane-buffers tmux-control--panes))))
@@ -11506,6 +11810,11 @@ also does its usual cleanup."
                #'tmux-control--scrollback-follow-resize)
   (remove-hook 'window-size-change-functions #'tmux-control--on-frame-size-change)
   (remove-hook 'window-size-change-functions #'tmux-control--follow-window-buffer-sizes)
+  (remove-hook 'window-buffer-change-functions #'tmux-control--hidden-windows-changed)
+  (remove-hook 'delete-frame-functions #'tmux-control--hidden-windows-changed)
+  (when (timerp tmux-control--hidden-timer)
+    (cancel-timer tmux-control--hidden-timer))
+  (setq tmux-control--hidden-timer nil)
   ;; A tmux-control buffer registered its initial Evil state process-wide.
   (when (fboundp 'evil-set-initial-state)
     (evil-set-initial-state 'tmux-control-mode nil))

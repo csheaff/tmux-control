@@ -700,6 +700,40 @@ backlog.  It engages only on a genuinely **low-bandwidth** link — Emacs reads
 the socket eagerly, so a fast client (even a high-latency-but-fat-pipe SSH one)
 keeps up and never triggers it.  Off by default; needs tmux 3.2+.
 
+### Terminals out of sight
+
+Emacs spends time on a terminal's output even when no window shows it, so a
+few busy terminals out of sight keep it busy: ten agents printing 200 lines a
+second, with one in view, kept Emacs at MAIN_CPU% CPU.  To have tmux hold that
+output instead:
+
+```elisp
+(setq tmux-control-pause-hidden t)
+```
+
+Once no window has shown a session's buffer for a second, tmux pauses its
+pane.  The program in it runs on, and tmux keeps its screen and history, but
+sends Emacs none of it.  When a window shows the buffer again, tmux continues
+the pane, the buffer gets back up to 2,000 lines of the history printed
+meanwhile, and its screen is repainted.  Until then, a round trip to tmux, it
+shows the screen it had when paused.  With the ten agents, Emacs went to
+ON_CPU% CPU.
+
+- A buffer is paused only once its output has raised the flags of
+  [Which session wants you](#which-session-wants-you) and the
+  [tab bar](#the-window-tab-bar), so they still say it printed.
+- Only the pane a session's own buffer shows is paused: not tiled panes, nor
+  the buffers of other windows (`tmux-control-window-buffers`).
+- History beyond 2,000 lines, or beyond tmux's own `history-limit`, does not
+  come back, nor does any when the terminal was paused on a full-screen
+  program's screen (the alternate screen).  The [scrollback view](#scrollback)
+  shows what tmux kept.
+- Set it with `setq-local` in a session's buffer for that session alone.
+
+Off by default; needs tmux 3.2+.  It pauses the pane rather than turning its
+output off: when a pane's only client turns its output off, tmux stops reading
+the pane, and the program stops at its next write.
+
 ## Window sizing, and sharing a session with another client
 
 tmux sizes each window from its attached clients according to the
