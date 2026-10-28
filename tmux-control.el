@@ -4366,13 +4366,35 @@ to \\`C-c C-u'.  A URL that a TUI wrapped over rows is joined again."
       (browse-url url)
       (message "Opened %s" url))))
 
+(defun tmux-control--hyperlink-mouse-binding (command)
+  "COMMAND while Eat sends the pane's program each mouse press, else nil.
+A program that tracks the mouse, as Claude Code's fullscreen view does,
+has Eat send it a press and then every mouse event until the release, so
+a click on a link went to the program and never opened the link.  On a
+link, the press then does nothing and the release opens it.  Otherwise a
+press there does what it does elsewhere, such as start a selection."
+  (and (bound-and-true-p eat--mouse-modifier-click-mode) command))
+
 (defvar tmux-control-hyperlink-map
-  (let ((map (make-sparse-keymap)))
+  (let ((map (make-sparse-keymap))
+        (claimed (lambda (command)
+                   `(menu-item "" ,command
+                               :filter tmux-control--hyperlink-mouse-binding))))
     (define-key map [mouse-2] #'tmux-control-follow-hyperlink)
     (define-key map [follow-link] 'mouse-face)
+    ;; What Eat would send the program of a click or drag on the link.  A
+    ;; quick click arrives as `mouse-2' (see `mouse-1-click-follows-link'),
+    ;; a slower one as `mouse-1'; the second click of a double one is
+    ;; dropped, so the link opens once.
+    (define-key map [mouse-1] (funcall claimed #'tmux-control-follow-hyperlink))
+    (dolist (event '(down-mouse-1 drag-mouse-1 down-mouse-2 drag-mouse-2
+                     double-down-mouse-1 double-mouse-1 double-drag-mouse-1))
+      (define-key map (vector event) (funcall claimed #'ignore)))
     map)
   "Keymap on a hyperlink in a pane: a click opens it.
-It binds only the mouse, so keys typed on the live screen reach the pane.")
+It binds only the mouse, so keys typed on the live screen reach the pane.
+A click opens the link even when the pane's program tracks the mouse;
+other buttons, and clicks off links, still reach the program.")
 
 (defvar tmux-control-scrollback-hyperlink-map
   (let ((map (make-sparse-keymap)))

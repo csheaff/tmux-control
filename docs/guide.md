@@ -323,7 +323,9 @@ view):
   window's edge.
 - Text a program marked as a link is a link in Emacs too: hovering shows its
   URL, and a click opens it, here and in the scrollback view (where `RET` on it
-  does as well). tmux keeps these links in its own history from 3.4 on.
+  does as well). A click on a link opens it even when the program tracks the
+  mouse, as Claude Code's fullscreen view does; clicks elsewhere still reach
+  the program. tmux keeps these links in its own history from 3.4 on.
 - `C-c C-l` refreshes the live view from tmux's current visible screen without
   sending input to the pane.
 - `C-c M-o` clears the pane's scrollback — the Emacs-side history above the
