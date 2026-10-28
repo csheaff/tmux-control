@@ -9087,6 +9087,12 @@ saw); a `completing-read' answers with `choice'."
                (event 'double-down-mouse-1 (1- link)) (event 'double-mouse-1 (1- link)))
           (should (equal opened '("https://x.example/pull/22")))
           (should-not sent)
+          ;; Unbound, a double middle click would run as a second `mouse-2'.
+          (setq opened nil)
+          (run (event 'down-mouse-2 (1- link)) (event 'mouse-2 (1- link))
+               (event 'double-down-mouse-2 (1- link)) (event 'double-mouse-2 (1- link)))
+          (should (equal opened '("https://x.example/pull/22")))
+          (should-not sent)
           ;; A drag that starts on the link sends the program neither end.
           (setq opened nil)
           (run (event 'down-mouse-1 (1- link)) (event 'drag-mouse-1 (1- link) (1- plain)))

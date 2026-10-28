@@ -4388,7 +4388,8 @@ press there does what it does elsewhere, such as start a selection."
     ;; dropped, so the link opens once.
     (define-key map [mouse-1] (funcall claimed #'tmux-control-follow-hyperlink))
     (dolist (event '(down-mouse-1 drag-mouse-1 down-mouse-2 drag-mouse-2
-                     double-down-mouse-1 double-mouse-1 double-drag-mouse-1))
+                     double-down-mouse-1 double-mouse-1 double-drag-mouse-1
+                     double-down-mouse-2 double-mouse-2 double-drag-mouse-2))
       (define-key map (vector event) (funcall claimed #'ignore)))
     map)
   "Keymap on a hyperlink in a pane: a click opens it.
