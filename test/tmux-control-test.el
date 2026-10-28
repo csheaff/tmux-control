@@ -9032,6 +9032,83 @@ saw); a `completing-read' answers with `choice'."
         (goto-char (point-max))
         (should-error (tmux-control-follow-hyperlink) :type 'user-error)))))
 
+(ert-deftest tmux-control-test-click-opens-link-when-the-program-tracks-the-mouse ()
+  ;; Claude Code's fullscreen view tracks the mouse.  Eat sent it the press
+  ;; on a link, then every mouse event until the release, so a click never
+  ;; opened the link.  Clicks off the link still reach the program.
+  (dolist (button '(1 2))
+    (dolist (kind '("down-" "" "drag-" "double-down-" "double-"))
+      ;; As Emacs learns from the first real click, which batch never gets.
+      (put (intern (format "%smouse-%d" kind button)) 'event-kind 'mouse-click)))
+  (tmux-control-test--with-mouse-terminal
+    (tmux-control--write-terminal "\e]8;;https://x.example/pull/22\aPR #22\e]8;;\a done")
+    (let ((window (selected-window))
+          (link (save-excursion (goto-char (point-min)) (search-forward "#22")))
+          (plain (save-excursion (goto-char (point-min)) (search-forward "done")))
+          (opened nil)
+          ;; Left set, a mouse event here makes later input read as a click.
+          (last-command-event nil) (last-input-event nil) (last-nonmenu-event nil)
+          (mouse--last-down nil))
+      (cl-flet ((event (type pos &optional end)
+                  (let ((posn (lambda (pos)
+                                (list window pos '(0 . 0) 0 nil pos '(0 . 0) nil '(0 . 0) '(1 . 1)))))
+                    (if end
+                        (list type (funcall posn pos) (funcall posn end))
+                      (list type (funcall posn pos)))))
+                (run (&rest events)
+                  ;; Read and run each command as the command loop does,
+                  ;; with its key translations.
+                  (setq unread-command-events events)
+                  (while unread-command-events
+                    (let* ((keys (read-key-sequence nil))
+                           (event (aref keys (1- (length keys)))))
+                      (setq last-command-event event
+                            last-input-event event
+                            last-nonmenu-event event)
+                      (call-interactively (key-binding keys t) nil keys)))))
+        (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (push url opened))))
+          (run (event 'down-mouse-1 (1- link)) (event 'mouse-1 (1- link)))
+          (should (equal opened '("https://x.example/pull/22")))
+          (should-not sent)
+          (should-not eat--mouse-pressed-buttons)
+          (setq opened nil)
+          (run (event 'down-mouse-2 (1- link)) (event 'mouse-2 (1- link)))
+          (should (equal opened '("https://x.example/pull/22")))
+          (should-not sent)
+          ;; A click held past `mouse-1-click-follows-link' opens it too.
+          (setq opened nil)
+          (let ((mouse-1-click-follows-link nil))
+            (run (event 'down-mouse-1 (1- link)) (event 'mouse-1 (1- link))))
+          (should (equal opened '("https://x.example/pull/22")))
+          (should-not sent)
+          ;; A double click opens it once.
+          (setq opened nil)
+          (run (event 'down-mouse-1 (1- link)) (event 'mouse-1 (1- link))
+               (event 'double-down-mouse-1 (1- link)) (event 'double-mouse-1 (1- link)))
+          (should (equal opened '("https://x.example/pull/22")))
+          (should-not sent)
+          ;; Unbound, a double middle click would run as a second `mouse-2'.
+          (setq opened nil)
+          (run (event 'down-mouse-2 (1- link)) (event 'mouse-2 (1- link))
+               (event 'double-down-mouse-2 (1- link)) (event 'double-mouse-2 (1- link)))
+          (should (equal opened '("https://x.example/pull/22")))
+          (should-not sent)
+          ;; A drag that starts on the link sends the program neither end.
+          (setq opened nil)
+          (run (event 'down-mouse-1 (1- link)) (event 'drag-mouse-1 (1- link) (1- plain)))
+          (should-not opened)
+          (should-not sent)
+          (run (event 'down-mouse-1 (1- plain)) (event 'mouse-1 (1- plain)))
+          (should-not opened)
+          (should (= (length sent) 2))
+          (should-not eat--mouse-pressed-buttons))
+        ;; Once the program stops tracking the mouse, a press on the link
+        ;; does what it does elsewhere, such as start a selection.
+        (tmux-control--write-terminal "\e[?1002l")
+        (should-not (eq (key-binding (vector (event 'down-mouse-1 (1- link))) t) 'ignore))
+        (should (eq (key-binding (vector (event 'mouse-2 (1- link))) t)
+                    #'tmux-control-follow-hyperlink))))))
+
 (ert-deftest tmux-control-test-scrollback-keeps-hyperlinks ()
   ;; The scrollback view strips escapes, which took links with them.
   (let ((text (tmux-control--colorize-scrollback
