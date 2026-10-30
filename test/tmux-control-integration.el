@@ -1672,8 +1672,8 @@ tmux's active one, so typing goes on to it."
             (should (equal (tmux-control--visible-screen-lines controller)
                            (mapcar #'ucs-normalize-NFC-string
                                    (tmux-control-it--capture-lines tmux-control--active-pane))))
-            ;; Synthetic Emacs mouse events exercise real Eat encoding and
-            ;; tmux delivery; physical hit-testing remains a native GUI check.
+            ;; Synthetic Emacs mouse events exercise the terminal's real encoding
+            ;; and tmux delivery; physical hit-testing remains a native GUI check.
             (if tmux-control--ghostel
                 ;; Ghostel finds the row from the position clicked.
                 (let ((position (list (selected-window)

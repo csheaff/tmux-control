@@ -9816,6 +9816,17 @@ buffer.  The pause timer is cancelled afterwards."
           (should (eat-term-live-p tmux-control--terminal)))))
     (should (equal messages '("tmux-control: drawing with Eat, as the ghostel package is not installed")))))
 
+(ert-deftest tmux-control-test-ghostel-that-fails-to-load-is-missing ()
+  ;; Ghostel installed without what it needs, such as compat on Emacs 29,
+  ;; fails as it loads: say so rather than fail to make the buffer.
+  (cl-letf (((symbol-function 'require)
+             (lambda (feature &rest _)
+               (if (eq feature 'ghostel)
+                   (error "Cannot open load file: compat")
+                 (featurep feature)))))
+    (should (equal (tmux-control--ghostel-missing)
+                   "Ghostel did not load (Cannot open load file: compat)"))))
+
 (ert-deftest tmux-control-test-seed-cursor-agrees-without-pending-wrap ()
   ;; Ghostel keeps a cursor waiting to wrap on the last column, where tmux
   ;; reports the width, even after output moved it.

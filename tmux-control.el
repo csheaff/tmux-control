@@ -1090,13 +1090,17 @@ it draws with the buffer narrowed to end here.")
   "Return why Ghostel cannot draw panes, or nil when it can.
 Loads Ghostel, which loads its native module when it is installed;
 loading never downloads or builds it."
-  (cond
-   ((not (require 'ghostel nil t)) "the ghostel package is not installed")
-   ((not (fboundp 'ghostel--new)) "Ghostel's native module did not load")
-   ((seq-find (lambda (f) (not (fboundp f))) tmux-control--ghostel-functions)
-    (format "this Ghostel lacks `%s'"
-            (seq-find (lambda (f) (not (fboundp f)))
-                      tmux-control--ghostel-functions)))))
+  (let ((failed (condition-case err
+                    (and (not (require 'ghostel nil t))
+                         "the ghostel package is not installed")
+                  (error (format "Ghostel did not load (%s)"
+                                 (error-message-string err))))))
+    (cond
+     (failed)
+     ((not (fboundp 'ghostel--new)) "Ghostel's native module did not load")
+     (t (when-let* ((f (seq-find (lambda (f) (not (fboundp f)))
+                                 tmux-control--ghostel-functions)))
+          (format "this Ghostel lacks `%s'" f))))))
 
 (defun tmux-control--use-ghostel-p ()
   "Return non-nil when a new terminal should be Ghostel's.
