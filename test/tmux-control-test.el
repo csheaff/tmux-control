@@ -2463,7 +2463,7 @@ each wrapped in an evolving prompt line and a status bar.")
                 (`(add-hook ,hook ,function . ,_)
                  (push (list 'hook (eval hook t) (eval function t)) sites)))))
         (end-of-file nil)))
-    (should (= (length sites) 9))
+    (should (= (length sites) 10))
     ;; The emulation fixes are installed from a table rather than one
     ;; `advice-add' form each.
     (dolist (entry tmux-control--vt-advice)
@@ -9795,6 +9795,235 @@ buffer.  The pause timer is cancelled afterwards."
             (should (equal (buffer-local-value 'tmux-control--seed-history tile)
                            '("%3" "new"))))
         (kill-buffer tile)))))
+
+;;; Ghostel, the optional renderer.  These tests skip unless Ghostel and
+;;; its native module load, as with `make test GHOSTEL_DIR=DIR'.
+
+(ert-deftest tmux-control-test-ghostel-missing-draws-with-eat ()
+  ;; Asked for Ghostel without it, a buffer gets Eat, and says why once.
+  (let ((tmux-control-renderer 'ghostel)
+        (tmux-control--ghostel-warned nil)
+        (messages nil))
+    (cl-letf (((symbol-function 'tmux-control--ghostel-missing)
+               (lambda () "the ghostel package is not installed"))
+              ((symbol-function 'message)
+               (lambda (format &rest args)
+                 (push (apply #'format-message format args) messages))))
+      (dotimes (_ 2)
+        (with-temp-buffer
+          (tmux-control--reset-buffer)
+          (should-not tmux-control--ghostel)
+          (should (eat-term-live-p tmux-control--terminal)))))
+    (should (equal messages '("tmux-control: drawing with Eat, as the ghostel package is not installed")))))
+
+(ert-deftest tmux-control-test-seed-cursor-agrees-without-pending-wrap ()
+  ;; Ghostel keeps a cursor waiting to wrap on the last column, where tmux
+  ;; reports the width, even after output moved it.
+  (should (tmux-control--seed-cursor-agrees-p '(10 . 2) '(9 . 2) 10 nil t))
+  (should-not (tmux-control--seed-cursor-agrees-p '(10 . 2) '(9 . 2) 10 nil))
+  (should-not (tmux-control--seed-cursor-agrees-p '(10 . 2) '(8 . 2) 10 nil t))
+  (should-not (tmux-control--seed-cursor-agrees-p '(10 . 2) '(9 . 1) 10 nil t)))
+
+(defun tmux-control-test--ghostel-p ()
+  "Return non-nil when Ghostel and its native module load."
+  (and (locate-library "ghostel")
+       (not (tmux-control--ghostel-missing))))
+
+(defmacro tmux-control-test--with-ghostel (width height &rest body)
+  "Run BODY in a live buffer drawn by Ghostel, WIDTH by HEIGHT.
+The buffer is in the selected window, and what is sent to the pane is
+collected in `sent', the last first."
+  (declare (indent 2))
+  `(progn
+     (skip-unless (tmux-control-test--ghostel-p))
+     (save-window-excursion
+       (with-temp-buffer
+         (switch-to-buffer (current-buffer))
+         (let ((tmux-control-renderer 'ghostel)
+               (sent nil))
+           (ignore sent)
+           (cl-letf (((symbol-function 'tmux-control--send-input)
+                      (lambda (_terminal string) (push string sent))))
+             (tmux-control--reset-buffer)
+             (should tmux-control--ghostel)
+             (tmux-control--term-resize ,width ,height)
+             (tmux-control--term-redisplay)
+             ,@body))))))
+
+(ert-deftest tmux-control-test-ghostel-draws-the-screen ()
+  ;; No padding cell after a wide character, unlike Eat.
+  (tmux-control-test--with-ghostel 10 4
+    (tmux-control--write-terminal "ab\r\ncd😀x\r\n\e[3;4H")
+    (should (equal (tmux-control--term-size) '(10 . 4)))
+    (should (equal (tmux-control--visible-screen-lines (current-buffer))
+                   '("ab" "cd😀x")))
+    (should (equal (tmux-control--term-cursor-xy) '(3 . 2)))
+    (should (= (tmux-control--term-cursor)
+               (save-excursion (goto-char (tmux-control--term-screen-start))
+                               (forward-line 2)
+                               (+ (point) 3))))
+    (should (= (window-point) (tmux-control--term-cursor)))
+    (should-not (tmux-control--term-alt-screen-p))
+    (tmux-control--write-terminal "\e[?1049h")
+    (should (tmux-control--term-alt-screen-p))))
+
+(ert-deftest tmux-control-test-ghostel-cursor-stays-when-rows-above-change ()
+  ;; Ghostel finds its cursor when it draws; a longer row above it must
+  ;; not leave it behind.
+  (tmux-control-test--with-ghostel 20 4
+    (tmux-control--write-terminal "a\r\nb\r\n$ ")
+    (tmux-control--write-terminal "\e7\e[1;1Hlonger row\e8")
+    (should (equal (tmux-control--term-cursor-xy) '(2 . 2)))
+    (should (= (tmux-control--term-cursor)
+               (save-excursion (goto-char (tmux-control--term-screen-start))
+                               (forward-line 2)
+                               (+ (point) 2))))))
+
+(ert-deftest tmux-control-test-ghostel-replies-never-reach-the-connection ()
+  ;; Ghostel answers a query by sending to the buffer's process, which in
+  ;; the connect buffer is the tmux connection itself.
+  (tmux-control-test--with-ghostel 20 4
+    (let* ((echoed nil)
+           (process (make-process :name "tmux-control-test-cat"
+                                  :buffer (current-buffer)
+                                  :command '("cat") :noquery t
+                                  :connection-type 'pipe
+                                  :filter (lambda (_ s) (push s echoed)))))
+      (unwind-protect
+          (progn
+            (tmux-control--write-terminal "\e[c\e[6n\e]11;?\a")
+            (accept-process-output process 0.3)
+            (should-not echoed)
+            ;; Unbound, the reply does reach it.
+            (ghostel--write-vt tmux-control--terminal "\e[6n")
+            (accept-process-output process 0.3)
+            (should echoed))
+        (delete-process process)))))
+
+(ert-deftest tmux-control-test-ghostel-keys-follow-the-pane-modes ()
+  (tmux-control-test--with-ghostel 20 4
+    (tmux-control--term-input 'up)
+    (tmux-control--write-terminal "\e[?1h")
+    (tmux-control--term-input 'up)
+    (tmux-control--term-input ?\C-c)
+    (tmux-control--term-input ?é)
+    (eat-self-input 2 ?x)
+    ;; The Kitty keyboard protocol: escape is unambiguous.
+    (tmux-control--write-terminal "\e[>1u")
+    (tmux-control--term-input 'escape)
+    (should (equal (mapcar (lambda (s) (decode-coding-string s 'utf-8))
+                           (reverse sent))
+                   '("\e[A" "\eOA" "\C-c" "é" "x" "x" "\e[27u")))))
+
+(ert-deftest tmux-control-test-ghostel-mouse-goes-to-a-tracking-program ()
+  (tmux-control-test--with-ghostel 20 4
+    (unwind-protect
+        (let ((window (selected-window)))
+          (tmux-control--write-terminal "\e[?1002h\e[?1006h$ ")
+          (should (eq eat--mouse-grabbing-type :drag))
+          (should (tmux-control--term-grabs-mouse-p))
+          (eat-self-input 1 (tmux-control-test--mouse 'down-mouse-1 window))
+          (should (equal eat--mouse-pressed-buttons '(mouse-1)))
+          (eat-self-input 1 (tmux-control-test--mouse 'mouse-1 window))
+          (should-not eat--mouse-pressed-buttons)
+          (tmux-control--term-input (tmux-control-test--mouse 'wheel-up window))
+          (should (equal (reverse sent)
+                         '("\e[<0;1;1M" "\e[<0;1;1m" "\e[<64;1;1M")))
+          (tmux-control--write-terminal "\e[?1002l")
+          (should-not (tmux-control--term-grabs-mouse-p)))
+      (tmux-control--eat-mouse-up))))
+
+(ert-deftest tmux-control-test-ghostel-keeps-notes-after-the-screen ()
+  ;; tmux-control writes notes after the terminal; Ghostel counts its rows
+  ;; back from the end, so it draws with the notes out of reach.
+  (tmux-control-test--with-ghostel 20 3
+    (tmux-control--write-terminal "one\r\ntwo")
+    (let ((inhibit-message t))
+      (tmux-control--message "a note"))
+    (tmux-control--write-terminal "\r\nthree\r\nfour")
+    (should (equal (tmux-control--visible-screen-lines (current-buffer))
+                   '("two" "three" "four")))
+    (should (string-suffix-p "four\n\n[tmux-control] a note\n"
+                             (buffer-substring-no-properties (point-min) (point-max))))
+    (should (equal (buffer-substring-no-properties (point-min)
+                                                   (tmux-control--term-screen-start))
+                   "one\n"))))
+
+(ert-deftest tmux-control-test-ghostel-redraws-all-after-rows-are-edited ()
+  ;; A dropped connection deletes the blank rows below the cursor, so its
+  ;; note shows under the screen.  Ghostel counts rows from the end, so it
+  ;; then draws everything again rather than in the wrong place.
+  (tmux-control-test--with-ghostel 20 5
+    (tmux-control--write-terminal "a\r\nb")
+    (tmux-control--drop-blank-rows)
+    (should (equal (buffer-substring-no-properties (point-min) (point-max)) "a\nb"))
+    (tmux-control--write-terminal "\r\nc")
+    (should (equal (tmux-control--visible-screen-lines (current-buffer))
+                   '("a" "b" "c")))
+    (should (= 5 (count-lines (tmux-control--term-screen-start)
+                              (tmux-control--term-end))))))
+
+(ert-deftest tmux-control-test-ghostel-links-and-copy ()
+  (tmux-control-test--with-ghostel 10 4
+    (tmux-control--write-terminal "see \e]8;;https://x.example/1\aPR\e]8;;\a\r\n")
+    (should (equal (tmux-control-test--link-at "PR") "https://x.example/1"))
+    (should-not (tmux-control-test--link-at "see"))
+    (should (eq (lookup-key (get-text-property
+                             (save-excursion (goto-char (point-min))
+                                             (search-forward "PR")
+                                             (match-beginning 0))
+                             'keymap)
+                            [mouse-2])
+                #'tmux-control-follow-hyperlink))
+    ;; A line Ghostel wrapped copies as one.
+    (tmux-control--write-terminal "0123456789abcdef\r\n")
+    (should (string-match-p "0123456789abcdef\n"
+                            (filter-buffer-substring (point-min) (point-max))))))
+
+(ert-deftest tmux-control-test-ghostel-keeps-its-own-reactions-out ()
+  ;; The pane's title does not rename the buffer, and OSC 52 sets the
+  ;; kill ring only as `tmux-control-allow-clipboard-write' says.
+  (tmux-control-test--with-ghostel 20 4
+    (let ((name (buffer-name))
+          (kill-ring nil)
+          (kill-ring-yank-pointer nil)
+          (interprogram-cut-function nil))
+      (tmux-control--write-terminal "\e]2;a title\a\e]7;file:///tmp\a")
+      (tmux-control--write-terminal "\e]52;c;aGVsbG8=\a")
+      (accept-process-output nil 0.05)
+      (should (equal (buffer-name) name))
+      (should-not kill-ring)
+      (let ((tmux-control-allow-clipboard-write t))
+        (tmux-control--write-terminal "\e]52;c;aGVsbG8=\a"))
+      (should (equal kill-ring '("hello"))))))
+
+(ert-deftest tmux-control-test-ghostel-resize-and-clear-history ()
+  (tmux-control-test--with-ghostel 20 3
+    (tmux-control--write-terminal "1\r\n2\r\n3\r\n4\r\n5")
+    (should (equal (buffer-substring-no-properties
+                    (point-min) (tmux-control--term-screen-start))
+                   "1\n2\n"))
+    (tmux-control--term-resize 15 4)
+    (should (equal (tmux-control--term-size) '(15 . 4)))
+    (tmux-control--term-redisplay)
+    (should (= 4 (count-lines (tmux-control--term-screen-start)
+                              (tmux-control--term-end))))
+    (tmux-control--term-clear-history)
+    (should (= (tmux-control--term-screen-start) (point-min)))))
+
+(ert-deftest tmux-control-test-ghostel-input-modes-and-cursor ()
+  (tmux-control-test--with-ghostel 20 4
+    (should eat--semi-char-mode)
+    (tmux-control-char-mode)
+    (should eat--char-mode)
+    (should-not eat--semi-char-mode)
+    (eat-semi-char-mode)
+    (should eat--semi-char-mode)
+    (should buffer-read-only)
+    (tmux-control--write-terminal "\e[?25l")
+    (should (eq cursor-type (car eat-invisible-cursor-type)))
+    (tmux-control--write-terminal "\e[?25h")
+    (should (equal cursor-type (car eat-default-cursor-type)))))
 
 (provide 'tmux-control-test)
 ;;; tmux-control-test.el ends here

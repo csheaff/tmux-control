@@ -37,6 +37,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 EMACS = os.environ.get("EMACS", "emacs")
 EAT_DIR = os.environ.get("EAT_DIR", os.path.expanduser("~/.emacs.d/straight/build/eat"))
+# With TMUX_CONTROL_RENDERER=ghostel, tmux-control draws with Ghostel, found
+# in GHOSTEL_DIR.
+GHOSTEL_DIR = os.environ.get("GHOSTEL_DIR")
 
 
 class Tmux:
@@ -300,7 +303,8 @@ emulator loop that never returns -- names its case instead of stalling."""
                    for w, h, d in cases], f)
     # Load the source by path: a tmux-control.elc left from another branch
     # can carry a newer timestamp than the source it no longer matches.
-    cmd = [EMACS, "-Q", "--batch", "-L", EAT_DIR, "-L", ROOT,
+    cmd = [EMACS, "-Q", "--batch", "-L", EAT_DIR,
+           *(["-L", GHOSTEL_DIR] if GHOSTEL_DIR else []), "-L", ROOT,
            "-l", os.path.join(ROOT, "tmux-control.el"), "-l",
            os.path.join(HERE, "vt-oracle-render.el"), inp, out]
     try:
@@ -328,8 +332,12 @@ def cursor_matches(width, truth, mine):
     """Whether Eat's cursor agrees with tmux's, as shown and as recorded.
 After a character fills the last column, tmux's cursor column is WIDTH+1
 (a pending wrap); Eat records the same but shows the cursor on the last
-cell, or on the start of a double-width character there."""
-    if (mine["sy"], mine["sx"]) != (truth["cy"], truth["cx"]):
+cell, or on the start of a double-width character there.  A terminal that
+cannot record a pending wrap (Ghostel) keeps the cursor on the last column."""
+    recorded = (mine["sy"], mine["sx"])
+    if mine.get("wrap") is False and truth["cx"] == width + 1:
+        recorded = (mine["sy"], width + 1 if mine["sx"] == width else mine["sx"])
+    if recorded != (truth["cy"], truth["cx"]):
         return False
     if mine["cy"] != truth["cy"]:
         return False

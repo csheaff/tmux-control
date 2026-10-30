@@ -223,16 +223,23 @@ Return what PRED last returned (non-nil on success)."
   (with-current-buffer buf
     (buffer-substring-no-properties (point-min) (point-max))))
 
+(defun tmux-control-it--screen-end ()
+  "Where the current buffer's terminal screen ends, before any note.
+Ghostel ends its last row with a newline, which is left out."
+  (let ((end (tmux-control--term-end)))
+    (if (eq (char-before end) ?\n) (1- end) end)))
+
 (defun tmux-control-it--buffer-visible (buf height)
   "Return the last HEIGHT rendered rows of BUF, normalized like a capture."
   (with-current-buffer buf
     (save-excursion
-      (goto-char (point-max))
-      (forward-line (- (1- height)))
-      (tmux-control-it--rtrim
-       (split-string (tmux-control-it--visible-text
-                      (line-beginning-position) (point-max))
-                     "\n")))))
+      (let ((end (tmux-control-it--screen-end)))
+        (goto-char end)
+        (forward-line (- (1- height)))
+        (tmux-control-it--rtrim
+         (split-string (tmux-control-it--visible-text
+                        (line-beginning-position) end)
+                       "\n"))))))
 
 (ert-deftest tmux-control-it-live-stream ()
   "Output produced AFTER connecting arrives via the live %output stream and
@@ -1312,9 +1319,11 @@ same rows in Eat as in tmux."
                    5 (lambda ()
                        (with-current-buffer controller
                          (and (string-search "REGION-SET" (tmux-control-it--buffer-text controller))
-                              (equal (cons (eat--t-term-scroll-begin tmux-control--terminal)
-                                           (eat--t-term-scroll-end tmux-control--terminal))
-                                     '(3 . 10))))))))
+                              ;; Ghostel cannot report its scroll region.
+                              (or tmux-control--ghostel
+                                  (equal (cons (eat--t-term-scroll-begin tmux-control--terminal)
+                                               (eat--t-term-scroll-end tmux-control--terminal))
+                                         '(3 . 10)))))))))
       (kill-buffer other))))
 
 (ert-deftest tmux-control-it-same-session-on-different-sockets ()
@@ -1347,7 +1356,7 @@ taller than the window, so the view's top row was out of sight."
         (tmux-control-reconnect)
         (should (tmux-control-it--ready controller))
         (should header-line-format)
-        (should (= (cdr (eat-term-size tmux-control--terminal)) (funcall rows)))
+        (should (= (cdr (tmux-control--term-size)) (funcall rows)))
         (should (equal (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" "t"
                                                            "#{pane_height}"))
                        (number-to-string (funcall rows))))))))
@@ -1387,7 +1396,7 @@ a reconnect repaints it without the note."
         (should-not (string-match-p "\\[tmux-control\\]"
                                     (tmux-control-it--buffer-text controller)))
         (should (string-match-p "^THREE" (tmux-control-it--buffer-text controller)))
-        (should (= (cdr (eat-term-size tmux-control--terminal)) rows))))))
+        (should (= (cdr (tmux-control--term-size)) rows))))))
 
 (defun tmux-control-it--settle-tiles (controller count)
   "Run batch idle re-tiles until COUNT panes are placed and queries drain."
@@ -1663,12 +1672,23 @@ tmux's active one, so typing goes on to it."
             (should (equal (tmux-control--visible-screen-lines controller)
                            (mapcar #'ucs-normalize-NFC-string
                                    (tmux-control-it--capture-lines tmux-control--active-pane))))
-            (eat-term-input-event tmux-control--terminal 1 'up)
             ;; Synthetic Emacs mouse events exercise real Eat encoding and
             ;; tmux delivery; physical hit-testing remains a native GUI check.
-            (let ((position (list (selected-window) 1 '(3 . 2) 0)))
-              (eat-term-input-event tmux-control--terminal 1 (list 'down-mouse-1 position))
-              (eat-term-input-event tmux-control--terminal 1 (list 'mouse-1 position)))
+            (if tmux-control--ghostel
+                ;; Ghostel finds the row from the position clicked.
+                (let ((position (list (selected-window)
+                                      (save-excursion
+                                        (goto-char (tmux-control--term-screen-start))
+                                        (forward-line 2)
+                                        (point))
+                                      '(3 . 2) 0)))
+                  (tmux-control--term-input 'up)
+                  (tmux-control--term-input (list 'down-mouse-1 position))
+                  (tmux-control--term-input (list 'mouse-1 position)))
+              (eat-term-input-event tmux-control--terminal 1 'up)
+              (let ((position (list (selected-window) 1 '(3 . 2) 0)))
+                (eat-term-input-event tmux-control--terminal 1 (list 'down-mouse-1 position))
+                (eat-term-input-event tmux-control--terminal 1 (list 'mouse-1 position))))
             (tmux-control--send-input nil "世界")
             (tmux-control--paste-to-pane (concat "FIRST\n" (make-string 5000 ?x) "\nLAST")))
           (should (tmux-control-it--ready controller))
@@ -1752,8 +1772,8 @@ Binds `controller' and `pane'."
   (with-current-buffer buffer
     (tmux-control-it--rtrim
      (split-string (tmux-control-it--visible-text
-                    (eat-term-display-beginning tmux-control--terminal)
-                    (eat-term-end tmux-control--terminal))
+                    (tmux-control--term-screen-start)
+                    (tmux-control-it--screen-end))
                    "\n"))))
 
 (defun tmux-control-it--shows-pane-p (controller pane)
@@ -1885,10 +1905,10 @@ the cursor."
              (narrow (- width 10))
              built
              (record (lambda (build &rest args)
-                       (let ((size (eat-term-size (buffer-local-value 'tmux-control--terminal buffer))))
+                       (let ((size (with-current-buffer buffer (tmux-control--term-size))))
                          (apply build args)
                          (with-current-buffer buffer
-                           (unless (equal size (eat-term-size tmux-control--terminal))
+                           (unless (equal size (tmux-control--term-size))
                              (push (list (tmux-control-it--screen buffer)
                                          (let ((window (get-buffer-window buffer)))
                                            (and window
@@ -2000,7 +2020,7 @@ controller), `other' (the second window's buffer, the one shown),
   (tmux-control-it--pump-until
    3 (lambda ()
        (equal (with-current-buffer buffer
-                (let ((size (eat-term-size tmux-control--terminal)))
+                (let ((size (tmux-control--term-size)))
                   (format "%dx%d" (car size) (cdr size))))
               (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" pane
                                                   "#{pane_width}x#{pane_height}"))))))

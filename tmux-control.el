@@ -457,6 +457,18 @@ Other Eat buffers are unaffected.  Turn it off only to compare against
 Eat's own behavior."
   :type 'boolean)
 
+(defcustom tmux-control-renderer 'eat
+  "The terminal emulator that draws each pane.
+`eat', the default, is Eat, which tmux-control requires.  `ghostel' is
+Ghostel's libghostty, when the `ghostel' package and its native module
+load; otherwise tmux-control draws with Eat and says so.  libghostty
+draws emoji and other wide characters as tmux does, and shows Kitty
+images.  Experimental: tmux-control drives it through Ghostel's private
+functions, which a new Ghostel version can change.  Takes effect in
+newly created or reconnected buffers."
+  :type '(choice (const :tag "Eat" eat)
+                 (const :tag "Ghostel (experimental)" ghostel)))
+
 (defcustom tmux-control-wheel-scrolls-live-history t
   "Non-nil means wheel-up first scrolls the live view's own retained history.
 
@@ -1005,8 +1017,396 @@ kills, which are deliberate.")
 ;; write advice (`tmux-control--eat-write-composed',
 ;; `tmux-control--eat-write-hyperlink').  Much of this section uses Eat's
 ;; private (`eat--') definitions, which a new Eat version can change.
+;;
+;; With `tmux-control-renderer' set to `ghostel', a buffer's terminal is
+;; Ghostel's libghostty instead, and each function here has a Ghostel
+;; branch.  The buffer is still in `tmux-control-mode', built on Eat's
+;; mode, so Eat's keymaps and input modes stay; only drawing, and the
+;; encoding of what is typed, move to libghostty.  Ghostel has no public
+;; API for a terminal without a process, so this uses its private
+;; (`ghostel--') functions, with the workarounds noted where they are.
 
 (require 'eat)
+
+;;; Ghostel
+
+;; Ghostel is optional: nothing here loads it until a buffer asks for it.
+(declare-function ghostel--new "ext:ghostel-module")
+(declare-function ghostel--write-vt "ext:ghostel-module")
+(declare-function ghostel--redraw "ext:ghostel-module")
+(declare-function ghostel--alt-screen-p "ext:ghostel-module")
+(declare-function ghostel--mode-enabled "ext:ghostel-module")
+(declare-function ghostel--mouse-tracking-p "ext:ghostel-module")
+(declare-function ghostel--encode-key "ext:ghostel-module")
+(declare-function ghostel--mouse-event "ext:ghostel-module")
+(declare-function ghostel--set-size-with-cell-dims "ghostel" (term rows cols))
+(declare-function ghostel--apply-palette "ghostel" (term))
+(declare-function ghostel--apply-bold-config "ghostel" (term))
+(declare-function ghostel--event-key-spec "ghostel" (event &optional meta))
+(declare-function ghostel--raw-key-sequence "ghostel" (key-name mods))
+(defvar ghostel--term)
+(defvar ghostel--process)
+(defvar ghostel--term-rows)
+(defvar ghostel--cursor-pos)
+(defvar ghostel--cursor-char-pos)
+(defvar ghostel--cursor-style)
+(defvar ghostel--repainted-region)
+(defvar ghostel-max-scrollback)
+(defvar ghostel-kitty-graphics-storage-limit)
+(defvar native-comp-enable-subr-trampolines)
+
+(defvar-local tmux-control--ghostel nil
+  "Non-nil when this buffer's terminal is Ghostel's rather than Eat's.")
+
+(defvar-local tmux-control--ghostel-size nil
+  "The size of this buffer's Ghostel terminal, as (WIDTH . HEIGHT).
+Ghostel applies a resize only at its next redraw; this has it at once.")
+
+(defvar-local tmux-control--ghostel-end nil
+  "Marker at the end of the text Ghostel draws, before tmux-control's notes.
+Ghostel finds its rows by counting back from the end of the buffer, so
+it draws with the buffer narrowed to end here.")
+
+(defvar-local tmux-control--ghostel-cursor-shown 'unknown
+  "Whether the pane's cursor was visible at the last redraw.")
+
+(defvar-local tmux-control--ghostel-redraw-all nil
+  "Non-nil when Ghostel's next redraw must draw everything afresh.")
+
+(defvar tmux-control--ghostel-warned nil
+  "Non-nil once tmux-control said it could not use Ghostel.")
+
+(defconst tmux-control--ghostel-functions
+  '(ghostel--new ghostel--write-vt ghostel--redraw ghostel--alt-screen-p
+    ghostel--mode-enabled ghostel--mouse-tracking-p ghostel--encode-key
+    ghostel--mouse-event ghostel--set-size-with-cell-dims
+    ghostel--apply-palette ghostel--apply-bold-config
+    ghostel--event-key-spec ghostel--raw-key-sequence)
+  "Ghostel's private functions tmux-control uses, all of which must exist.")
+
+(defun tmux-control--ghostel-missing ()
+  "Return why Ghostel cannot draw panes, or nil when it can.
+Loads Ghostel, which loads its native module when it is installed;
+loading never downloads or builds it."
+  (cond
+   ((not (require 'ghostel nil t)) "the ghostel package is not installed")
+   ((not (fboundp 'ghostel--new)) "Ghostel's native module did not load")
+   ((seq-find (lambda (f) (not (fboundp f))) tmux-control--ghostel-functions)
+    (format "this Ghostel lacks `%s'"
+            (seq-find (lambda (f) (not (fboundp f)))
+                      tmux-control--ghostel-functions)))))
+
+(defun tmux-control--use-ghostel-p ()
+  "Return non-nil when a new terminal should be Ghostel's.
+That is when `tmux-control-renderer' asks for it and it loads; when it
+does not load, say why, once, and use Eat."
+  (when (eq tmux-control-renderer 'ghostel)
+    (let ((missing (tmux-control--ghostel-missing)))
+      (if (not missing)
+          (progn
+            (advice-add 'ghostel--defer :around
+                        #'tmux-control--ghostel-defer-advice)
+            t)
+        (unless tmux-control--ghostel-warned
+          (setq tmux-control--ghostel-warned t)
+          (message "tmux-control: drawing with Eat, as %s" missing))
+        nil))))
+
+(defun tmux-control--ghostel-history-bytes ()
+  "Return the scrollback to give a Ghostel terminal, in bytes.
+Ghostel sizes its history in bytes of libghostty's memory, Eat in
+characters (`tmux-control--term-set-history-limit').  A cell takes about
+eight bytes there, so this keeps about as many full rows as Eat would."
+  (if eat-term-scrollback-size
+      (max (* 8 eat-term-scrollback-size) (* 64 1024))
+    ghostel-max-scrollback))
+
+(defun tmux-control--ghostel-make (size)
+  "Give the current buffer a new Ghostel terminal of SIZE, and return it.
+SIZE is (WIDTH . HEIGHT), or nil for 80 by 24.  `ghostel--new' erases
+the buffer and binds the terminal to it: every later call must run with
+this buffer current.  Ghostel's own buffer setup, `ghostel--init-buffer',
+would put the buffer in `ghostel-mode', so only the parts of it that
+drawing needs are done here.  Kitty images are kept only on a graphic
+display, and only those sent in the output itself: a pane can be on
+another host, so a file it names is not one to read here."
+  (let* ((width (or (car size) 80))
+         (height (or (cdr size) 24))
+         (inhibit-read-only t)
+         (term (ghostel--new height width (tmux-control--ghostel-history-bytes)
+                             (if (display-graphic-p)
+                                 ghostel-kitty-graphics-storage-limit
+                               0)
+                             0)))
+    ;; Local, so that binding it below binds this buffer's value.
+    (setq ghostel--process nil)
+    (setq ghostel--term term
+          tmux-control--terminal term
+          tmux-control--ghostel t
+          tmux-control--ghostel-size (cons width height)
+          tmux-control--ghostel-end (point-max-marker)
+          eat-terminal nil)
+    (let ((ghostel--process 'tmux-control--ghostel-sink))
+      (ghostel--set-size-with-cell-dims term height width)
+      (ghostel--apply-palette term)
+      (ghostel--apply-bold-config term))
+    (setq-local filter-buffer-substring-function
+                #'tmux-control--ghostel-filter-buffer-substring)
+    ;; Eat's mode line shows the input mode only for an Eat terminal.
+    (setq mode-line-process
+          '(:eval (cond ((bound-and-true-p eat--semi-char-mode) "[semi-char]")
+                        ((bound-and-true-p eat--char-mode) "[char]"))))
+    (eat-semi-char-mode)
+    term))
+
+(defun tmux-control--ghostel-output (function &rest args)
+  "Call FUNCTION with ARGS and return the bytes Ghostel sends the pane.
+Ghostel's mouse encoder sends what it encodes to the buffer's process
+and returns no bytes; tmux-control sends input through tmux, so it has
+to have them.  `process-send-string' is replaced for the call to keep
+what is sent to a stand-in process.  Without trampolines, since only
+Ghostel's own call, which goes through the symbol, need reach it."
+  (let* ((sent nil)
+         (send (symbol-function 'process-send-string))
+         (native-comp-enable-subr-trampolines nil))
+    (cl-letf (((symbol-function 'process-send-string)
+               (lambda (process string)
+                 (if (eq process 'tmux-control--ghostel-sink)
+                     (push string sent)
+                   (funcall send process string)))))
+      (let ((ghostel--process 'tmux-control--ghostel-sink))
+        (apply function args)))
+    (apply #'concat (nreverse sent))))
+
+(defun tmux-control--ghostel-redisplay ()
+  "Draw the Ghostel terminal's screen into the buffer.
+Draws even while the pane's program holds its output back with
+synchronized output (DEC mode 2026), as Eat does: tmux-control paces
+drawing itself.  Ghostel puts back the point and start of each window
+showing the buffer; tmux-control's own scrolling runs after, and wins."
+  (let ((inhibit-read-only t))
+    (save-restriction
+      (narrow-to-region (point-min) tmux-control--ghostel-end)
+      (ghostel--redraw tmux-control--terminal tmux-control--ghostel-redraw-all t)
+      (setq tmux-control--ghostel-redraw-all nil)
+      (set-marker tmux-control--ghostel-end (point-max)))
+    (tmux-control--ghostel-mark-links)
+    (tmux-control--ghostel-follow-modes)))
+
+(defvar tmux-control-hyperlink-map)
+
+(defun tmux-control--ghostel-mark-links ()
+  "Give the links Ghostel just drew tmux-control's link properties.
+Ghostel follows OSC 8 itself and marks a link's text with its URL as
+`help-echo'; tmux-control's link commands read `tmux-control-hyperlink'."
+  (when-let* ((region ghostel--repainted-region))
+    (let ((pos (car region))
+          (end (min (cdr region) (point-max))))
+      (while (and pos (< pos end))
+        (setq pos (text-property-not-all pos end 'ghostel-link-id nil))
+        (when pos
+          (let ((next (next-single-property-change pos 'ghostel-link-id nil end)))
+            (add-text-properties
+             pos next (tmux-control--hyperlink-properties
+                       (get-text-property pos 'help-echo)
+                       tmux-control-hyperlink-map))
+            (setq pos next)))))))
+
+(defun tmux-control--ghostel-follow-modes ()
+  "Show the pane's mouse tracking and cursor visibility as Eat would.
+Eat's terminal tells its buffer when these change; Ghostel's is asked
+after each redraw.  The cursor keeps the buffer's own shape: Ghostel
+cannot tell a shape the program asked for from its default."
+  (let* ((term tmux-control--terminal)
+         (grab (cond ((not (ghostel--mouse-tracking-p term)) nil)
+                     ((ghostel--mode-enabled term 1003) :all)
+                     ((ghostel--mode-enabled term 1002) :drag)
+                     ((ghostel--mode-enabled term 1000) :modifier-click)
+                     (t :click)))
+         (shown (and ghostel--cursor-style t)))
+    (unless (eq grab eat--mouse-grabbing-type)
+      (when (fboundp 'eat--grab-mouse)
+        (eat--grab-mouse nil grab)))
+    (unless (eq shown tmux-control--ghostel-cursor-shown)
+      (setq tmux-control--ghostel-cursor-shown shown)
+      (when (fboundp 'eat--set-cursor)
+        (eat--set-cursor nil (if shown :block :invisible))))))
+
+(defun tmux-control--ghostel-filter-buffer-substring (beg end &optional delete)
+  "Return the text from BEG to END for copying, as the pane wrote it.
+Ghostel ends a row it wrapped with a newline marked `ghostel-wrap',
+which is left out, so a long line copies as one.  DELETE is as in
+`filter-buffer-substring'."
+  (let ((text (buffer-substring--filter beg end delete))
+        (start 0)
+        (parts nil)
+        at)
+    (while (setq at (string-search "\n" text start))
+      (push (substring text start
+                       (if (get-text-property at 'ghostel-wrap text) at (1+ at)))
+            parts)
+      (setq start (1+ at)))
+    (push (substring text start) parts)
+    (apply #'concat (nreverse parts))))
+
+(defun tmux-control--ghostel-defer-advice (orig-fn function &rest args)
+  "Keep Ghostel's own reactions to pane output out of tmux-control buffers.
+Ghostel would rename the buffer after the pane's title, change its
+directory, run notifications and shell-integration marks, and set the
+clipboard as its own options say.  In a tmux-control buffer only the
+bell rings, and OSC 52 sets the `kill-ring' only as
+`tmux-control-allow-clipboard-write' allows.  ORIG-FN is `ghostel--defer',
+which runs FUNCTION with ARGS later."
+  (if (not (derived-mode-p 'tmux-control-mode))
+      (apply orig-fn function args)
+    (pcase function
+      ('ghostel--bell (ding t))
+      ('ghostel--osc52-handle
+       (when tmux-control-allow-clipboard-write
+         (let ((text (ignore-errors
+                       (decode-coding-string
+                        (base64-decode-string (cadr args)) 'utf-8-unix))))
+           (unless (member text '(nil ""))
+             (kill-new text))))))))
+
+(defun tmux-control--ghostel-key-bytes (event)
+  "Return the bytes the pane's program gets for key EVENT, or nil.
+Ghostel's encoder knows the modes the program set, such as application
+cursor keys or the Kitty keyboard protocol.  It also sends the bytes to
+the buffer's process, which here is the tmux connection itself, so the
+process is bound to a stand-in that refuses them."
+  (let* ((spec (ghostel--event-key-spec event))
+         (bytes (and spec
+                     (let ((ghostel--process 'tmux-control--ghostel-sink))
+                       (ghostel--encode-key tmux-control--terminal
+                                            (car spec) (cdr spec))))))
+    (cond ((stringp bytes) bytes)
+          (spec (ghostel--raw-key-sequence (car spec) (cdr spec)))
+          ((characterp event) (encode-coding-string (string event) 'utf-8)))))
+
+(defun tmux-control--ghostel-mouse-cell (posn)
+  "Return the screen cell of mouse position POSN as (COL . ROW), 0-based."
+  (let* ((window (posn-window posn))
+         (pos (posn-point posn))
+         (top (tmux-control--term-screen-start))
+         (rows (cdr (tmux-control--term-size)))
+         (col (if (windowp window)
+                  (/ (car (posn-x-y posn))
+                     (with-selected-window window (default-font-width)))
+                0))
+         (row (if (and pos (>= pos top))
+                  (count-lines top (save-excursion (goto-char pos) (pos-bol)))
+                0)))
+    (cons (max 0 col) (min (max 0 row) (1- rows)))))
+
+(defun tmux-control--ghostel-mouse-bytes (event)
+  "Return the bytes the pane's program gets for mouse EVENT, or nil.
+Ghostel encodes it as the program asked, in SGR or the older formats."
+  (let* ((type (event-basic-type event))
+         (mods (event-modifiers event))
+         (wheel (assq type '((wheel-up . 4) (wheel-down . 5)
+                             (wheel-left . 6) (wheel-right . 7))))
+         (action (cond ((eq type 'mouse-movement) 2)
+                       ((or wheel (memq 'down mods)) 0)
+                       (t 1)))
+         (button (or (cdr wheel)
+                     (cdr (assq (if (eq type 'mouse-movement)
+                                    (car eat--mouse-pressed-buttons)
+                                  type)
+                                '((mouse-1 . 1) (mouse-2 . 3) (mouse-3 . 2))))
+                     0))
+         (cell (tmux-control--ghostel-mouse-cell
+                (if (memq 'drag mods) (event-end event) (event-start event))))
+         (bits (logior (if (memq 'shift mods) 1 0) (if (memq 'meta mods) 2 0)
+                       (if (memq 'control mods) 4 0)))
+         (bytes (tmux-control--ghostel-output
+                 #'ghostel--mouse-event tmux-control--terminal
+                 action button (cdr cell) (car cell) bits)))
+    (and (not (string-empty-p bytes)) bytes)))
+
+(defun tmux-control--ghostel-self-input (n event)
+  "Send EVENT to the pane N times, as Ghostel encodes it.
+This is `eat-self-input' for a Ghostel buffer: it scrolls the windows
+that are off the cursor back to it first, as Eat does, and keeps Eat's
+record of mouse buttons held, so a drag reaches the program."
+  (let* ((type (event-basic-type event))
+         (button (memq type '(mouse-1 mouse-2 mouse-3)))
+         (mouse (or button (memq type '(mouse-movement wheel-up wheel-down
+                                                       wheel-left wheel-right)))))
+    (when button
+      (select-window (posn-window (event-start event))))
+    (unless (eq type 'mouse-movement)
+      (let* ((cursor (tmux-control--term-cursor))
+             (top (tmux-control--term-screen-start))
+             (windows (seq-filter (lambda (w) (or (eq w (selected-window))
+                                                  (= cursor (window-point w))))
+                                  (get-buffer-window-list))))
+        (unless mouse
+          (setq windows (seq-remove (lambda (w) (tmux-control--window-following-p
+                                                 w cursor top))
+                                    windows)))
+        (tmux-control--term-sync-scroll (cons 'buffer windows))))
+    (let ((bytes (cond
+                  ((not mouse) (tmux-control--ghostel-key-bytes event))
+                  ((not (eq type 'mouse-movement))
+                   (tmux-control--ghostel-mouse-bytes event))
+                  ((if eat--mouse-pressed-buttons
+                       (memq eat--mouse-grabbing-type '(:all :drag))
+                     (eq eat--mouse-grabbing-type :all))
+                   (tmux-control--ghostel-mouse-bytes event)))))
+      (when bytes
+        (dotimes (_ n)
+          (tmux-control--send-input nil bytes))))
+    ;; Eat's record of held buttons, and the keymap that sends a drag's
+    ;; motion here until the release.
+    (when button
+      (cond
+       ((or (memq 'click (event-modifiers event))
+            (memq 'drag (event-modifiers event)))
+        (tmux-control--eat-mouse-up type))
+       ((memq 'down (event-modifiers event))
+        (push type eat--mouse-pressed-buttons)
+        (unless eat--mouse-drag-transient-map-exit
+          (let ((old-track-mouse track-mouse)
+                (buffer (current-buffer)))
+            (setq track-mouse 'dragging)
+            (setq eat--mouse-drag-transient-map-exit
+                  (set-transient-map
+                   (eat-term-make-keymap #'eat-self-input
+                                         '(:mouse-modifier :mouse-movement) nil)
+                   #'always
+                   (lambda ()
+                     (when (buffer-live-p buffer)
+                       (with-current-buffer buffer
+                         (setq track-mouse old-track-mouse)))))))))))))
+
+(defun tmux-control--ghostel-self-input-advice (orig-fn &rest args)
+  "Send input in a Ghostel buffer as Ghostel encodes it.
+Eat's `eat-self-input' sends nothing without an Eat terminal.  Innermost,
+so tmux-control's other advice on it still applies.  ORIG-FN is
+`eat-self-input', called with ARGS: N and the event."
+  (let* ((event (nth 1 args))
+         (posn (and (consp event) (event-start event)))
+         (buffer (if (and posn (windowp (posn-window posn)))
+                     (window-buffer (posn-window posn))
+                   (current-buffer))))
+    (if (buffer-local-value 'tmux-control--ghostel buffer)
+        (with-current-buffer buffer
+          (tmux-control--ghostel-self-input (or (car args) 1) event))
+      (apply orig-fn args))))
+
+(advice-remove #'eat-self-input #'tmux-control--ghostel-self-input-advice)
+(advice-add #'eat-self-input :around #'tmux-control--ghostel-self-input-advice
+            '((depth . 100)))
+
+(defun tmux-control--ghostel-input-mode (mode)
+  "Put a Ghostel buffer in Eat's input MODE, `semi-char' or `char'.
+Eat's own commands refuse a buffer without an Eat terminal."
+  (setq buffer-read-only nil)
+  (eat--char-mode (if (eq mode 'char) 1 -1))
+  (eat--semi-char-mode (if (eq mode 'char) -1 1))
+  (eat--grab-mouse nil eat--mouse-grabbing-type)
+  (force-mode-line-update))
 
 ;;; The major mode and keymaps tmux-control builds on
 
@@ -1039,7 +1439,9 @@ terminal's semi-char mode command returns to the live view."
      (define-key map [remap eat-semi-char-mode] #'tmux-control-live))))
 
 (defun tmux-control--term-set-history-limit (chars)
-  "Keep at most CHARS characters of terminal history in this buffer."
+  "Keep at most CHARS characters of terminal history in this buffer.
+Set it before making the terminal: a Ghostel terminal takes its limit
+when it is made (see `tmux-control--ghostel-history-bytes')."
   (setq-local eat-term-scrollback-size chars))
 
 ;;; Making a terminal
@@ -1061,7 +1463,16 @@ sized to SIZE, a (WIDTH . HEIGHT) cons, when that is non-nil.  What it
 sends goes to the pane through `tmux-control--send-input'.  The pane's
 requests to change the cursor, track the mouse and ring the bell act on
 the buffer as they do in Eat; its clipboard requests are handled as
-`tmux-control--selection-function' says."
+`tmux-control--selection-function' says.  It is Ghostel's when
+`tmux-control-renderer' says so and Ghostel loads, and then it erases
+the buffer."
+  (if (tmux-control--use-ghostel-p)
+      (tmux-control--ghostel-make size)
+    (tmux-control--eat-make size)))
+
+(defun tmux-control--eat-make (size)
+  "Give the current buffer a new Eat terminal of SIZE, and return it."
+  (setq tmux-control--ghostel nil)
   (setq tmux-control--terminal (eat-term-make (current-buffer) (point-min)))
   ;; The same terminal for Eat's commands, which read `eat-terminal'.
   (setq eat-terminal tmux-control--terminal)
@@ -1087,32 +1498,46 @@ Eat's own commands that act on a terminal's process, such as
 another buffer, the controller: then the mode line leaves out Eat's
 process status, which would permanently read \"no process\" --
 alarming for a perfectly live view -- and keeps the rest (the
-[semi-char] mode indicator)."
-  (setf (eat-term-parameter tmux-control--terminal 'eat--process) process)
-  (setf (eat-term-parameter tmux-control--terminal 'eat--input-process)
-        process)
-  (setf (eat-term-parameter tmux-control--terminal 'eat--output-process)
-        process)
-  (when borrowed
-    (setq mode-line-process (remove ":%s" mode-line-process))))
+[semi-char] mode indicator).  A Ghostel terminal is never given it:
+Ghostel would send its replies to the pane's queries there, and tmux
+answers those itself."
+  (unless tmux-control--ghostel
+    (setf (eat-term-parameter tmux-control--terminal 'eat--process) process)
+    (setf (eat-term-parameter tmux-control--terminal 'eat--input-process)
+          process)
+    (setf (eat-term-parameter tmux-control--terminal 'eat--output-process)
+          process)
+    (when borrowed
+      (setq mode-line-process (remove ":%s" mode-line-process)))))
 
 (defun tmux-control--term-live-p ()
   "Return non-nil when the current buffer has a live terminal."
-  (and tmux-control--terminal (eat-term-live-p tmux-control--terminal)))
+  (and tmux-control--terminal
+       (or tmux-control--ghostel
+           (eat-term-live-p tmux-control--terminal))))
 
 ;;; Output and redisplay
 
 (defun tmux-control--term-process-output (output)
   "Draw OUTPUT on the terminal's screen, without redisplaying the buffer.
 tmux's output goes through `tmux-control--feed-terminal', which prepares
-it for the terminal first."
-  (eat-term-process-output tmux-control--terminal output))
+it for the terminal first.  Ghostel answers the pane's queries, such as
+for the cursor's position, by sending to the buffer's process, which is
+the tmux connection itself: the process is bound to a stand-in that
+refuses them, since tmux answers those queries itself."
+  (if tmux-control--ghostel
+      (let ((ghostel--process 'tmux-control--ghostel-sink))
+        (ghostel--write-vt tmux-control--terminal output))
+    (eat-term-process-output tmux-control--terminal output)))
 
 (defun tmux-control--term-redisplay ()
   "Finish the buffer for display once the terminal has drawn output.
 Lines that scrolled off the screen are rejoined, and history beyond
-the limit (see `tmux-control--term-set-history-limit') is dropped."
-  (eat-term-redisplay tmux-control--terminal))
+the limit (see `tmux-control--term-set-history-limit') is dropped.
+Ghostel draws the buffer only now."
+  (if tmux-control--ghostel
+      (tmux-control--ghostel-redisplay)
+    (eat-term-redisplay tmux-control--terminal)))
 
 (defun tmux-control--term-run-update-hook ()
   "Run the hook Eat runs once it has updated a terminal buffer."
@@ -1122,19 +1547,38 @@ the limit (see `tmux-control--term-set-history-limit') is dropped."
 
 (defun tmux-control--term-size ()
   "Return the size of the terminal as (WIDTH . HEIGHT)."
-  (eat-term-size tmux-control--terminal))
+  (if tmux-control--ghostel
+      tmux-control--ghostel-size
+    (eat-term-size tmux-control--terminal)))
 
 (defun tmux-control--term-resize (width height)
   "Resize the terminal to WIDTH columns by HEIGHT rows.
-Output held for the redraw timer is drawn first, at the size it came at."
+Output held for the redraw timer is drawn first, at the size it came at.
+Ghostel resizes its screen only when it next draws, and output fed
+before then would be read at the old size, so it draws at once."
   (tmux-control--flush-deferred)
-  (eat-term-resize tmux-control--terminal width height))
+  (if tmux-control--ghostel
+      (progn
+        (let ((ghostel--process 'tmux-control--ghostel-sink))
+          (ghostel--set-size-with-cell-dims tmux-control--terminal height width))
+        (setq tmux-control--ghostel-size (cons width height))
+        ;; Unbound: a redraw that resizes tells a bound process the size.
+        (tmux-control--term-redisplay))
+    (eat-term-resize tmux-control--terminal width height)))
 
 (defun tmux-control--term-cursor ()
   "Return the buffer position of the terminal's cursor.
 A cursor waiting to wrap, past the last column, is shown on the last
-column."
-  (eat-term-display-cursor tmux-control--terminal))
+column.  Ghostel's is where its last redraw left it."
+  (if tmux-control--ghostel
+      (or ghostel--cursor-char-pos (tmux-control--term-screen-start))
+    (eat-term-display-cursor tmux-control--terminal)))
+
+(defun tmux-control--term-pending-wrap-known-p ()
+  "Return non-nil when the terminal's cursor tells when a wrap is pending.
+Ghostel's cursor stays on the last column; see
+`tmux-control--term-cursor-xy'."
+  (not tmux-control--ghostel))
 
 (defun tmux-control--term-cursor-xy ()
   "Return the current buffer's terminal cursor as 0-indexed (X . Y).
@@ -1142,7 +1586,17 @@ Reads Eat's own cursor bookkeeping (the same coordinates tmux reports
 as #{cursor_x},#{cursor_y}).  After a write to the last column, while
 the wrap is pending, X is the width: one past the last column.  Return
 nil when the terminal is gone or Eat's internals are unavailable, in
-which case seed verification quietly disables itself."
+which case seed verification quietly disables itself.  Ghostel's cursor
+is where its last redraw left it, and stays on the last column while a
+wrap is pending: it cannot say whether one is."
+  (if tmux-control--ghostel
+      (and ghostel--cursor-pos
+           (cons (car ghostel--cursor-pos) (cdr ghostel--cursor-pos)))
+    (tmux-control--eat-cursor-xy)))
+
+(defun tmux-control--eat-cursor-xy ()
+  "Return the current buffer's Eat cursor as 0-indexed (X . Y), or nil.
+See `tmux-control--term-cursor-xy'."
   (when (and (tmux-control--term-live-p)
              (fboundp 'eat--t-term-display)
              (fboundp 'eat--t-disp-cursor)
@@ -1157,44 +1611,85 @@ which case seed verification quietly disables itself."
 (defun tmux-control--term-scrolls-whole-screen-p ()
   "Return non-nil when the terminal's scroll region is its whole screen.
 Then a line feed on its last row moves the top row into history.  Nil
-when Eat's internals are unavailable."
-  (when (and (tmux-control--term-live-p)
-             (fboundp 'eat--t-term-scroll-begin)
-             (fboundp 'eat--t-term-scroll-end))
+when Eat's internals are unavailable.  Ghostel cannot say, so this
+assumes the whole screen, as programs leave it nearly always."
+  (cond
+   (tmux-control--ghostel t)
+   ((and (tmux-control--term-live-p)
+         (fboundp 'eat--t-term-scroll-begin)
+         (fboundp 'eat--t-term-scroll-end))
     (and (= (eat--t-term-scroll-begin tmux-control--terminal) 1)
          (= (eat--t-term-scroll-end tmux-control--terminal)
-            (cdr (tmux-control--term-size))))))
+            (cdr (tmux-control--term-size)))))))
 
 (defun tmux-control--term-screen-start ()
   "Return where the terminal's live screen starts in the buffer.
 Above it is the history the terminal keeps.  The value can be a marker,
-so use it at once rather than keep it."
-  (eat-term-display-beginning tmux-control--terminal))
+so use it at once rather than keep it.  Ghostel's screen is its last
+rows, each ending in a newline."
+  (if tmux-control--ghostel
+      (save-excursion
+        (goto-char tmux-control--ghostel-end)
+        (forward-line (- (or ghostel--term-rows (cdr tmux-control--ghostel-size))))
+        (point))
+    (eat-term-display-beginning tmux-control--terminal)))
 
 (defun tmux-control--term-end ()
   "Return where the terminal's screen ends in the buffer.
 Text after it, such as tmux-control's own notes, is not the terminal's.
-The value can be a marker, so use it at once rather than keep it."
-  (eat-term-end tmux-control--terminal))
+The value can be a marker, so use it at once rather than keep it.
+Ghostel's is after the newline that ends its last row."
+  (if tmux-control--ghostel
+      (marker-position tmux-control--ghostel-end)
+    (eat-term-end tmux-control--terminal)))
+
+(defun tmux-control--term-editable-p ()
+  "Return non-nil when an edit of the terminal's rows lasts.
+Eat keeps its place through such an edit.  Ghostel draws only the rows
+that changed and finds them by counting lines, so after an edit it
+draws its whole screen again (see `tmux-control--term-rows-changed'),
+which undoes the edit."
+  (not tmux-control--ghostel))
+
+(defun tmux-control--term-rows-changed ()
+  "Note that tmux-control edited the terminal's rows in the buffer.
+Ghostel then draws everything afresh at its next redraw."
+  (when tmux-control--ghostel
+    (setq tmux-control--ghostel-redraw-all t)))
+
+(defun tmux-control--term-clear-history ()
+  "Delete the terminal's history, the rows above its live screen."
+  (if tmux-control--ghostel
+      (progn
+        (tmux-control--term-process-output "\e[3J")
+        (tmux-control--term-redisplay))
+    (let ((inhibit-read-only t)
+          (beg (tmux-control--term-screen-start)))
+      (delete-region (point-min) (if (markerp beg) (marker-position beg) beg)))))
 
 (defun tmux-control--term-screen-text ()
   "Return the text of the terminal's live screen, as it shows.
 Eat fills the second cell of a wide glyph with an invisible padding
 character, which is left out, so that the wide character does not read
-as a space after it."
+as a space after it.  Ghostel has no padding; the newline that ends
+its last row is left out."
   (let ((beg (tmux-control--term-screen-start))
         (end (tmux-control--term-end))
         (out nil))
-    (let ((i beg))
-      (while (< i end)
-        (unless (get-text-property i 'invisible)
-          (push (char-after i) out))
-        (setq i (1+ i))))
-    (apply #'string (nreverse out))))
+    (if tmux-control--ghostel
+        (buffer-substring-no-properties
+         beg (if (and (> end beg) (eq (char-before end) ?\n)) (1- end) end))
+      (let ((i beg))
+        (while (< i end)
+          (unless (get-text-property i 'invisible)
+            (push (char-after i) out))
+          (setq i (1+ i))))
+      (apply #'string (nreverse out)))))
 
 (defun tmux-control--term-alt-screen-known-p ()
   "Return non-nil when the terminal can report its alternate screen."
-  (or (fboundp 'eat-term-in-alternative-display-p)
+  (or tmux-control--ghostel
+      (fboundp 'eat-term-in-alternative-display-p)
       (fboundp 'eat--t-term-main-display)))
 
 (defun tmux-control--term-alt-screen-p ()
@@ -1202,6 +1697,8 @@ as a space after it."
 This is the terminal's own state; `tmux-control--alt-screen-p' says
 whether the pane is truly there."
   (cond
+   (tmux-control--ghostel
+    (ghostel--alt-screen-p tmux-control--terminal))
    ((fboundp 'eat-term-in-alternative-display-p)
     (eat-term-in-alternative-display-p tmux-control--terminal))
    ((fboundp 'eat--t-term-main-display)
@@ -1219,11 +1716,12 @@ Such applications (full-screen TUIs, but also normal-screen programs like
 
 ;; Eat does both of these with private functions, which another version
 ;; may lack, so each has its own check; without them, windows stay where
-;; they are.
+;; they are.  For Ghostel, tmux-control does them itself, as Eat does.
 
 (defun tmux-control--term-follows-cursor-p ()
   "Return non-nil when the terminal can tell which windows follow its cursor."
-  (fboundp 'eat--synchronize-scroll-windows))
+  (or tmux-control--ghostel
+      (fboundp 'eat--synchronize-scroll-windows)))
 
 (defun tmux-control--term-following-windows ()
   "Return the windows the terminal scrolls to follow its cursor.
@@ -1231,8 +1729,14 @@ These are the windows whose point is on the cursor, and `buffer' when
 the buffer's point is.  Ask before feeding output, which moves the
 cursor away from them.  Check `tmux-control--term-follows-cursor-p'
 first."
-  (let ((eat-terminal tmux-control--terminal))
-    (eat--synchronize-scroll-windows)))
+  (if tmux-control--ghostel
+      (let ((cursor (tmux-control--term-cursor)))
+        (append (and (or (bound-and-true-p eat--char-mode) (= cursor (point)))
+                     '(buffer))
+                (seq-filter (lambda (window) (= cursor (window-point window)))
+                            (get-buffer-window-list))))
+    (let ((eat-terminal tmux-control--terminal))
+      (eat--synchronize-scroll-windows))))
 
 (defun tmux-control--term-follow-list (base windows)
   "Return WINDOWS as a list for `tmux-control--term-sync-scroll'.
@@ -1253,14 +1757,35 @@ screen -- Eat's synchronization `eat--synchronize-scroll' is called
 itself, so that narrowing never reaches it.  Return non-nil when the
 windows were scrolled, and nil, doing nothing, when the terminal cannot
 scroll them: Eat's function is private, and another version may lack
-it."
-  (let ((function (or (and output
-                           (bound-and-true-p eat--synchronize-scroll-function))
-                      'eat--synchronize-scroll)))
-    (when (functionp function)
-      (let ((eat-terminal tmux-control--terminal))
-        (funcall function windows))
-      t)))
+it.  Ghostel's windows are scrolled by `tmux-control--ghostel-sync-scroll'."
+  (if tmux-control--ghostel
+      (progn (tmux-control--ghostel-sync-scroll windows) t)
+    (let ((function (or (and output
+                             (bound-and-true-p eat--synchronize-scroll-function))
+                        'eat--synchronize-scroll)))
+      (when (functionp function)
+        (let ((eat-terminal tmux-control--terminal))
+          (funcall function windows))
+        t))))
+
+(defun tmux-control--ghostel-sync-scroll (windows)
+  "Scroll WINDOWS to a Ghostel terminal's cursor and live screen.
+This is Eat's scroll sync, `eat--synchronize-scroll', with
+`tmux-control--eat-synchronize-scroll-advice': point goes to the cursor,
+and each window starts where the whole screen shows (see
+`tmux-control--screen-window-start').  WINDOWS can include `buffer'."
+  (let ((cursor (tmux-control--term-cursor))
+        (top (tmux-control--term-screen-start)))
+    (dolist (window windows)
+      (cond ((eq window 'buffer) (goto-char cursor))
+            ((window-live-p window)
+             (set-window-point window cursor)
+             (set-window-start window (tmux-control--screen-window-start window top)
+                               t))))
+    (when (and (derived-mode-p 'tmux-control-mode)
+               (tmux-control--alt-screen-p))
+      (tmux-control--anchor-windows-to-screen-top windows)
+      (tmux-control--keep-cursor-visible windows))))
 
 ;; `tmux-control--term-follow-output' skips the sync for a window it would
 ;; not move, which takes knowing where Eat's sync puts a window.
@@ -1329,8 +1854,11 @@ ORIG-FN is Eat's scroll synchronization."
 (defun tmux-control--term-input (event)
   "Send EVENT, a key, mouse event or character, to the pane.
 It is encoded as the terminal encodes what is typed into it.  This is
-Eat's `eat-self-input', on the buffer's `eat-terminal'."
-  (eat-self-input 1 event))
+Eat's `eat-self-input', on the buffer's `eat-terminal'; in a Ghostel
+buffer, `tmux-control--ghostel-self-input'."
+  (if tmux-control--ghostel
+      (tmux-control--ghostel-self-input 1 event)
+    (eat-self-input 1 event)))
 
 (defun tmux-control--term-char-mode ()
   "Switch the terminal to char mode, where every key goes to the pane.
@@ -1353,7 +1881,9 @@ ORIG-FN is `eat-semi-char-mode', called with ARGS."
         (tmux-control-live)
         (unless (bound-and-true-p eat--semi-char-mode)
           (eat-semi-char-mode)))
-    (apply orig-fn args)
+    (if tmux-control--ghostel
+        (tmux-control--ghostel-input-mode 'semi-char)
+      (apply orig-fn args))
     (when (derived-mode-p 'tmux-control-mode)
       (tmux-control--protect-terminal-text current-input-method)
       (setq tmux-control--char-mode-keys nil)
@@ -1382,7 +1912,9 @@ ORIG-FN is `eat-char-mode', called with ARGS."
         (tmux-control-live)
         (unless (bound-and-true-p eat--char-mode)
           (eat-char-mode)))
-    (apply orig-fn args)
+    (if tmux-control--ghostel
+        (tmux-control--ghostel-input-mode 'char)
+      (apply orig-fn args))
     (when (derived-mode-p 'tmux-control-mode)
       ;; xah-fly-keys command state uses a terminal-wide transient map,
       ;; which even emulation maps cannot outrank.  Enter its insert state
@@ -1464,9 +1996,11 @@ is."
     (and (windowp window)
          (window-live-p window)
          (not (posn-area posn))
-         (let ((terminal (buffer-local-value 'eat-terminal
-                                             (window-buffer window))))
-           (and terminal (eat-term-live-p terminal))))))
+         (let* ((buffer (window-buffer window))
+                (terminal (buffer-local-value 'eat-terminal buffer)))
+           (or (and terminal (eat-term-live-p terminal))
+               (and (buffer-local-value 'tmux-control--ghostel buffer)
+                    (buffer-local-value 'tmux-control--terminal buffer)))))))
 
 (defun tmux-control--eat-mouse-advice (orig-fn &rest args)
   "Keep Eat's mouse drag from outlasting the button that started it.
@@ -1504,7 +2038,7 @@ keymap is held lets go of it and goes to its own binding.  ORIG-FN is
 (defvar tmux-control--vt-advice)
 
 (defun tmux-control--term-unload ()
-  "Remove the advice tmux-control put on Eat, for `unload-feature'.
+  "Remove the advice tmux-control put on Eat and Ghostel, for `unload-feature'.
 That is this section's advice and the patch layer's."
   (advice-remove #'eat-semi-char-mode #'tmux-control--eat-semi-char-mode-advice)
   (advice-remove #'eat-char-mode #'tmux-control--eat-char-mode-advice)
@@ -1514,6 +2048,8 @@ That is this section's advice and the patch layer's."
                  #'tmux-control--eat-synchronize-scroll-advice)
   (advice-remove #'eat-self-input #'tmux-control--eat-input-sync-advice)
   (advice-remove #'eat-self-input #'tmux-control--eat-mouse-advice)
+  (advice-remove #'eat-self-input #'tmux-control--ghostel-self-input-advice)
+  (advice-remove 'ghostel--defer #'tmux-control--ghostel-defer-advice)
   (dolist (entry tmux-control--vt-advice)
     (advice-remove (car entry) (cdr entry)))
   (advice-remove 'eat-term-redisplay #'tmux-control--eat-redisplay-advice))
@@ -2879,12 +3415,11 @@ duplicate."
     (user-error "No live tmux-control terminal in this buffer"))
   ;; Held output could scroll rows into the history cleared here.
   (tmux-control--flush-deferred)
-  (let ((beg (tmux-control--term-screen-start))
-        (end (tmux-control--term-end))
+  (let ((end (tmux-control--term-end))
         (inhibit-read-only t))
     ;; Notes first: deleting above the screen shifts END.
     (delete-region (if (markerp end) (marker-position end) end) (point-max))
-    (delete-region (point-min) (if (markerp beg) (marker-position beg) beg)))
+    (tmux-control--term-clear-history))
   (when tmux-control--active-pane
     (tmux-control--send-command
      (format "clear-history -t %s" tmux-control--active-pane)))
@@ -7407,7 +7942,8 @@ pause) gets a fresh budget.")
   "Consecutive seed retries triggered by cursor-drift detection.
 Reset to zero whenever a verification passes.")
 
-(defun tmux-control--seed-cursor-agrees-p (tmux-xy term-xy width seeded)
+(defun tmux-control--seed-cursor-agrees-p (tmux-xy term-xy width seeded
+                                                   &optional no-wrap)
   "Return non-nil when cursors TMUX-XY and TERM-XY are on the same cell.
 Both are 0-indexed (X . Y), WIDTH is the terminal grid's width, and
 SEEDED is tmux's cursor as the seed found it.  A seed puts the
@@ -7418,12 +7954,14 @@ pane's width while a wrap is pending after a write to the last column,
 and a pane wider than the grid can have its cursor beyond it.  Once
 output has moved tmux's cursor, the terminal's must have followed it
 exactly; a terminal left on the last column where tmux waits to wrap, or
-waiting to wrap where tmux is not, is a real difference.  Pure, for unit
-testing."
+waiting to wrap where tmux is not, is a real difference.  NO-WRAP
+non-nil means the terminal's cursor cannot show a pending wrap, as
+Ghostel's cannot: then tmux's X at or past WIDTH always agrees with the
+last column.  Pure, for unit testing."
   (and (= (cdr tmux-xy) (cdr term-xy))
        (or (= (car tmux-xy) (car term-xy))
            (and width
-                (equal tmux-xy seeded)
+                (or no-wrap (equal tmux-xy seeded))
                 (>= (car tmux-xy) width)
                 (= (car term-xy) (1- width))))))
 
@@ -7470,7 +8008,8 @@ historical drift at the next natural seed, whatever its cause."
                       ((or (null fresh) (null mine))
                        (setq tmux-control--seed-verify-retries 0))
                       ((tmux-control--seed-cursor-agrees-p
-                        fresh mine width tmux-control--seed-cursor)
+                        fresh mine width tmux-control--seed-cursor
+                        (not (tmux-control--term-pending-wrap-known-p)))
                        (setq tmux-control--seed-verify-retries 0))
                       ((< tmux-control--seed-verify-retries
                           tmux-control--seed-verify-max-retries)
@@ -8756,7 +9295,9 @@ whole before they reach Eat."
     (let ((inhibit-read-only t)
           (tmux-control--suppress-responses t)
           (tmux-control--combining-write-scan nil)
-          (tmux-control--vt-fixes tmux-control-correct-emulation))
+          ;; The fixes, and the link extraction below, are Eat's.
+          (tmux-control--vt-fixes (and tmux-control-correct-emulation
+                                       (not tmux-control--ghostel))))
       ;; Fast path: no pending partial char and no raw bytes.
       (unless (and (= 0 (length tmux-control--utf8-carry))
                    (not (string-match-p tmux-control--eight-bit-char-regexp
@@ -8768,9 +9309,10 @@ whole before they reach Eat."
       (when tmux-control--vt-fixes
         (setq output (tmux-control--bare-line-feeds-to-index output)))
       ;; Fast path: nothing that opens, closes or begins a hyperlink.
-      (if (and (string-empty-p tmux-control--hyperlink-carry)
-               (not (string-search "\e]8" output))
-               (not (string-match-p "\e]?\\'" output)))
+      (if (or tmux-control--ghostel
+              (and (string-empty-p tmux-control--hyperlink-carry)
+                   (not (string-search "\e]8" output))
+                   (not (string-match-p "\e]?\\'" output))))
           (tmux-control--term-process-output output)
         (tmux-control--feed-hyperlinked output))
       (setq tmux-control--display-dirty t))))
@@ -9499,17 +10041,20 @@ repaints itself."
 tmux does this to a pane that gets shorter, so what is above the cursor
 stays on screen.  Eat, resized with those rows in place, would push the
 screen's top into its scrollback instead, leaving the view blank where
-tmux still shows text."
-  (let ((inhibit-read-only t))
-    (save-excursion
-      (goto-char (tmux-control--term-cursor))
-      (let* ((below (line-end-position))
-             (end (tmux-control--term-end))
-             (start end))
-        (goto-char end)
-        (while (and (> rows 0) (search-backward "\n" below t))
-          (setq start (point) rows (1- rows)))
-        (delete-region start end)))))
+tmux still shows text.  Not for a terminal whose rows tmux-control must
+not edit (see `tmux-control--term-editable-p'); the repaint after the
+resize puts its screen right."
+  (when (tmux-control--term-editable-p)
+    (let ((inhibit-read-only t))
+      (save-excursion
+        (goto-char (tmux-control--term-cursor))
+        (let* ((below (line-end-position))
+               (end (tmux-control--term-end))
+               (start end))
+          (goto-char end)
+          (while (and (> rows 0) (search-backward "\n" below t))
+            (setq start (point) rows (1- rows)))
+          (delete-region start end))))))
 
 (defun tmux-control--apply-term-size (width height)
   "Resize the terminal grid to WIDTH by HEIGHT when it differs from the current.
@@ -9925,7 +10470,8 @@ cursor's own row stays."
         (goto-char (tmux-control--term-end))
         (let ((end (point)))
           (skip-chars-backward " \n" (tmux-control--term-cursor))
-          (delete-region (line-end-position) end))))))
+          (delete-region (line-end-position) end))))
+    (tmux-control--term-rows-changed)))
 
 (defun tmux-control--screen-views ()
   "Return the windows following the screen, each with where it starts.
