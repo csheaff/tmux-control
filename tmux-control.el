@@ -46,6 +46,8 @@
 ;; resilience for emulator quirks -- e.g. `tmux-control-clear-and-repaint',
 ;; which reseeds the view from `capture-pane' (see
 ;; https://codeberg.org/akib/emacs-eat/issues/263 for one such quirk).
+;; Ghostel's libghostty, when installed, can draw instead: see
+;; `tmux-control-renderer'.
 ;;
 ;; See `tmux-control-connect' to attach.
 
