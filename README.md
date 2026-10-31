@@ -32,6 +32,8 @@ restart, or reconnect from another machine and the pane is still there.
 - **tmux 3.x** on the target host, local or remote over SSH (flow control needs
   3.2+).
 - macOS or Linux.
+- Optional: **[Ghostel](https://github.com/dakra/ghostel)** with its native
+  module, as an experimental second renderer (see below).
 
 ## Install
 
@@ -119,6 +121,21 @@ with new output, and `C-c C-f` tiles them all into one live grid (experimental).
 
 → Full command and key reference, the tiled view, and tuning live in
 **[docs/guide.md](docs/guide.md)**.
+
+### Drawing with Ghostel (experimental)
+
+If [Ghostel](https://github.com/dakra/ghostel) and its native module are
+installed, tmux-control can draw panes with Ghostel's libghostty instead of Eat:
+
+```elisp
+(setq tmux-control-renderer 'ghostel)
+```
+
+libghostty draws emoji and other wide characters as tmux does, where Eat drifts,
+and shows Kitty images.  It takes effect in new or reconnected buffers.  When
+Ghostel doesn't load, tmux-control says so and draws with Eat, which stays
+required.  tmux-control drives Ghostel through its private functions, so a new
+Ghostel version can break it.
 
 ## Status
 
@@ -238,7 +255,8 @@ make test          # pure-logic unit tests (no tmux server required)
 ```
 
 `eat` must be on the load path; pass `EAT_DIR=/path/to/eat` if it isn't at the
-straight.el default.  Three suites need a real tmux: `make test-integration`
+straight.el default.  The Ghostel renderer's tests skip unless you pass
+`GHOSTEL_DIR=/path/to/ghostel`, a directory with `ghostel.el` and its module.  Three suites need a real tmux: `make test-integration`
 checks what tmux-control renders against `capture-pane`, `make test-vt-oracle`
 checks the terminal emulation against tmux's own, and a GUI oracle checks the
 tiled view.  The [guide](docs/guide.md#development) describes them.
