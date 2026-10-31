@@ -1067,7 +1067,8 @@ Ghostel applies a resize only at its next redraw; this has it at once.")
 (defvar-local tmux-control--ghostel-end nil
   "Marker at the end of the text Ghostel draws, before tmux-control's notes.
 Ghostel finds its rows by counting back from the end of the buffer, so
-it draws with the buffer narrowed to end here.")
+it draws with the buffer narrowed to end here.  A full redraw erases the
+whole buffer anyway, and the notes are then put back.")
 
 (defvar-local tmux-control--ghostel-cursor-shown 'unknown
   "Whether the pane's cursor was visible at the last redraw.")
@@ -1190,12 +1191,20 @@ Draws even while the pane's program holds its output back with
 synchronized output (DEC mode 2026), as Eat does: tmux-control paces
 drawing itself.  Ghostel puts back the point and start of each window
 showing the buffer; tmux-control's own scrolling runs after, and wins."
-  (let ((inhibit-read-only t))
+  (let* ((inhibit-read-only t)
+         (end tmux-control--ghostel-end)
+         (notes (and (< end (point-max)) (buffer-substring end (point-max)))))
     (save-restriction
-      (narrow-to-region (point-min) tmux-control--ghostel-end)
+      (narrow-to-region (point-min) end)
       (ghostel--redraw tmux-control--terminal tmux-control--ghostel-redraw-all t)
       (setq tmux-control--ghostel-redraw-all nil)
-      (set-marker tmux-control--ghostel-end (point-max)))
+      (set-marker end (point-max)))
+    ;; Drawing everything afresh -- after a resize, a switch of screens or
+    ;; a cleared history -- Ghostel erases the whole buffer, notes too.
+    (when (and notes (= end (point-max)))
+      (save-excursion
+        (goto-char (point-max))
+        (insert notes)))
     (tmux-control--ghostel-mark-links)
     (tmux-control--ghostel-follow-modes)))
 
@@ -1224,11 +1233,13 @@ Eat's terminal tells its buffer when these change; Ghostel's is asked
 after each redraw.  The cursor keeps the buffer's own shape: Ghostel
 cannot tell a shape the program asked for from its default."
   (let* ((term tmux-control--terminal)
-         (grab (cond ((not (ghostel--mouse-tracking-p term)) nil)
-                     ((ghostel--mode-enabled term 1003) :all)
-                     ((ghostel--mode-enabled term 1002) :drag)
-                     ((ghostel--mode-enabled term 1000) :modifier-click)
-                     (t :click)))
+         (grab (cond ((ghostel--mouse-tracking-p term)
+                      (cond ((ghostel--mode-enabled term 1003) :all)
+                            ((ghostel--mode-enabled term 1002) :drag)
+                            (t :modifier-click)))
+                     ;; X10, which reports only presses, is not tracking
+                     ;; to `ghostel--mouse-tracking-p'.
+                     ((ghostel--mode-enabled term 9) :click)))
          (shown (and ghostel--cursor-style t)))
     (unless (eq grab eat--mouse-grabbing-type)
       (when (fboundp 'eat--grab-mouse)
@@ -1305,26 +1316,43 @@ process is bound to a stand-in that refuses them."
                 0)))
     (cons (max 0 col) (min (max 0 row) (1- rows)))))
 
+(defun tmux-control--ghostel-mouse-button (type)
+  "Return libghostty's number for the button of mouse event TYPE, or nil.
+TYPE is a basic event type.  Left, right and middle are 1, 2 and 3, the
+wheel's up, down, left and right 4 to 7, and the buttons after them 8
+to 11, as in X, where `mouse-4' is the wheel going up."
+  (pcase type
+    ('mouse-1 1) ('mouse-2 3) ('mouse-3 2)
+    ('wheel-up 4) ('wheel-down 5) ('wheel-left 6) ('wheel-right 7)
+    ((pred symbolp)
+     (let ((name (symbol-name type)))
+       (and (string-prefix-p "mouse-" name)
+            (let ((n (string-to-number (substring name 6))))
+              (and (<= 4 n 11) n)))))))
+
 (defun tmux-control--ghostel-mouse-bytes (event)
   "Return the bytes the pane's program gets for mouse EVENT, or nil.
-Ghostel encodes it as the program asked, in SGR or the older formats."
+Ghostel encodes it as the program asked, in SGR or the older formats.
+The wheel and the buttons after it send only a press, as in Eat, and so
+does a click while the program asked for X10's presses alone."
   (let* ((type (event-basic-type event))
          (mods (event-modifiers event))
-         (wheel (assq type '((wheel-up . 4) (wheel-down . 5)
-                             (wheel-left . 6) (wheel-right . 7))))
-         (action (cond ((eq type 'mouse-movement) 2)
-                       ((or wheel (memq 'down mods)) 0)
-                       (t 1)))
-         (button (or (cdr wheel)
-                     (cdr (assq (if (eq type 'mouse-movement)
-                                    (car eat--mouse-pressed-buttons)
-                                  type)
-                                '((mouse-1 . 1) (mouse-2 . 3) (mouse-3 . 2))))
+         (button (or (tmux-control--ghostel-mouse-button
+                      (if (eq type 'mouse-movement)
+                          (car eat--mouse-pressed-buttons)
+                        type))
                      0))
+         (action (cond ((eq type 'mouse-movement) 2)
+                       ((or (memq 'down mods) (> button 3)
+                            (eq eat--mouse-grabbing-type :click))
+                        0)
+                       (t 1)))
          (cell (tmux-control--ghostel-mouse-cell
                 (if (memq 'drag mods) (event-end event) (event-start event))))
-         (bits (logior (if (memq 'shift mods) 1 0) (if (memq 'meta mods) 2 0)
-                       (if (memq 'control mods) 4 0)))
+         ;; libghostty's modifier bits; Ghostel's own `ghostel--mouse-mods'
+         ;; swaps ctrl and alt.
+         (bits (logior (if (memq 'shift mods) 1 0) (if (memq 'control mods) 2 0)
+                       (if (memq 'meta mods) 4 0)))
          (bytes (tmux-control--ghostel-output
                  #'ghostel--mouse-event tmux-control--terminal
                  action button (cdr cell) (car cell) bits)))
@@ -1337,8 +1365,8 @@ that are off the cursor back to it first, as Eat does, and keeps Eat's
 record of mouse buttons held, so a drag reaches the program."
   (let* ((type (event-basic-type event))
          (button (memq type '(mouse-1 mouse-2 mouse-3)))
-         (mouse (or button (memq type '(mouse-movement wheel-up wheel-down
-                                                       wheel-left wheel-right)))))
+         (mouse (or (eq type 'mouse-movement)
+                    (tmux-control--ghostel-mouse-button type))))
     (when button
       (select-window (posn-window (event-start event))))
     (unless (eq type 'mouse-movement)
@@ -1614,6 +1642,11 @@ See `tmux-control--term-cursor-xy'."
         ;; Eat's cursor is 1-indexed; tmux's is 0-indexed.
         (cons (1- (eat--t-cur-x cur)) (1- (eat--t-cur-y cur)))))))
 
+(defun tmux-control--term-scroll-region-known-p ()
+  "Return non-nil when the terminal can report its scroll region.
+Ghostel's cannot; see `tmux-control--term-scrolls-whole-screen-p'."
+  (not tmux-control--ghostel))
+
 (defun tmux-control--term-scrolls-whole-screen-p ()
   "Return non-nil when the terminal's scroll region is its whole screen.
 Then a line feed on its last row moves the top row into history.  Nil
@@ -1632,11 +1665,19 @@ assumes the whole screen, as programs leave it nearly always."
   "Return where the terminal's live screen starts in the buffer.
 Above it is the history the terminal keeps.  The value can be a marker,
 so use it at once rather than keep it.  Ghostel's screen is its last
-rows, each ending in a newline."
+rows, each ending in a newline.  Once tmux-control has dropped rows from
+it (see `tmux-control--term-rows-changed'), until Ghostel next draws,
+there are fewer: then the screen starts as many rows above the cursor's
+as the cursor is down it."
   (if tmux-control--ghostel
       (save-excursion
-        (goto-char tmux-control--ghostel-end)
-        (forward-line (- (or ghostel--term-rows (cdr tmux-control--ghostel-size))))
+        (if (and tmux-control--ghostel-redraw-all
+                 ghostel--cursor-char-pos ghostel--cursor-pos)
+            (progn
+              (goto-char ghostel--cursor-char-pos)
+              (forward-line (- (cdr ghostel--cursor-pos))))
+          (goto-char tmux-control--ghostel-end)
+          (forward-line (- (or ghostel--term-rows (cdr tmux-control--ghostel-size)))))
         (point))
     (eat-term-display-beginning tmux-control--terminal)))
 
@@ -8316,19 +8357,24 @@ up into history, leaving the screen blank for the repaint that follows."
 Only on the normal screen, and scrolling it as a whole, since rows
 written elsewhere would not reach the history: a narrower scroll region
 is widened when the seed's MODES, replayed next, restore the pane's.
-Not when MODES enter the alternate screen: that keeps the normal screen
-to come back to, which the rows would have cleared.  Run before a
-screen seed paints."
+A terminal that cannot report its region may have one, so it is widened
+whenever MODES have the pane's.  Not when MODES enter the alternate
+screen: that keeps the normal screen to come back to, which the rows
+would have cleared.  Run before a screen seed paints."
   (when-let* ((waiting tmux-control--seed-history))
     (setq tmux-control--seed-history nil)
     (when (and (equal (car waiting) tmux-control--active-pane)
                (tmux-control--term-live-p)
                (not (tmux-control--term-alt-screen-p))
                (not (eq (plist-get modes :alt-screen) :on)))
-      (let ((whole (tmux-control--term-scrolls-whole-screen-p)))
-        (when (or whole (plist-get modes :scroll-region))
+      (let ((whole (tmux-control--term-scrolls-whole-screen-p))
+            (region (plist-get modes :scroll-region)))
+        (when (or whole region)
           (tmux-control--write-terminal
-           (concat (unless whole "\e[r")
+           (concat (when (if (tmux-control--term-scroll-region-known-p)
+                             (not whole)
+                           region)
+                     "\e[r")
                    (tmux-control--history-fill-sequence
                     (cdr waiting) (cdr (tmux-control--term-size))))))))))
 

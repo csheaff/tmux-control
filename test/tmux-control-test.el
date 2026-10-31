@@ -9835,6 +9835,14 @@ buffer.  The pause timer is cancelled afterwards."
   (should-not (tmux-control--seed-cursor-agrees-p '(10 . 2) '(8 . 2) 10 nil t))
   (should-not (tmux-control--seed-cursor-agrees-p '(10 . 2) '(9 . 1) 10 nil t)))
 
+(ert-deftest tmux-control-test-ghostel-mouse-button-numbers ()
+  ;; libghostty's buttons: the middle is 3 and the right 2; X's wheel
+  ;; buttons and those after them keep their numbers.
+  (should (equal (mapcar #'tmux-control--ghostel-mouse-button
+                         '(mouse-1 mouse-2 mouse-3 wheel-up wheel-right
+                           mouse-4 mouse-11 mouse-12 mouse-movement ?a))
+                 '(1 3 2 4 7 4 11 nil nil nil))))
+
 (defun tmux-control-test--ghostel-p ()
   "Return non-nil when Ghostel and its native module load."
   (and (locate-library "ghostel")
@@ -9938,11 +9946,29 @@ collected in `sent', the last first."
           (eat-self-input 1 (tmux-control-test--mouse 'mouse-1 window))
           (should-not eat--mouse-pressed-buttons)
           (tmux-control--term-input (tmux-control-test--mouse 'wheel-up window))
+          ;; Ctrl adds 16 and Meta 8, as in Eat.
+          (tmux-control--term-input (tmux-control-test--mouse 'C-wheel-up window))
+          (tmux-control--term-input (tmux-control-test--mouse 'M-wheel-up window))
+          ;; X's wheel and the buttons after it, a press each.
+          (should (eq (key-binding [mouse-4]) #'eat-self-input))
+          (eat-self-input 1 (tmux-control-test--mouse 'mouse-4 window))
+          (eat-self-input 1 (tmux-control-test--mouse 'mouse-8 window))
           (should (equal (reverse sent)
-                         '("\e[<0;1;1M" "\e[<0;1;1m" "\e[<64;1;1M")))
+                         '("\e[<0;1;1M" "\e[<0;1;1m" "\e[<64;1;1M"
+                           "\e[<80;1;1M" "\e[<72;1;1M"
+                           "\e[<64;1;1M" "\e[<128;1;1M")))
           (tmux-control--write-terminal "\e[?1002l")
           (should-not (tmux-control--term-grabs-mouse-p)))
       (tmux-control--eat-mouse-up))))
+
+(ert-deftest tmux-control-test-ghostel-x10-mouse-sends-clicks ()
+  ;; X10 reports only presses, and Eat's keymap for it has clicks alone.
+  (tmux-control-test--with-ghostel 20 4
+    (tmux-control--write-terminal "\e[?9h$ ")
+    (should (eq eat--mouse-grabbing-type :click))
+    (should (eq (key-binding [mouse-1]) #'eat-self-input))
+    (eat-self-input 1 (tmux-control-test--mouse 'mouse-1 (selected-window)))
+    (should (equal sent '("\e[M !!")))))
 
 (ert-deftest tmux-control-test-ghostel-keeps-notes-after-the-screen ()
   ;; tmux-control writes notes after the terminal; Ghostel counts its rows
@@ -9958,7 +9984,41 @@ collected in `sent', the last first."
                              (buffer-substring-no-properties (point-min) (point-max))))
     (should (equal (buffer-substring-no-properties (point-min)
                                                    (tmux-control--term-screen-start))
-                   "one\n"))))
+                   "one\n"))
+    ;; Switching screens and a resize draw everything afresh, which erases
+    ;; the buffer; the note comes back, once.
+    (tmux-control--write-terminal "\e[?1049hvim")
+    (tmux-control--write-terminal "\e[?1049l")
+    (tmux-control--term-resize 15 3)
+    (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+      (should (string-suffix-p "\n\n[tmux-control] a note\n" text))
+      (should-not (string-search "a note" text
+                                 (1+ (string-search "a note" text)))))))
+
+(ert-deftest tmux-control-test-ghostel-screen-after-dropped-rows ()
+  ;; With the blank rows below the cursor dropped, as a lost connection
+  ;; drops them, the screen is found from the cursor, not by counting
+  ;; back from the end into the history.
+  (tmux-control-test--with-ghostel 20 5
+    (tmux-control--write-terminal
+     (concat (mapconcat #'number-to-string (number-sequence 1 12) "\r\n")
+             "\e[2J\e[H$ "))
+    (tmux-control--drop-blank-rows)
+    (should (equal (tmux-control--term-screen-text) "$ "))))
+
+(ert-deftest tmux-control-test-ghostel-missed-history-widens-the-region ()
+  ;; Ghostel cannot report its scroll region, so the rows a paused pane
+  ;; missed are written with the region widened whenever tmux reports
+  ;; the pane's, which the seed then sets back.  Narrow, they would scroll
+  ;; within the region and never reach the history.
+  (tmux-control-test--with-ghostel 20 5
+    (tmux-control--write-terminal "top\r\n\e[2;4r\e[4;1H$ ")
+    (setq tmux-control--active-pane "%1"
+          tmux-control--seed-history (cons "%1" '("missed-1" "missed-2")))
+    (tmux-control--write-missed-history '(:scroll-region (1 . 3)))
+    (should (string-suffix-p "missed-1\nmissed-2\n"
+                             (buffer-substring-no-properties
+                              (point-min) (tmux-control--term-screen-start))))))
 
 (ert-deftest tmux-control-test-ghostel-redraws-all-after-rows-are-edited ()
   ;; A dropped connection deletes the blank rows below the cursor, so its
