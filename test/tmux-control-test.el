@@ -10082,6 +10082,24 @@ collected in `sent', the last first."
     (tmux-control--term-clear-history)
     (should (= (tmux-control--term-screen-start) (point-min)))))
 
+(ert-deftest tmux-control-test-ghostel-leaves-placed-windows-alone ()
+  ;; Ghostel puts back the start of each window showing the buffer, which
+  ;; makes Emacs redisplay the whole frame.  A window the caller places
+  ;; itself is left out; any other is still put back.
+  (tmux-control-test--with-ghostel 20 4
+    (let ((restored nil)
+          (set-start (symbol-function 'set-window-start)))
+      (cl-letf (((symbol-function 'set-window-start)
+                 (lambda (window &rest args)
+                   (push window restored)
+                   (apply set-start window args))))
+        (tmux-control--term-process-output "a")
+        (tmux-control--term-redisplay (list (selected-window)))
+        (should-not restored)
+        (tmux-control--term-process-output "b")
+        (tmux-control--term-redisplay)
+        (should (equal restored (list (selected-window))))))))
+
 (ert-deftest tmux-control-test-ghostel-input-modes-and-cursor ()
   (tmux-control-test--with-ghostel 20 4
     (should eat--semi-char-mode)

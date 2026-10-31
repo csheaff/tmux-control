@@ -1185,18 +1185,27 @@ Ghostel's own call, which goes through the symbol, need reach it."
         (apply function args)))
     (apply #'concat (nreverse sent))))
 
-(defun tmux-control--ghostel-redisplay ()
+(defun tmux-control--ghostel-redisplay (&optional placed)
   "Draw the Ghostel terminal's screen into the buffer.
 Draws even while the pane's program holds its output back with
 synchronized output (DEC mode 2026), as Eat does: tmux-control paces
 drawing itself.  Ghostel puts back the point and start of each window
-showing the buffer; tmux-control's own scrolling runs after, and wins."
+showing the buffer, except the windows in PLACED, which the caller
+scrolls to the cursor itself."
   (let* ((inhibit-read-only t)
          (end tmux-control--ghostel-end)
-         (notes (and (< end (point-max)) (buffer-substring end (point-max)))))
+         (notes (and (< end (point-max)) (buffer-substring end (point-max))))
+         (windows (symbol-function 'get-buffer-window-list)))
     (save-restriction
       (narrow-to-region (point-min) end)
-      (ghostel--redraw tmux-control--terminal tmux-control--ghostel-redraw-all t)
+      ;; Putting back a window's start, even where it already is, makes
+      ;; Emacs redisplay the whole frame -- every window, mode line and
+      ;; header line -- rather than the line that changed: a key's echo
+      ;; took up to 6 ms longer.  Ghostel finds the windows to put back
+      ;; with `get-buffer-window-list'.
+      (cl-letf (((symbol-function 'get-buffer-window-list)
+                 (lambda (&rest args) (seq-difference (apply windows args) placed))))
+        (ghostel--redraw tmux-control--terminal tmux-control--ghostel-redraw-all t))
       (setq tmux-control--ghostel-redraw-all nil)
       (set-marker end (point-max)))
     ;; Drawing everything afresh -- after a resize, a switch of screens or
@@ -1564,13 +1573,15 @@ refuses them, since tmux answers those queries itself."
         (ghostel--write-vt tmux-control--terminal output))
     (eat-term-process-output tmux-control--terminal output)))
 
-(defun tmux-control--term-redisplay ()
+(defun tmux-control--term-redisplay (&optional placed)
   "Finish the buffer for display once the terminal has drawn output.
 Lines that scrolled off the screen are rejoined, and history beyond
 the limit (see `tmux-control--term-set-history-limit') is dropped.
-Ghostel draws the buffer only now."
+Ghostel draws the buffer only now.  PLACED are windows the caller
+scrolls to the cursor right after, which the terminal need not keep in
+place."
   (if tmux-control--ghostel
-      (tmux-control--ghostel-redisplay)
+      (tmux-control--ghostel-redisplay placed)
     (eat-term-redisplay tmux-control--terminal)))
 
 (defun tmux-control--term-run-update-hook ()
@@ -9450,7 +9461,7 @@ cursor position and their cursor line is kept visible."
              (tmux-control--term-live-p))
     (setq tmux-control--display-dirty nil)
     (let ((inhibit-read-only t))
-      (tmux-control--term-redisplay)
+      (tmux-control--term-redisplay sync-windows)
       (when (and sync-windows
                  (tmux-control--term-follow-output sync-windows))
         ;; In a TILED pane only, anchor to the top of the current terminal
