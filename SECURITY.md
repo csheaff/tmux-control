@@ -38,5 +38,6 @@ that is in scope — please report it.
 
 ## Automated checks
 
-This repository runs Dependabot (GitHub Actions supply chain) and OpenSSF
-Scorecard, and has GitHub secret scanning with push protection enabled.
+This repository runs Dependabot (GitHub Actions supply chain), CodeQL on its
+workflows for every pull request, and OpenSSF Scorecard, and has GitHub secret
+scanning with push protection enabled.

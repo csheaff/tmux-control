@@ -1,0 +1,41 @@
+# CodeQL: GitHub's static analysis, here of these workflows (script
+# injection from untrusted event data, over-broad token permissions and the
+# like). CodeQL can't read Emacs Lisp, and the only Python is a test
+# oracle, so the workflows are all it checks. Results go to the Security
+# tab's code scanning, and a pull request's checks show what it adds. Free
+# for public repositories. Actions are pinned to commit SHAs, with the tag
+# in a comment; Dependabot keeps them current.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '41 4 * * 1'   # weekly, Monday 04:41 UTC, for CodeQL's new queries
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (actions)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read           # checkout (job-level permissions replace the
+                               # workflow default, so name it explicitly)
+      security-events: write   # upload the results
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: actions
+          build-mode: none
+      - name: Analyze
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: /language:actions
