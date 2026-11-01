@@ -1,6 +1,7 @@
 # tmux-control
 
 [![CI](https://github.com/csheaff/tmux-control/actions/workflows/ci.yml/badge.svg)](https://github.com/csheaff/tmux-control/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/csheaff/tmux-control/badge)](https://scorecard.dev/viewer/?uri=github.com/csheaff/tmux-control)
 
 `tmux-control` turns Emacs into a **control-mode client for a tmux pane** —
 the [iTerm2 tmux-integration](https://iterm2.com/documentation-tmux-integration.html)
