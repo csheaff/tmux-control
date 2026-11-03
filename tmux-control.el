@@ -1616,6 +1616,12 @@ this session's while the window list still names it.  tmux says
 %unlinked-window-close for it; %window-close means a window left some
 session but is still linked to this one.  The next window list leaves
 it out, and this starts empty again.")
+(defvar-local tmux-control--recheck-windows nil
+  "On the controller: ids tmux said %window-close for since its list came.
+tmux says that for a window still linked to this session -- a shared
+window leaving another session -- so its buffer stays.  Should the next
+window list leave one out after all, its buffer goes then
+\(`tmux-control--update-windows').")
 (defvar-local tmux-control--session-id nil
   "On the controller: tmux's id for the session, as \"$3\", once known.
 tmux reports every session's window switches to every control client,
@@ -3552,7 +3558,7 @@ window in the session ends the session and disconnects this client."
    (format "kill-window -t %s"
            (tmux-control--window-target tmux-control--session index)))
   ;; Mirror tmux-control-new-window: with per-window buffers the
-  ;; %window-close/%session-window-changed echoes do all the work.
+  ;; %unlinked-window-close/%session-window-changed echoes do all the work.
   (if tmux-control-window-buffers
       (tmux-control--quiet-activity)
     (tmux-control--refresh-active-pane t)))
@@ -3684,6 +3690,38 @@ window display off too."
              (unless (gethash (car entry) tmux-control--pane-window)
                (tmux-control--forget-pane-buffer (car entry))))))))))
 
+(defun tmux-control--forget-window (id)
+  "Let go of window ID's render buffer: the window left the session.
+Runs in the controller.  A displayed buffer is first swapped for the
+controller; the %session-window-changed that follows a current-window
+close then swaps to the real new window."
+  ;; The CONTROLLER's own window can close too (an agent's task window
+  ;; the controller happened to be homed on).  The buffer must survive
+  ;; -- it owns the process -- but its window id and active pane are
+  ;; now dead: left as they were, it would render a frozen screen and
+  ;; send keystrokes into "can't find pane" if it ever reached a window
+  ;; again (C-x b always can).  Mark it homeless instead: id and pane
+  ;; nil (typing then says "No active tmux pane yet" -- honest,
+  ;; recoverable), registry entry gone.  The session's view continues
+  ;; through the per-window render buffers; the homeless controller
+  ;; keeps owning the process and the session state, just no window of
+  ;; its own.
+  (when (equal id tmux-control--window-id)
+    (setq tmux-control--window-buffers
+          (cl-remove-if (lambda (e) (eq (cdr e) (current-buffer)))
+                        tmux-control--window-buffers))
+    (setq tmux-control--window-id nil)
+    (setq tmux-control--active-pane nil)
+    (setq tmux-control--homeless t))
+  (when-let* ((buf (tmux-control--window-buffer id)))
+    (unless (eq buf (current-buffer))
+      (when (eq tmux-control--session-display buf)
+        (setq tmux-control--session-display (current-buffer)))
+      (dolist (win (get-buffer-window-list buf nil t))
+        (set-window-buffer win (current-buffer)))
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer buf)))))
+
 (defun tmux-control--update-windows (lines)
   "Parse a list-windows reply LINES into `tmux-control--windows'.
 Records the active window as the current one and clears its activity marker,
@@ -3720,6 +3758,14 @@ the controller renders its own window, so a switch back to it swaps here."
     ;; it includes the windows added and leaves out the ones that left.
     (setq tmux-control--added-windows nil
           tmux-control--closed-windows nil)
+    ;; A window tmux said %window-close for that this list leaves out
+    ;; left the session after all.  Before the controller is homed below:
+    ;; its own window may be one.
+    (dolist (id (prog1 tmux-control--recheck-windows
+                  (setq tmux-control--recheck-windows nil)))
+      (unless (seq-find (lambda (w) (equal (plist-get w :id) id))
+                        tmux-control--windows)
+        (tmux-control--forget-window id)))
     (when active
       (setq tmux-control--current-window active)
       (when (hash-table-p tmux-control--activity)
@@ -7168,38 +7214,18 @@ backing off to the cap."
             (setq tmux-control--added-windows
                   (delete id tmux-control--added-windows))
             (push id tmux-control--closed-windows)))))
-      ;; A closed window's render buffer goes with it.  A displayed one is
-      ;; first swapped to the controller; the %session-window-changed that
-      ;; follows a current-window close then swaps to the real new window.
-      (when (and tmux-control-window-buffers
-                 (string-match "\\`%\\(?:unlinked-\\)?window-close \\(@[0-9]+\\)\\'"
-                               line))
-        ;; The CONTROLLER's own window can close too (an agent's task
-        ;; window the controller happened to be homed on).  The buffer
-        ;; must survive -- it owns the process -- but its window id and
-        ;; active pane are now dead: left as they were, it would render
-        ;; a frozen screen and send keystrokes into "can't find pane" if
-        ;; it ever reached a window again (C-x b always can).  Mark it
-        ;; homeless instead: id and pane nil (typing then says "No
-        ;; active tmux pane yet" -- honest, recoverable), registry entry
-        ;; gone.  The session's view continues through the per-window
-        ;; render buffers; the homeless controller keeps owning the
-        ;; process and the session state, just no window of its own.
-        (when (equal (match-string 1 line) tmux-control--window-id)
-          (setq tmux-control--window-buffers
-                (cl-remove-if (lambda (e) (eq (cdr e) (current-buffer)))
-                              tmux-control--window-buffers))
-          (setq tmux-control--window-id nil)
-          (setq tmux-control--active-pane nil)
-          (setq tmux-control--homeless t))
-        (when-let* ((buf (tmux-control--window-buffer (match-string 1 line))))
-          (unless (eq buf (current-buffer))
-            (when (eq tmux-control--session-display buf)
-              (setq tmux-control--session-display (current-buffer)))
-            (dolist (win (get-buffer-window-list buf nil t))
-              (set-window-buffer win (current-buffer)))
-            (let ((kill-buffer-query-functions nil))
-              (kill-buffer buf)))))
+      ;; A window that left the session takes its render buffer with it:
+      ;; tmux says %unlinked-window-close for that, a window killed, or
+      ;; moved or unlinked from this session.  %window-close is for a
+      ;; window still linked here -- a shared window leaving another
+      ;; session -- whose buffer stays.  Should the window list asked for
+      ;; below leave it out after all, the buffer goes then.
+      (when tmux-control-window-buffers
+        (cond
+         ((string-match "\\`%unlinked-window-close \\(@[0-9]+\\)\\'" line)
+          (tmux-control--forget-window (match-string 1 line)))
+         ((string-match "\\`%window-close \\(@[0-9]+\\)\\'" line)
+          (push (match-string 1 line) tmux-control--recheck-windows))))
       ;; A window was created, closed, or renamed: refresh the tab bar and the
       ;; pane->window map for the activity marker.
       (tmux-control--refresh-windows)

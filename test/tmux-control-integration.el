@@ -731,6 +731,43 @@ buffer while another window is current."
           (kill-buffer buf))
         (tmux-control-it--tmux-ok "kill-server")))))
 
+(ert-deftest tmux-control-it-shared-window-keeps-its-buffer ()
+  "A window shared with another session keeps its buffer here when that
+session lets go of it.  tmux says %window-close to this client then, for
+a window still linked to its session, and that used to kill the buffer.
+Killing the window still takes its buffer."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (tmux-control-it--tmux "new-session" "-d" "-s" "t" "-n" "w0" "-x" "80" "-y" "24")
+  (tmux-control-it--tmux "new-window" "-t" "t:" "-n" "w1")
+  (tmux-control-it--tmux "select-window" "-t" "t:0")
+  (tmux-control-it--tmux "new-session" "-d" "-s" "o" "-x" "80" "-y" "24")
+  (tmux-control-it--tmux "link-window" "-s" "t:1" "-t" "o:5")
+  (let* ((tmux-control-window-buffers 'all)
+         (shared (string-trim
+                  (tmux-control-it--tmux "display-message" "-p" "-t" "t:1"
+                                         "#{window_id}")))
+         (buf (tmux-control-connect nil tmux-control-it--socket "t")))
+    (cl-flet ((shared-buffer ()
+                (with-current-buffer buf
+                  (tmux-control--window-buffer shared))))
+      (unwind-protect
+          (let ((wb (tmux-control-it--pump-until 6 #'shared-buffer)))
+            (should (buffer-live-p wb))
+            ;; The other session lets go of it: it is still this one's.
+            (tmux-control-it--tmux "unlink-window" "-t" "o:5")
+            (tmux-control-it--pump 1.5)
+            (should (buffer-live-p wb))
+            (should (eq (shared-buffer) wb))
+            ;; Killed, it takes its buffer with it.
+            (tmux-control-it--tmux "kill-window" "-t" "t:1")
+            (should (tmux-control-it--pump-until
+                     6 (lambda () (not (buffer-live-p wb))))))
+        (when (buffer-live-p buf)
+          (with-current-buffer buf (ignore-errors (tmux-control-disconnect)))
+          (kill-buffer buf))
+        (tmux-control-it--tmux-ok "kill-server")))))
+
 ;;; Tab-bar activity: background output flags a window; visiting it clears it.
 
 (ert-deftest tmux-control-it-new-window-buffer-seeds-after-connect ()
