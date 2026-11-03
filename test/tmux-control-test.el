@@ -4510,7 +4510,7 @@ killed with it."
             (cl-letf (((symbol-function 'tmux-control--flush-output-batch) #'ignore)
                       ((symbol-function 'tmux-control--refresh-windows) #'ignore)
                       ((symbol-function 'tmux-control--refresh-pane-window-map) #'ignore))
-              (tmux-control--handle-line "%window-close @5"))
+              (tmux-control--handle-line "%unlinked-window-close @5"))
             (tmux-control--update-windows '("4\tzsh\t1\t0\t@6"))
             (should (equal (buffer-name ctrl) "*tmux local:work*")))
         (when (buffer-live-p other) (kill-buffer other))))))
@@ -4578,8 +4578,10 @@ killed with it."
         (should (equal swapped "@3"))
         (should (= reseeds 0))))))
 
-(ert-deftest tmux-control-test-window-close-kills-render-buffer ()
-  ;; %window-close takes the closed window's render buffer with it.
+(ert-deftest tmux-control-test-unlinked-window-close-kills-render-buffer ()
+  ;; A window that left the session takes its render buffer with it.
+  ;; tmux says %unlinked-window-close for that -- a kill too, since by
+  ;; then the window is no longer linked to the client's session.
   (with-temp-buffer
     (setq-local tmux-control--tiled nil)
     (let ((tmux-control-window-buffers t)
@@ -4592,9 +4594,60 @@ killed with it."
                 ((symbol-function 'tmux-control--refresh-windows) #'ignore)
                 ((symbol-function 'tmux-control--refresh-pane-window-map)
                  #'ignore))
-        (tmux-control--handle-line "%window-close @4"))
+        (tmux-control--handle-line "%unlinked-window-close @4"))
       (should-not (buffer-live-p buf))
       (should-not (tmux-control--window-buffer "@4")))))
+
+(ert-deftest tmux-control-test-window-close-keeps-a-still-linked-window ()
+  ;; tmux says %window-close for a window still linked to this client's
+  ;; session: a shared window leaving another session.  Taken for its
+  ;; death, it killed this session's buffer for the window, swapped the
+  ;; view off it while tmux stayed there, and left the controller
+  ;; homeless when it was the controller's own window.  Should the next
+  ;; window list leave the window out after all, it is let go then.
+  (cl-letf (((symbol-function 'tmux-control--refresh-windows) #'ignore)
+            ((symbol-function 'tmux-control--refresh-pane-window-map)
+             #'ignore))
+    (with-temp-buffer
+      (tmux-control-mode)
+      (let* ((tmux-control-window-buffers t)
+             (ctrl (current-buffer))
+             (win (selected-window))
+             (shown (window-buffer win))
+             (buf (generate-new-buffer " *tc-wb-shared*")))
+        (unwind-protect
+            (progn
+              (setq-local tmux-control--window-id "@2"
+                          tmux-control--active-pane "%2"
+                          tmux-control--collecting-command nil
+                          tmux-control--window-buffers
+                          (list (cons "@2" ctrl) (cons "@4" buf)))
+              (with-current-buffer buf
+                (setq-local tmux-control--window-id "@4"
+                            tmux-control--controller ctrl))
+              (set-window-buffer win buf)
+              (tmux-control--handle-line "%window-close @4")
+              (tmux-control--handle-line "%window-close @2")
+              (should (buffer-live-p buf))
+              (should (eq (window-buffer win) buf))
+              (should (eq (tmux-control--window-buffer "@4") buf))
+              (should (equal tmux-control--window-id "@2"))
+              (should-not tmux-control--homeless)
+              ;; The window list still has both: nothing goes.
+              (tmux-control--update-windows
+               '("0\ta\t1\t0\t@2" "1\tb\t0\t0\t@4"))
+              (should (buffer-live-p buf))
+              (should-not tmux-control--recheck-windows)
+              ;; Said closed, and the next list leaves both out: they go.
+              (tmux-control--handle-line "%window-close @4")
+              (tmux-control--handle-line "%window-close @2")
+              (tmux-control--update-windows '("2\tc\t1\t0\t@9"))
+              (should-not (buffer-live-p buf))
+              (should (eq (window-buffer win) ctrl))
+              (should-not tmux-control--window-id)
+              (should tmux-control--homeless))
+          (when (buffer-live-p buf) (kill-buffer buf))
+          (when (buffer-live-p shown) (set-window-buffer win shown)))))))
 
 (ert-deftest tmux-control-test-session-display-buffer-fallback ()
   ;; Without a render buffer for the current window the controller itself
@@ -7996,10 +8049,10 @@ Return the window."
                     tmux-control--window-buffers
                     (list (cons "@2" (current-buffer))))
         ;; Another window closing leaves the controller homed.
-        (tmux-control--handle-line "%window-close @7")
+        (tmux-control--handle-line "%unlinked-window-close @7")
         (should (equal tmux-control--window-id "@2"))
         ;; Its own window closing makes it homeless.
-        (tmux-control--handle-line "%window-close @2")
+        (tmux-control--handle-line "%unlinked-window-close @2")
         (should-not tmux-control--window-id)
         (should-not tmux-control--active-pane)
         (should tmux-control--homeless)
