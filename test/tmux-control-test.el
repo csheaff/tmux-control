@@ -7305,7 +7305,10 @@ Return the window."
   ;; A window can leave the session -- unlinked, or moved to another
   ;; session -- and live on there.  Until the window list came back
   ;; without it, a pane change in it still passed for this session's,
-  ;; and the single view followed another session's pane.
+  ;; and the single view followed another session's pane.  tmux says
+  ;; %unlinked-window-close for that; %window-close is for a window
+  ;; still linked here (a shared window leaving another session), whose
+  ;; pane changes are still followed.
   (let ((seeded 0))
     (cl-letf (((symbol-function 'tmux-control--seed-screen)
                (lambda () (cl-incf seeded)))
@@ -7332,15 +7335,20 @@ Return the window."
           (tmux-control--handle-line "%window-pane-changed @2 %8")
           (should (equal tmux-control--active-pane "%8"))
           (should (= seeded 1))
+          ;; Shared, and unlinked from another session: still here.
           (tmux-control--handle-line "%window-close @2")
           (tmux-control--handle-line "%window-pane-changed @2 %9")
-          (should (equal tmux-control--active-pane "%8"))
+          (should (equal tmux-control--active-pane "%9"))
+          (should (= seeded 2))
+          (tmux-control--handle-line "%unlinked-window-close @2")
+          (tmux-control--handle-line "%window-pane-changed @2 %10")
+          (should (equal tmux-control--active-pane "%9"))
           ;; The next window list says so itself.
           (tmux-control--update-windows '("0\ta\t1\t0\t@1"))
           (should-not tmux-control--closed-windows)
-          (tmux-control--handle-line "%window-pane-changed @2 %9")
-          (should (equal tmux-control--active-pane "%8"))
-          (should (= seeded 1)))))))
+          (tmux-control--handle-line "%window-pane-changed @2 %10")
+          (should (equal tmux-control--active-pane "%9"))
+          (should (= seeded 2)))))))
 
 (ert-deftest tmux-control-test-new-and-kill-window-skip-pane-requery-when-gated ()
   ;; With per-window buffers the echoed %session-window-changed swaps the

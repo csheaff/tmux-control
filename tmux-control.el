@@ -1611,9 +1611,11 @@ tmux says %window-add only for a window of this client's session.  The
 next window list includes the window, and this starts empty again.")
 (defvar-local tmux-control--closed-windows nil
   "On the controller: ids of windows that left the session since its list came.
-A window closed, or moved or unlinked to another session, is no longer
-this session's while the window list still names it.  The next window
-list leaves it out, and this starts empty again.")
+A window killed, or moved or unlinked to another session, is no longer
+this session's while the window list still names it.  tmux says
+%unlinked-window-close for it; %window-close means a window left some
+session but is still linked to this one.  The next window list leaves
+it out, and this starts empty again.")
 (defvar-local tmux-control--session-id nil
   "On the controller: tmux's id for the session, as \"$3\", once known.
 tmux reports every session's window switches to every control client,
@@ -7097,8 +7099,12 @@ backing off to the cap."
                (string-prefix-p "%window-renamed " line)
                (string-prefix-p "%unlinked-window-renamed " line))
       ;; Until the window list asked for below comes, a window added to
-      ;; this session is already one of its windows, and one that closed
-      ;; or left it is not (`tmux-control--session-window-p').
+      ;; this session is already one of its windows, and one that left it
+      ;; is not (`tmux-control--session-window-p').  tmux says which by
+      ;; the window's place at the time: %window-add and %window-close
+      ;; for a window linked to this session, the %unlinked- forms for
+      ;; one that isn't -- so %window-close, a shared window leaving
+      ;; another session, keeps it here.
       (when tmux-control--windows
         (cond
          ((string-match "\\`%window-add \\(@[0-9]+\\)\\'" line)
@@ -7106,7 +7112,7 @@ backing off to the cap."
             (setq tmux-control--closed-windows
                   (delete id tmux-control--closed-windows))
             (push id tmux-control--added-windows)))
-         ((string-match "\\`%\\(?:unlinked-\\)?window-close \\(@[0-9]+\\)\\'" line)
+         ((string-match "\\`%unlinked-window-close \\(@[0-9]+\\)\\'" line)
           (let ((id (match-string 1 line)))
             (setq tmux-control--added-windows
                   (delete id tmux-control--added-windows))
