@@ -1660,6 +1660,11 @@ the tab highlight back.")
 While any is unconfirmed, a %session-window-changed may be the echo of a
 switch since overtaken, so it moves nothing; the confirmation of the
 latest switch settles the view.")
+(defvar-local tmux-control--switch-before nil
+  "On the controller: (WINDOW-ID . HISTORY) before the latest early switch.
+The current window and `tmux-control--window-history' as they were
+before the latest switch shown early.  When tmux went elsewhere, it
+never left the window shown early, and the history goes back to this.")
 (defvar-local tmux-control--sessions nil
   "On the controller: the names of the sessions on its server, in tmux's order.
 Kept current over the control connection, so the session commands need
@@ -3582,6 +3587,9 @@ alone, and tmux's echo switches the view."
                      (tmux-control--window-target tmux-control--session))
              (lambda (lines)
                (tmux-control--switch-confirmed generation (car lines)))))
+          (setq tmux-control--switch-before
+                (cons (tmux-control--current-window-id)
+                      tmux-control--window-history))
           (tmux-control--note-current-window id)))
       (tmux-control--display-window-buffer id))))
 
@@ -3597,13 +3605,37 @@ ID is nil when the query failed.  Runs in the controller."
              (stringp id)
              (string-match-p "\\`@[0-9]+\\'" id))
     ;; The cached list may be out of date: another client switched, or a
-    ;; window came or went that the list hadn't caught up with.  And the
-    ;; view may be off even when the list agrees with tmux: when the
-    ;; window shown early closed before tmux ran the switch, a window list
-    ;; that came meanwhile moved the highlight but not the view.  Both are
-    ;; no-ops when tab and view are already right.
-    (tmux-control--note-current-window id)
+    ;; window came or went that the list hadn't caught up with.
+    (unless (equal id (tmux-control--current-window-id))
+      (tmux-control--switch-corrected id))
+    ;; And the view may be off even when the list agrees with tmux: when
+    ;; the window shown early closed before tmux ran the switch, a window
+    ;; list that came meanwhile moved the highlight but not the view.  A
+    ;; no-op when the view is already right.
     (tmux-control--display-window-buffer id)))
+
+(defun tmux-control--switch-corrected (id)
+  "Make window ID current: tmux went there, not where the view went early.
+Runs in the controller.  tmux never selected the window shown early, so
+the history behind `last-window' goes back to how it was before that
+switch, and records the switch tmux made instead.  Taken for a window
+left, the window shown early came back at every `last-window'.  A
+window the cached list doesn't have yet -- one just made -- leaves no
+window marked current until the list comes, for the same reason: the
+list would count the window shown early as left."
+  (let ((before tmux-control--switch-before))
+    (tmux-control--note-current-window id)
+    (unless (equal (tmux-control--current-window-id) id)
+      (setq tmux-control--windows
+            (mapcar (lambda (w)
+                      (if (plist-get w :active)
+                          (plist-put (copy-sequence w) :active nil)
+                        w))
+                    tmux-control--windows))
+      (force-mode-line-update t))
+    (when before
+      (setq tmux-control--window-history (cdr before))
+      (tmux-control--remember-window-switch (car before) id))))
 
 (defun tmux-control--switch-window (verb)
   "Switch the live view to another window via tmux command VERB.
