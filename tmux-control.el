@@ -1609,6 +1609,11 @@ refreshed asynchronously from tmux.")
   "On the controller: ids of windows added to the session since its list came.
 tmux says %window-add only for a window of this client's session.  The
 next window list includes the window, and this starts empty again.")
+(defvar-local tmux-control--closed-windows nil
+  "On the controller: ids of windows that left the session since its list came.
+A window closed, or moved or unlinked to another session, is no longer
+this session's while the window list still names it.  The next window
+list leaves it out, and this starts empty again.")
 (defvar-local tmux-control--session-id nil
   "On the controller: tmux's id for the session, as \"$3\", once known.
 tmux reports every session's window switches to every control client,
@@ -3400,10 +3405,13 @@ to the new window's panes, so only the single-pane view reseeds here."
 (defun tmux-control--session-window-p (id)
   "Whether window ID may be one of the session's windows.
 True when the window list names it or tmux added it since, and when no
-list is known.  Must run in the controller."
-  (or (null tmux-control--windows)
-      (member id tmux-control--added-windows)
-      (seq-find (lambda (w) (equal (plist-get w :id) id)) tmux-control--windows)))
+list is known; false once tmux says it left the session.  Must run in
+the controller."
+  (and (not (member id tmux-control--closed-windows))
+       (or (null tmux-control--windows)
+           (member id tmux-control--added-windows)
+           (seq-find (lambda (w) (equal (plist-get w :id) id))
+                     tmux-control--windows))))
 
 (defun tmux-control--switch-window (verb)
   "Switch the live view to another window via tmux command VERB.
@@ -3652,9 +3660,10 @@ the controller renders its own window, so a switch back to it swaps here."
                 (lambda (a b)
                   (< (string-to-number (plist-get a :index))
                      (string-to-number (plist-get b :index))))))
-    ;; tmux sent this list after any %window-add read so far, so it
-    ;; includes those windows.
-    (setq tmux-control--added-windows nil)
+    ;; tmux sent this list after any window add or close read so far, so
+    ;; it includes the windows added and leaves out the ones that left.
+    (setq tmux-control--added-windows nil
+          tmux-control--closed-windows nil)
     (when active
       (setq tmux-control--current-window active)
       (when (hash-table-p tmux-control--activity)
@@ -7081,11 +7090,21 @@ backing off to the cap."
                (string-prefix-p "%unlinked-window-close " line)
                (string-prefix-p "%window-renamed " line)
                (string-prefix-p "%unlinked-window-renamed " line))
-      ;; A window added to this session is one of its windows before the
-      ;; window list asked for below says so (`tmux-control--session-window-p').
-      (when (and tmux-control--windows
-                 (string-match "\\`%window-add \\(@[0-9]+\\)\\'" line))
-        (push (match-string 1 line) tmux-control--added-windows))
+      ;; Until the window list asked for below comes, a window added to
+      ;; this session is already one of its windows, and one that closed
+      ;; or left it is not (`tmux-control--session-window-p').
+      (when tmux-control--windows
+        (cond
+         ((string-match "\\`%window-add \\(@[0-9]+\\)\\'" line)
+          (let ((id (match-string 1 line)))
+            (setq tmux-control--closed-windows
+                  (delete id tmux-control--closed-windows))
+            (push id tmux-control--added-windows)))
+         ((string-match "\\`%\\(?:unlinked-\\)?window-close \\(@[0-9]+\\)\\'" line)
+          (let ((id (match-string 1 line)))
+            (setq tmux-control--added-windows
+                  (delete id tmux-control--added-windows))
+            (push id tmux-control--closed-windows)))))
       ;; A closed window's render buffer goes with it.  A displayed one is
       ;; first swapped to the controller; the %session-window-changed that
       ;; follows a current-window close then swaps to the real new window.
