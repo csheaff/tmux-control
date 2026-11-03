@@ -1605,6 +1605,15 @@ A list of plists (:index INDEX :name NAME :active BOOL :bell BOOL),
 refreshed asynchronously from tmux.")
 (defvar-local tmux-control--current-window nil
   "Index string of the session's currently active window, for the tab bar.")
+(defvar-local tmux-control--added-windows nil
+  "On the controller: ids of windows added to the session since its list came.
+tmux says %window-add only for a window of this client's session.  The
+next window list includes the window, and this starts empty again.")
+(defvar-local tmux-control--session-id nil
+  "On the controller: tmux's id for the session, as \"$3\", once known.
+tmux reports every session's window switches to every control client,
+so a %session-window-changed is this session's only when it names this
+id.")
 (defvar-local tmux-control--activity nil
   "Hash table of window-index -> t for background windows with unseen output.
 A window's panes producing %output while it is not the current window set its
@@ -3388,6 +3397,14 @@ to the new window's panes, so only the single-pane view reseeds here."
               (tmux-control--display-window-buffer id)))
         (tmux-control--refresh-active-pane t)))))
 
+(defun tmux-control--session-window-p (id)
+  "Whether window ID may be one of the session's windows.
+True when the window list names it or tmux added it since, and when no
+list is known.  Must run in the controller."
+  (or (null tmux-control--windows)
+      (member id tmux-control--added-windows)
+      (seq-find (lambda (w) (equal (plist-get w :id) id)) tmux-control--windows)))
+
 (defun tmux-control--switch-window (verb)
   "Switch the live view to another window via tmux command VERB.
 VERB is a session-relative selector command -- \"next-window\",
@@ -3635,6 +3652,9 @@ the controller renders its own window, so a switch back to it swaps here."
                 (lambda (a b)
                   (< (string-to-number (plist-get a :index))
                      (string-to-number (plist-get b :index))))))
+    ;; tmux sent this list after any %window-add read so far, so it
+    ;; includes those windows.
+    (setq tmux-control--added-windows nil)
     (when active
       (setq tmux-control--current-window active)
       (when (hash-table-p tmux-control--activity)
@@ -6935,6 +6955,11 @@ backing off to the cap."
         (cond
          ;; Another window's pane: the view is untouched.
          ((and own (not tiled-pane)))
+         ;; tmux tells every control client of every session's pane
+         ;; changes: one in another session's window is not about this
+         ;; view.  Followed, it put that session's pane in this one's
+         ;; place, and keystrokes went to it.
+         ((not (tmux-control--session-window-p win-id)))
          ((and tmux-control-window-buffers
                (not tmux-control--tiled)
                ;; A HOMELESS controller owns no window at all, so every
@@ -6959,8 +6984,8 @@ backing off to the cap."
          (t
           ;; Our own window's pane changed (a split, select-pane, closed
           ;; pane) -- or the legacy single-buffer mode, whose view follows
-          ;; the event unconditionally (pre-window-buffers semantics, a
-          ;; load-bearing affordance).  Follow it.
+          ;; the event in any of the session's windows (pre-window-buffers
+          ;; semantics).  Follow it.
           (setq tmux-control--active-pane pane)
           (tmux-control--follow-hidden-pane)
           (when tmux-control-pane-directory-mode
@@ -7018,30 +7043,49 @@ backing off to the cap."
       ;; *external* switch here keeps the live view -- and scrollback, which
       ;; captures `--active-pane' -- on the window the tab bar shows, rather
       ;; than stranding on the previous pane.
-      (tmux-control--refresh-windows)
-      (if tmux-control--tiled
-          (setq tmux-control--retile-pending t)
-        (if (and tmux-control-window-buffers
-                 (string-match "\\`%session-window-changed [^ ]+ \\(@[0-9]+\\)\\'"
-                               line))
+      ;;
+      ;; tmux tells every control client of every session's switches: one
+      ;; naming another session is not about this view.  Followed, it put
+      ;; that session's window in this one's place.
+      (let* ((fields (split-string line " "))
+             (session-id (nth 1 fields))
+             (window-id (nth 2 fields)))
+        (when (or (null tmux-control--session-id)
+                  (equal session-id tmux-control--session-id))
+          (tmux-control--refresh-windows)
+          (unless (string-match-p "\\`@[0-9]+\\'" (or window-id ""))
+            (setq window-id nil))
+          (cond
+           (tmux-control--tiled
+            (setq tmux-control--retile-pending t))
+           ((and tmux-control-window-buffers window-id)
             ;; Per-window buffers: a switch -- ours or another client's --
             ;; just swaps the displayed buffer.  The swap is idempotent, so
             ;; our own echoed switch needs no self-reseed accounting.
-            (progn
-              (tmux-control--quiet-activity)
-              (tmux-control--display-window-buffer (match-string 1 line)))
-          (if (and (> tmux-control--self-reseed-pending 0)
-                   (<= (float-time) tmux-control--self-reseed-until))
-              (setq tmux-control--self-reseed-pending
-                    (1- tmux-control--self-reseed-pending))
+            (tmux-control--quiet-activity)
+            (tmux-control--display-window-buffer window-id))
+           ((and (> tmux-control--self-reseed-pending 0)
+                 (<= (float-time) tmux-control--self-reseed-until))
+            (setq tmux-control--self-reseed-pending
+                  (1- tmux-control--self-reseed-pending)))
+           (t
             (setq tmux-control--self-reseed-pending 0)
-            (tmux-control--refresh-active-pane)))))
+            (tmux-control--refresh-active-pane))))))
+     ((string-match "\\`%session-changed \\(\\$[0-9]+\\) " line)
+      ;; This client attached to a session: tmux's first word after the
+      ;; startup reply, naming the session's id.
+      (setq tmux-control--session-id (match-string 1 line)))
      ((or (string-prefix-p "%window-add " line)
                (string-prefix-p "%window-close " line)
                (string-prefix-p "%unlinked-window-add " line)
                (string-prefix-p "%unlinked-window-close " line)
                (string-prefix-p "%window-renamed " line)
                (string-prefix-p "%unlinked-window-renamed " line))
+      ;; A window added to this session is one of its windows before the
+      ;; window list asked for below says so (`tmux-control--session-window-p').
+      (when (and tmux-control--windows
+                 (string-match "\\`%window-add \\(@[0-9]+\\)\\'" line))
+        (push (match-string 1 line) tmux-control--added-windows))
       ;; A closed window's render buffer goes with it.  A displayed one is
       ;; first swapped to the controller; the %session-window-changed that
       ;; follows a current-window close then swaps to the real new window.

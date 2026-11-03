@@ -4669,6 +4669,28 @@ killed with it."
         (set-window-buffer win orig)
         (kill-buffer buf-b)))))
 
+(ert-deftest tmux-control-test-another-sessions-switch-is-not-followed ()
+  ;; tmux tells every control client of every session's window switches.
+  ;; Followed, a switch in another session on the same server put that
+  ;; session's window in this view, under this session's tabs.
+  (with-temp-buffer
+    (setq-local tmux-control--tiled nil)
+    (let ((tmux-control-window-buffers t)
+          (swapped nil) (refreshed 0))
+      (cl-letf (((symbol-function 'tmux-control--flush-output-batch) #'ignore)
+                ((symbol-function 'tmux-control--refresh-windows)
+                 (lambda () (cl-incf refreshed)))
+                ((symbol-function 'tmux-control--display-window-buffer)
+                 (lambda (id) (setq swapped id))))
+        (tmux-control--handle-line "%session-changed $4 my work")
+        (should (equal tmux-control--session-id "$4"))
+        (tmux-control--handle-line "%session-window-changed $1 @6")
+        (should-not swapped)
+        (should (= refreshed 0))
+        (tmux-control--handle-line "%session-window-changed $4 @3")
+        (should (equal swapped "@3"))
+        (should (= refreshed 1))))))
+
 (ert-deftest tmux-control-test-select-pane-crosses-windows ()
   ;; `tmux-control-select-pane' can be handed (or complete to) a pane in
   ;; another window, but tmux's bare `select-pane' cannot move the session
@@ -7163,11 +7185,12 @@ Return the window."
           (should (equal tmux-control--active-pane "%5"))
           (should (= seeded 1)))))))
 
-(ert-deftest tmux-control-test-pane-changed-legacy-mode-follows-unconditionally ()
+(ert-deftest tmux-control-test-pane-changed-legacy-mode-follows-the-session ()
   ;; With per-window buffers OFF the single view mirrors the session and
-  ;; has always followed %window-pane-changed unconditionally -- a
-  ;; load-bearing affordance (it is how cross-window select-pane jumps
-  ;; worked); the foreign-window guard must not change it.
+  ;; follows %window-pane-changed in any of its windows (it is how
+  ;; cross-window select-pane jumps once worked); the guard against
+  ;; windows without a buffer of their own must not change it.  With no
+  ;; window list yet, any window may be the session's.
   (let ((seeded 0))
     (cl-letf (((symbol-function 'tmux-control--seed-screen)
                (lambda () (cl-incf seeded)))
@@ -7183,6 +7206,59 @@ Return the window."
           (tmux-control--handle-line "%window-pane-changed @7 %9")
           (should (equal tmux-control--active-pane "%9"))
           (should (= seeded 1)))))))
+
+(ert-deftest tmux-control-test-another-sessions-pane-change-is-not-followed ()
+  ;; tmux tells every control client of every session's pane changes.
+  ;; The single view followed them, so a select-pane or split in another
+  ;; session on the server put that session's pane in this view, and
+  ;; keystrokes went to it.
+  (let ((seeded 0) (map-refreshed 0))
+    (cl-letf (((symbol-function 'tmux-control--seed-screen)
+               (lambda () (cl-incf seeded)))
+              ((symbol-function 'tmux-control--refresh-alt-screen-option)
+               #'ignore)
+              ((symbol-function 'tmux-control--refresh-pane-size) #'ignore)
+              ((symbol-function 'tmux-control--refresh-pane-window-map)
+               (lambda () (cl-incf map-refreshed))))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (let ((tmux-control-window-buffers nil))
+          (setq-local tmux-control--window-id "@1"
+                      tmux-control--active-pane "%1"
+                      tmux-control--collecting-command nil
+                      tmux-control--windows
+                      (list (list :index "0" :name "a" :active t :id "@1")
+                            (list :index "1" :name "b" :id "@2")))
+          (tmux-control--handle-line "%window-pane-changed @9 %9")
+          (should (equal tmux-control--active-pane "%1"))
+          (should (= seeded 0))
+          ;; The session's other windows are followed, as before.
+          (tmux-control--handle-line "%window-pane-changed @2 %5")
+          (should (equal tmux-control--active-pane "%5"))
+          (should (= seeded 1))
+          ;; So is a window tmux has added to the session but not yet
+          ;; listed.
+          (tmux-control--handle-line "%window-add @10")
+          (tmux-control--handle-line "%window-pane-changed @10 %12")
+          (should (equal tmux-control--active-pane "%12"))
+          (should (= seeded 2))
+          (tmux-control--update-windows
+           '("0\ta\t1\t0\t@1" "1\tb\t0\t0\t@2" "2\tc\t0\t0\t@10"))
+          (should-not tmux-control--added-windows)
+          ;; A tiled view only moves its pointer, but not to another
+          ;; session's pane either.
+          (setq-local tmux-control--tiled t
+                      tmux-control--panes '(("%12")))
+          (tmux-control--handle-line "%window-pane-changed @9 %3")
+          (should (equal tmux-control--active-pane "%12")))
+        ;; Per-window buffers: no pane map refresh for another session.
+        (let ((tmux-control-window-buffers t))
+          (setq-local tmux-control--tiled nil)
+          (setq map-refreshed 0)
+          (tmux-control--handle-line "%window-pane-changed @9 %9")
+          (should (= map-refreshed 0))
+          (tmux-control--handle-line "%window-pane-changed @2 %7")
+          (should (= map-refreshed 1)))))))
 
 (ert-deftest tmux-control-test-new-and-kill-window-skip-pane-requery-when-gated ()
   ;; With per-window buffers the echoed %session-window-changed swaps the
