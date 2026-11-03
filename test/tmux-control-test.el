@@ -4783,6 +4783,62 @@ killed with it."
         (kill-buffer buf-b)
         (kill-buffer buf-c)))))
 
+(ert-deftest tmux-control-test-switch-reply-settles-a-view-the-list-agrees-with ()
+  ;; The latest switch's reply settles the view even when the window list
+  ;; already agrees with tmux.  A window shown early that closes before
+  ;; tmux runs the switch takes its buffer with it, and the view falls
+  ;; back to the controller's window; a window list that comes meanwhile
+  ;; moves the highlight to tmux's current window but not the view, and
+  ;; no echo follows a switch tmux couldn't make.  The reply then matched
+  ;; the list and moved nothing, so the view stayed on the wrong window.
+  (with-temp-buffer
+    (let* ((tmux-control-window-buffers t)
+           (ctrl (current-buffer))
+           (buf-a (generate-new-buffer " *tc-settle-a*"))
+           (buf-b (generate-new-buffer " *tc-settle-b*"))
+           (win (selected-window))
+           (orig (window-buffer win))
+           (sent nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'tmux-control--ensure-live) #'ignore)
+                    ((symbol-function 'tmux-control--refresh-windows) #'ignore)
+                    ((symbol-function 'tmux-control--refresh-pane-window-map)
+                     #'ignore)
+                    ((symbol-function 'tmux-control--send-command)
+                     (lambda (cmd &optional kind) (push (cons cmd kind) sent))))
+            (setq-local tmux-control--session "s"
+                        tmux-control--session-id "$0"
+                        tmux-control--window-id "@3"
+                        tmux-control--current-window "0"
+                        tmux-control--windows
+                        (list (list :index "0" :name "a" :active t :id "@1")
+                              (list :index "1" :name "b" :id "@2")
+                              (list :index "2" :name "c" :id "@3")))
+            (tmux-control--register-window-buffer "@3" ctrl)
+            (dolist (pair `(("@1" . ,buf-a) ("@2" . ,buf-b)))
+              (with-current-buffer (cdr pair)
+                (setq-local tmux-control--window-id (car pair)
+                            tmux-control--controller ctrl))
+              (tmux-control--register-window-buffer (car pair) (cdr pair)))
+            (set-window-buffer win buf-a)
+            (tmux-control-next-window)
+            (should (eq (window-buffer win) buf-b))
+            ;; @2 closes before tmux runs the switch, and a window list
+            ;; comes: tmux is still on @1.
+            (tmux-control--handle-line "%unlinked-window-close @2")
+            (should (eq (window-buffer win) ctrl))
+            (tmux-control--update-windows
+             '("0\ta\t1\t0\t@1" "2\tc\t0\t0\t@3"))
+            (should (equal (tmux-control--current-window-id) "@1"))
+            ;; The switch's reply says @1, and the view goes there too.
+            (funcall (cdr (seq-find (lambda (e) (functionp (cdr e))) sent))
+                     '("@1"))
+            (should (= tmux-control--switch-pending 0))
+            (should (eq (window-buffer win) buf-a)))
+        (set-window-buffer win orig)
+        (when (buffer-live-p buf-a) (kill-buffer buf-a))
+        (when (buffer-live-p buf-b) (kill-buffer buf-b))))))
+
 (ert-deftest tmux-control-test-another-sessions-switch-is-not-followed ()
   ;; tmux tells every control client of every session's window switches.
   ;; Followed, a switch in another session on the same server put that

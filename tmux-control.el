@@ -3589,10 +3589,13 @@ ID is nil when the query failed.  Runs in the controller."
   (when (and (= generation tmux-control--switch-generation)
              (not tmux-control--tiled)
              (stringp id)
-             (string-match-p "\\`@[0-9]+\\'" id)
-             (not (equal id (tmux-control--current-window-id))))
-    ;; The cached list was out of date: another client switched, or a
-    ;; window came or went that the list hadn't caught up with.
+             (string-match-p "\\`@[0-9]+\\'" id))
+    ;; The cached list may be out of date: another client switched, or a
+    ;; window came or went that the list hadn't caught up with.  And the
+    ;; view may be off even when the list agrees with tmux: when the
+    ;; window shown early closed before tmux ran the switch, a window list
+    ;; that came meanwhile moved the highlight but not the view.  Both are
+    ;; no-ops when tab and view are already right.
     (tmux-control--note-current-window id)
     (tmux-control--display-window-buffer id)))
 
