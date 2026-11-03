@@ -1621,6 +1621,10 @@ it out, and this starts empty again.")
 tmux reports every session's window switches to every control client,
 so a %session-window-changed is this session's only when it names this
 id.")
+(defvar-local tmux-control--sessions nil
+  "On the controller: the names of the sessions on its server, in tmux's order.
+Kept current over the control connection, so the session commands need
+not ask tmux, which over SSH is a new connection each time.")
 (defvar-local tmux-control--activity nil
   "Hash table of window-index -> t for background windows with unseen output.
 A window's panes producing %output while it is not the current window set its
@@ -1992,12 +1996,37 @@ text (creating a new session) when they do not."
                 (error-message-string err))
        nil))))
 
+(defun tmux-control--refresh-sessions ()
+  "Ask tmux, over the connection, for the sessions on its server.
+Must run in the controller.  Kept in `tmux-control--sessions'; run on
+connect and when tmux says a session came, went or was renamed."
+  (when (process-live-p tmux-control--process)
+    (tmux-control--query "list-sessions -F '#{session_name}'"
+                         (lambda (lines)
+                           (when lines
+                             (setq tmux-control--sessions lines))))))
+
+(defun tmux-control--known-sessions (host socket-name)
+  "Return the names of the sessions on HOST's tmux server SOCKET-NAME.
+From a live connection to that server, which keeps them current, when
+there is one; otherwise from tmux itself, as `tmux-control--list-sessions'."
+  (or (seq-some (lambda (buffer)
+                  (with-current-buffer buffer
+                    (and (derived-mode-p 'tmux-control-mode)
+                         (null tmux-control--controller)
+                         (equal (or host "") (or tmux-control--host ""))
+                         (equal socket-name tmux-control--socket-name)
+                         (process-live-p tmux-control--process)
+                         tmux-control--sessions)))
+                (buffer-list))
+      (tmux-control--list-sessions host socket-name)))
+
 (defun tmux-control--read-session (host socket-name)
   "Read a session name on HOST using SOCKET-NAME.
 
 Offer completion over existing sessions.  Selecting one attaches to it;
 typing a new name creates that session on connect."
-  (let ((sessions (tmux-control--list-sessions host socket-name)))
+  (let ((sessions (tmux-control--known-sessions host socket-name)))
     (completing-read "Session: " sessions nil nil nil nil
                      tmux-control-default-session)))
 
@@ -2106,6 +2135,9 @@ session (tmux attaches if it exists, otherwise creates it)."
       (tmux-control--refresh-windows)
       (when (tmux-control--track-windows-p)
         (tmux-control--refresh-pane-window-map))
+      ;; The session commands complete over the server's sessions; keep
+      ;; them here rather than ask tmux at each command.
+      (tmux-control--refresh-sessions)
       (when (and (integerp tmux-control-pause-after)
                  (> tmux-control-pause-after 0))
         ;; Opt-in control-mode flow control: tmux pauses a lagging pane and
@@ -2245,7 +2277,7 @@ previewed in place as you choose.  See also `tmux-control-next-session'."
   (let* ((host tmux-control--host)
          (socket tmux-control--socket-name)
          (current tmux-control--session)
-         (sessions (tmux-control--list-sessions host socket)))
+         (sessions (tmux-control--known-sessions host socket)))
     (if (and tmux-control-session-preview (fboundp 'consult--read))
         (tmux-control--select-session-inline host socket sessions current)
       (let ((choice (completing-read
@@ -2262,7 +2294,7 @@ tmux's own list order, connecting the target on demand."
     (user-error "Not in a tmux-control session buffer"))
   (let* ((host tmux-control--host)
          (socket tmux-control--socket-name)
-         (sessions (tmux-control--list-sessions host socket)))
+         (sessions (tmux-control--known-sessions host socket)))
     (cond
      ((null sessions) (tmux-control--message "No sessions to switch to"))
      ((not (cdr sessions)) (tmux-control--message "Only one session"))
@@ -2351,7 +2383,7 @@ their screens seed asynchronously, like any connect."
   (let ((host tmux-control--host)
         (socket tmux-control--socket-name))
     (save-window-excursion
-      (dolist (session (tmux-control--list-sessions host socket))
+      (dolist (session (tmux-control--known-sessions host socket))
         (unless (tmux-control--session-live-buffer host session socket)
           (tmux-control-connect host socket session))))))
 
@@ -3190,13 +3222,29 @@ Set `tmux-control-warn-on-alternate-screen-off' to nil to silence this."
        :warning))))
 
 (defun tmux-control--window-choices ()
-  "Return an alist of (DISPLAY . INDEX) for the current session's windows."
+  "Return an alist of (DISPLAY . INDEX) for the current session's windows.
+From the window list the connection keeps, as the tab bar shows it;
+only before that has come does it ask tmux, which over SSH is a new
+connection and holds Emacs up while it is made."
   (unless tmux-control--session
     (user-error "No tmux-control session in this buffer"))
-  (mapcar (lambda (w) (cons (cdr w) (car w)))
-          (tmux-control--list-windows tmux-control--host
-                                      tmux-control--socket-name
-                                      tmux-control--session)))
+  (let ((ctrl (tmux-control--wb-controller)))
+    (if-let* ((windows (and (buffer-live-p ctrl)
+                            (buffer-local-value 'tmux-control--windows ctrl))))
+        (mapcar (lambda (w)
+                  (let* ((index (plist-get w :index))
+                         (active (plist-get w :active))
+                         (label (format "%s: %s%s" index (plist-get w :name)
+                                        (if active " (active)" ""))))
+                    (cons (if active
+                              (propertize label 'tmux-window-active t)
+                            label)
+                          index)))
+                windows)
+      (mapcar (lambda (w) (cons (cdr w) (car w)))
+              (tmux-control--list-windows tmux-control--host
+                                          tmux-control--socket-name
+                                          tmux-control--session)))))
 
 (defun tmux-control--read-window-index (prompt)
   "Read a window index for the current session using PROMPT with completion."
@@ -7092,6 +7140,9 @@ backing off to the cap."
       ;; This client attached to a session: tmux's first word after the
       ;; startup reply, naming the session's id.
       (setq tmux-control--session-id (match-string 1 line)))
+     ((or (string-prefix-p "%sessions-changed" line)
+          (string-prefix-p "%session-renamed " line))
+      (tmux-control--refresh-sessions))
      ((or (string-prefix-p "%window-add " line)
                (string-prefix-p "%window-close " line)
                (string-prefix-p "%unlinked-window-add " line)
