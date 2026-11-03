@@ -2337,11 +2337,52 @@ each wrapped in an evolving prompt line and a status bar.")
         (should (seq-some (lambda (c) (string-prefix-p "list-windows" c)) sent))
         (should (seq-some (lambda (c) (string-prefix-p "list-panes" c)) sent))
         (setq sent nil)
+        ;; With every window display off, the pane map isn't asked for.
+        ;; The window list still is: it tells the session's windows from
+        ;; other sessions'.
         (let ((tmux-control-mode-line-window-name nil))
           (should-not (tmux-control--track-windows-p))
           (tmux-control--refresh-windows)
           (tmux-control--refresh-pane-window-map))
-        (should-not sent)))))
+        (should (= (length sent) 1))
+        (should (string-prefix-p "list-windows" (car sent)))))))
+
+(ert-deftest tmux-control-test-window-list-kept-with-every-window-display-off ()
+  ;; Which windows are the session's decides whether a pane switch is
+  ;; about this view, so the window list is kept even when nothing shows
+  ;; windows.  It wasn't, every window then counted as the session's, and
+  ;; another session's pane switch moved the single view.
+  (let ((tmux-control-window-tab-bar nil)
+        (tmux-control-window-buffers nil)
+        (tmux-control-mode-line-window-name nil)
+        (tmux-control-window-buffer-names 'id)
+        (seeded 0)
+        sent)
+    (with-temp-buffer
+      (tmux-control-mode)
+      (setq-local tmux-control--session "work"
+                  tmux-control--window-id "@1"
+                  tmux-control--active-pane "%1"
+                  tmux-control--collecting-command nil)
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'tmux-control--send-command)
+                 (lambda (command &rest _) (push command sent)))
+                ((symbol-function 'tmux-control--seed-screen)
+                 (lambda () (cl-incf seeded)))
+                ((symbol-function 'tmux-control--refresh-alt-screen-option)
+                 #'ignore)
+                ((symbol-function 'tmux-control--refresh-pane-size) #'ignore))
+        (should-not (tmux-control--track-windows-p))
+        (tmux-control--refresh-windows)
+        (should (seq-some (lambda (c) (string-prefix-p "list-windows" c)) sent))
+        ;; tmux's reply.
+        (tmux-control--update-windows '("0\ta\t1\t0\t@1" "1\tb\t0\t0\t@2"))
+        (tmux-control--handle-line "%window-pane-changed @9 %9")
+        (should (equal tmux-control--active-pane "%1"))
+        (should (= seeded 0))
+        (tmux-control--handle-line "%window-pane-changed @2 %5")
+        (should (equal tmux-control--active-pane "%5"))
+        (should (= seeded 1))))))
 
 (ert-deftest tmux-control-test-session-label-names-host-and-session ()
   ;; The persistent header label names the current connection: HOST:SESSION
@@ -4668,6 +4709,28 @@ killed with it."
             (should (eq (window-buffer win) buf-b)))
         (set-window-buffer win orig)
         (kill-buffer buf-b)))))
+
+(ert-deftest tmux-control-test-another-sessions-switch-is-not-followed ()
+  ;; tmux tells every control client of every session's window switches.
+  ;; Followed, a switch in another session on the same server put that
+  ;; session's window in this view, under this session's tabs.
+  (with-temp-buffer
+    (setq-local tmux-control--tiled nil)
+    (let ((tmux-control-window-buffers t)
+          (swapped nil) (refreshed 0))
+      (cl-letf (((symbol-function 'tmux-control--flush-output-batch) #'ignore)
+                ((symbol-function 'tmux-control--refresh-windows)
+                 (lambda () (cl-incf refreshed)))
+                ((symbol-function 'tmux-control--display-window-buffer)
+                 (lambda (id) (setq swapped id))))
+        (tmux-control--handle-line "%session-changed $4 my work")
+        (should (equal tmux-control--session-id "$4"))
+        (tmux-control--handle-line "%session-window-changed $1 @6")
+        (should-not swapped)
+        (should (= refreshed 0))
+        (tmux-control--handle-line "%session-window-changed $4 @3")
+        (should (equal swapped "@3"))
+        (should (= refreshed 1))))))
 
 (ert-deftest tmux-control-test-select-pane-crosses-windows ()
   ;; `tmux-control-select-pane' can be handed (or complete to) a pane in
@@ -7163,11 +7226,12 @@ Return the window."
           (should (equal tmux-control--active-pane "%5"))
           (should (= seeded 1)))))))
 
-(ert-deftest tmux-control-test-pane-changed-legacy-mode-follows-unconditionally ()
+(ert-deftest tmux-control-test-pane-changed-legacy-mode-follows-the-session ()
   ;; With per-window buffers OFF the single view mirrors the session and
-  ;; has always followed %window-pane-changed unconditionally -- a
-  ;; load-bearing affordance (it is how cross-window select-pane jumps
-  ;; worked); the foreign-window guard must not change it.
+  ;; follows %window-pane-changed in any of its windows (it is how
+  ;; cross-window select-pane jumps once worked); the guard against
+  ;; windows without a buffer of their own must not change it.  With no
+  ;; window list yet, any window may be the session's.
   (let ((seeded 0))
     (cl-letf (((symbol-function 'tmux-control--seed-screen)
                (lambda () (cl-incf seeded)))
@@ -7183,6 +7247,108 @@ Return the window."
           (tmux-control--handle-line "%window-pane-changed @7 %9")
           (should (equal tmux-control--active-pane "%9"))
           (should (= seeded 1)))))))
+
+(ert-deftest tmux-control-test-another-sessions-pane-change-is-not-followed ()
+  ;; tmux tells every control client of every session's pane changes.
+  ;; The single view followed them, so a select-pane or split in another
+  ;; session on the server put that session's pane in this view, and
+  ;; keystrokes went to it.
+  (let ((seeded 0) (map-refreshed 0))
+    (cl-letf (((symbol-function 'tmux-control--seed-screen)
+               (lambda () (cl-incf seeded)))
+              ((symbol-function 'tmux-control--refresh-alt-screen-option)
+               #'ignore)
+              ((symbol-function 'tmux-control--refresh-pane-size) #'ignore)
+              ((symbol-function 'tmux-control--refresh-pane-window-map)
+               (lambda () (cl-incf map-refreshed))))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (let ((tmux-control-window-buffers nil))
+          (setq-local tmux-control--window-id "@1"
+                      tmux-control--active-pane "%1"
+                      tmux-control--collecting-command nil
+                      tmux-control--windows
+                      (list (list :index "0" :name "a" :active t :id "@1")
+                            (list :index "1" :name "b" :id "@2")))
+          (tmux-control--handle-line "%window-pane-changed @9 %9")
+          (should (equal tmux-control--active-pane "%1"))
+          (should (= seeded 0))
+          ;; The session's other windows are followed, as before.
+          (tmux-control--handle-line "%window-pane-changed @2 %5")
+          (should (equal tmux-control--active-pane "%5"))
+          (should (= seeded 1))
+          ;; So is a window tmux has added to the session but not yet
+          ;; listed.
+          (tmux-control--handle-line "%window-add @10")
+          (tmux-control--handle-line "%window-pane-changed @10 %12")
+          (should (equal tmux-control--active-pane "%12"))
+          (should (= seeded 2))
+          (tmux-control--update-windows
+           '("0\ta\t1\t0\t@1" "1\tb\t0\t0\t@2" "2\tc\t0\t0\t@10"))
+          (should-not tmux-control--added-windows)
+          ;; A tiled view only moves its pointer, but not to another
+          ;; session's pane either.
+          (setq-local tmux-control--tiled t
+                      tmux-control--panes '(("%12")))
+          (tmux-control--handle-line "%window-pane-changed @9 %3")
+          (should (equal tmux-control--active-pane "%12")))
+        ;; Per-window buffers: no pane map refresh for another session.
+        (let ((tmux-control-window-buffers t))
+          (setq-local tmux-control--tiled nil)
+          (setq map-refreshed 0)
+          (tmux-control--handle-line "%window-pane-changed @9 %9")
+          (should (= map-refreshed 0))
+          (tmux-control--handle-line "%window-pane-changed @2 %7")
+          (should (= map-refreshed 1)))))))
+
+(ert-deftest tmux-control-test-pane-change-in-a-window-that-left-is-not-followed ()
+  ;; A window can leave the session -- unlinked, or moved to another
+  ;; session -- and live on there.  Until the window list came back
+  ;; without it, a pane change in it still passed for this session's,
+  ;; and the single view followed another session's pane.  tmux says
+  ;; %unlinked-window-close for that; %window-close is for a window
+  ;; still linked here (a shared window leaving another session), whose
+  ;; pane changes are still followed.
+  (let ((seeded 0))
+    (cl-letf (((symbol-function 'tmux-control--seed-screen)
+               (lambda () (cl-incf seeded)))
+              ((symbol-function 'tmux-control--refresh-alt-screen-option)
+               #'ignore)
+              ((symbol-function 'tmux-control--refresh-pane-size) #'ignore)
+              ((symbol-function 'tmux-control--refresh-pane-window-map)
+               #'ignore))
+      (with-temp-buffer
+        (tmux-control-mode)
+        (let ((tmux-control-window-buffers nil))
+          (setq-local tmux-control--window-id "@1"
+                      tmux-control--active-pane "%1"
+                      tmux-control--collecting-command nil
+                      tmux-control--windows
+                      (list (list :index "0" :name "a" :active t :id "@1")
+                            (list :index "1" :name "b" :id "@2")))
+          (tmux-control--handle-line "%unlinked-window-close @2")
+          (tmux-control--handle-line "%window-pane-changed @2 %7")
+          (should (equal tmux-control--active-pane "%1"))
+          (should (= seeded 0))
+          ;; Linked back in, it is the session's again.
+          (tmux-control--handle-line "%window-add @2")
+          (tmux-control--handle-line "%window-pane-changed @2 %8")
+          (should (equal tmux-control--active-pane "%8"))
+          (should (= seeded 1))
+          ;; Shared, and unlinked from another session: still here.
+          (tmux-control--handle-line "%window-close @2")
+          (tmux-control--handle-line "%window-pane-changed @2 %9")
+          (should (equal tmux-control--active-pane "%9"))
+          (should (= seeded 2))
+          (tmux-control--handle-line "%unlinked-window-close @2")
+          (tmux-control--handle-line "%window-pane-changed @2 %10")
+          (should (equal tmux-control--active-pane "%9"))
+          ;; The next window list says so itself.
+          (tmux-control--update-windows '("0\ta\t1\t0\t@1"))
+          (should-not tmux-control--closed-windows)
+          (tmux-control--handle-line "%window-pane-changed @2 %10")
+          (should (equal tmux-control--active-pane "%9"))
+          (should (= seeded 2)))))))
 
 (ert-deftest tmux-control-test-new-and-kill-window-skip-pane-requery-when-gated ()
   ;; With per-window buffers the echoed %session-window-changed swaps the
