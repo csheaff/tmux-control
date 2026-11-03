@@ -2098,9 +2098,11 @@ session (tmux attaches if it exists, otherwise creates it)."
         (setq tmux-control--activity (make-hash-table :test 'equal)))
       ;; The window list and pane->window map feed the tab bar, the
       ;; per-window buffer routing and the mode line's window name; request
-      ;; them when any is on, so each works with the others disabled.
+      ;; the map when any is on, so each works with the others disabled.
+      ;; The list is requested anyway: it tells this session's windows
+      ;; from other sessions'.
+      (tmux-control--refresh-windows)
       (when (tmux-control--track-windows-p)
-        (tmux-control--refresh-windows)
         (tmux-control--refresh-pane-window-map))
       (when (and (integerp tmux-control-pause-after)
                  (> tmux-control-pause-after 0))
@@ -3585,17 +3587,21 @@ underscore-normalized replies."
       (tmux-control--window-state-fields-with-separator line "_")))
 
 (defun tmux-control--track-windows-p ()
-  "Whether some feature needs the session's window list and pane map.
+  "Whether some feature needs the session's pane map.
 Those are the tab bar, per-window buffers, the mode line's window name
-and buffers named by their tabs."
+and buffers named by their tabs.  The window list is kept whether or
+not: it tells the session's windows from other sessions'
+\(`tmux-control--session-window-p')."
   (or tmux-control-window-tab-bar tmux-control-window-buffers
       tmux-control-mode-line-window-name
       (eq tmux-control-window-buffer-names 'tab)))
 
 (defun tmux-control--refresh-windows ()
-  "Asynchronously refresh the cached window list that feeds the tab bar."
-  (when (and (tmux-control--track-windows-p)
-             (process-live-p tmux-control--process))
+  "Asynchronously refresh the cached window list.
+It feeds the tab bar and tells the session's windows from other
+sessions' (`tmux-control--session-window-p'), so it is kept with every
+window display off too."
+  (when (process-live-p tmux-control--process)
     (tmux-control--send-command
      (format "list-windows -t %s -F '%s'"
              (tmux-control--window-target tmux-control--session)

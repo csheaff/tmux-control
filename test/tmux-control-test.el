@@ -2337,11 +2337,52 @@ each wrapped in an evolving prompt line and a status bar.")
         (should (seq-some (lambda (c) (string-prefix-p "list-windows" c)) sent))
         (should (seq-some (lambda (c) (string-prefix-p "list-panes" c)) sent))
         (setq sent nil)
+        ;; With every window display off, the pane map isn't asked for.
+        ;; The window list still is: it tells the session's windows from
+        ;; other sessions'.
         (let ((tmux-control-mode-line-window-name nil))
           (should-not (tmux-control--track-windows-p))
           (tmux-control--refresh-windows)
           (tmux-control--refresh-pane-window-map))
-        (should-not sent)))))
+        (should (= (length sent) 1))
+        (should (string-prefix-p "list-windows" (car sent)))))))
+
+(ert-deftest tmux-control-test-window-list-kept-with-every-window-display-off ()
+  ;; Which windows are the session's decides whether a pane switch is
+  ;; about this view, so the window list is kept even when nothing shows
+  ;; windows.  It wasn't, every window then counted as the session's, and
+  ;; another session's pane switch moved the single view.
+  (let ((tmux-control-window-tab-bar nil)
+        (tmux-control-window-buffers nil)
+        (tmux-control-mode-line-window-name nil)
+        (tmux-control-window-buffer-names 'id)
+        (seeded 0)
+        sent)
+    (with-temp-buffer
+      (tmux-control-mode)
+      (setq-local tmux-control--session "work"
+                  tmux-control--window-id "@1"
+                  tmux-control--active-pane "%1"
+                  tmux-control--collecting-command nil)
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'tmux-control--send-command)
+                 (lambda (command &rest _) (push command sent)))
+                ((symbol-function 'tmux-control--seed-screen)
+                 (lambda () (cl-incf seeded)))
+                ((symbol-function 'tmux-control--refresh-alt-screen-option)
+                 #'ignore)
+                ((symbol-function 'tmux-control--refresh-pane-size) #'ignore))
+        (should-not (tmux-control--track-windows-p))
+        (tmux-control--refresh-windows)
+        (should (seq-some (lambda (c) (string-prefix-p "list-windows" c)) sent))
+        ;; tmux's reply.
+        (tmux-control--update-windows '("0\ta\t1\t0\t@1" "1\tb\t0\t0\t@2"))
+        (tmux-control--handle-line "%window-pane-changed @9 %9")
+        (should (equal tmux-control--active-pane "%1"))
+        (should (= seeded 0))
+        (tmux-control--handle-line "%window-pane-changed @2 %5")
+        (should (equal tmux-control--active-pane "%5"))
+        (should (= seeded 1))))))
 
 (ert-deftest tmux-control-test-session-label-names-host-and-session ()
   ;; The persistent header label names the current connection: HOST:SESSION
