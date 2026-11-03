@@ -4732,6 +4732,60 @@ killed with it."
         (should (equal swapped "@3"))
         (should (= refreshed 1))))))
 
+(ert-deftest tmux-control-test-window-choices-come-from-the-window-list ()
+  ;; The window picker completes over the list the connection keeps.
+  ;; Asking tmux instead is, over SSH, a new connection each time the
+  ;; picker opens, and Emacs waits for it.
+  (with-temp-buffer
+    (setq-local tmux-control--session "s"
+                tmux-control--windows
+                (list (list :index "0" :name "a" :id "@1")
+                      (list :index "1" :name "b" :active t :id "@2")))
+    (cl-letf (((symbol-function 'tmux-control--list-windows)
+               (lambda (&rest _) (error "Asked tmux"))))
+      (let ((choices (tmux-control--window-choices)))
+        (should (equal choices '(("0: a" . "0") ("1: b (active)" . "1"))))
+        (should (get-text-property 0 'tmux-window-active (car (nth 1 choices))))
+        (should-not (get-text-property 0 'tmux-window-active (car (nth 0 choices))))))
+    ;; Before the list has come, tmux is asked.
+    (setq-local tmux-control--windows nil)
+    (cl-letf (((symbol-function 'tmux-control--list-windows)
+               (lambda (&rest _) '(("0" . "0: a")))))
+      (should (equal (tmux-control--window-choices) '(("0: a" . "0")))))))
+
+(ert-deftest tmux-control-test-session-commands-use-the-connections-list ()
+  ;; The session commands complete over the sessions a live connection to
+  ;; the server keeps, which tmux updates as sessions come and go; without
+  ;; one, they ask tmux.
+  (let ((ctrl (generate-new-buffer " *tc-sessions*"))
+        (refreshed 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-live-p) (lambda (p) (eq p 'live)))
+                  ((symbol-function 'tmux-control--list-sessions)
+                   (lambda (&rest _) '("asked")))
+                  ((symbol-function 'tmux-control--flush-output-batch) #'ignore)
+                  ((symbol-function 'tmux-control--refresh-sessions)
+                   (lambda () (cl-incf refreshed))))
+          (with-current-buffer ctrl
+            (tmux-control-mode)
+            (setq-local tmux-control--host "box"
+                        tmux-control--socket-name "main"
+                        tmux-control--session "a"
+                        tmux-control--process 'live
+                        tmux-control--sessions '("a" "b")))
+          (should (equal (tmux-control--known-sessions "box" "main") '("a" "b")))
+          (should (equal (tmux-control--known-sessions "box" "other") '("asked")))
+          (should (equal (tmux-control--known-sessions nil "main") '("asked")))
+          (with-current-buffer ctrl
+            (setq-local tmux-control--process 'dead))
+          (should (equal (tmux-control--known-sessions "box" "main") '("asked")))
+          ;; tmux says when sessions come, go or are renamed.
+          (with-current-buffer ctrl
+            (tmux-control--handle-line "%sessions-changed")
+            (tmux-control--handle-line "%session-renamed $2 c"))
+          (should (= refreshed 2)))
+      (kill-buffer ctrl))))
+
 (ert-deftest tmux-control-test-select-pane-crosses-windows ()
   ;; `tmux-control-select-pane' can be handed (or complete to) a pane in
   ;; another window, but tmux's bare `select-pane' cannot move the session
