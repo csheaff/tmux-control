@@ -11719,22 +11719,22 @@ an alist (PANE-ID . WINDOW), or nil when the windows could not be built."
          (from (or (and (window-minibuffer-p) (minibuffer-selected-window))
                    selected))
          (root (or (let ((b (window-buffer from)))
-                    (when (or (eq b controller) (rassq b panes)
-                              (eq (buffer-local-value 'tmux-control--controller
-                                                      b)
-                                  controller))
-                      from))
-                  (cl-some (lambda (np) (get-buffer-window (cdr np) t))
-                           (append panes old-panes))
-                  (get-buffer-window controller t)
-                  ;; Any window showing one of the session's per-window render
-                  ;; buffers -- in `tmux-control-window-buffers' mode that is
-                  ;; the live view; the controller itself may be undisplayed.
-                  (cl-some (lambda (wb) (and (buffer-live-p (cdr wb))
-                                             (get-buffer-window (cdr wb) t)))
-                           (buffer-local-value 'tmux-control--window-buffers
-                                               controller))
-                  (selected-window))))
+                     (when (or (eq b controller) (rassq b panes)
+                               (eq (buffer-local-value 'tmux-control--controller
+                                                       b)
+                                   controller))
+                       from))
+                   (cl-some (lambda (np) (get-buffer-window (cdr np) t))
+                            (append panes old-panes))
+                   (get-buffer-window controller t)
+                   ;; Any window showing one of the session's per-window render
+                   ;; buffers -- in `tmux-control-window-buffers' mode that is
+                   ;; the live view; the controller itself may be undisplayed.
+                   (cl-some (lambda (wb) (and (buffer-live-p (cdr wb))
+                                              (get-buffer-window (cdr wb) t)))
+                            (buffer-local-value 'tmux-control--window-buffers
+                                                controller))
+                   (selected-window))))
     (condition-case err
         (progn
           (select-window root)
