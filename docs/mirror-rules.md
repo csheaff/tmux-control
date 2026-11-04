@@ -22,10 +22,11 @@ hold for each session this Emacs is connected to.
 | `last` | When the client predicts where `last-window` goes, tmux's last window is the same one. Not knowing is fine. |
 | `size` | A window's buffer is the size of tmux's active pane in that window. |
 | `screen` | The shown buffer's screen matches tmux's `capture-pane`. |
-| `settled` | Nothing is left waiting: no command unanswered, no switch unconfirmed. |
+| `settled` | Nothing is left waiting: no command unanswered, no switch unconfirmed, no re-tile on its way. |
 | `tabs` | The tab drawn as current is the window on screen. |
 | `fit` | A shown window with one pane is the size of its Emacs window. |
 | `prompt` | A prompt closes when answered or cancelled, and its window shows the prompt. |
+| `connection` | A session that still exists keeps its connection. |
 | `errors` | No Lisp error reached a process filter, sentinel or timer. |
 
 A disagreement counts only if it lasts. The check first waits for a round trip

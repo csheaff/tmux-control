@@ -1302,6 +1302,37 @@ the same as before tiling, so it takes asking tmux."
                   (tmux-control-it--tmux "display-message" "-p" "-t" "t:0"
                                          "#{pane_height}")))))))
 
+(ert-deftest tmux-control-it-untiling-another-window-stays-on-it ()
+  "Untiling a window that isn't the controller's own returns to it, though
+the controller stands in until tmux says which window is current, and the
+controller, off screen, still takes its own pane's size."
+  (let ((tmux-control-window-buffers 'all))
+    (tmux-control-it--with-session
+      (set-window-buffer (selected-window) controller)
+      (tmux-control-it--tmux "split-window" "-t" "t:0")
+      (should (tmux-control-it--ready controller))
+      (tmux-control-it--tmux "new-window" "-t" "t:")
+      (tmux-control-it--tmux "split-window" "-t" "t:1")
+      (let ((buffer (tmux-control-it--window-buffer controller 1)))
+        (should (tmux-control-it--ready controller))
+        (tmux-control-it--pump 0.3)
+        (with-current-buffer buffer (tmux-control-tile))
+        (should (tmux-control-it--settle-tiles controller 2))
+        ;; While tiled: the controller's window loses its split.
+        (tmux-control-it--tmux "kill-pane" "-t" "t:0.1")
+        (tmux-control-it--pump 0.2)
+        (with-current-buffer controller (tmux-control-untile))
+        ;; The follow's timer, before tmux's reply.
+        (tmux-control--select-shown-window (selected-window) controller)
+        (should (tmux-control-it--ready controller))
+        (tmux-control-it--pump 0.3)
+        (should (equal (tmux-control-it--current-index) "1"))
+        (should (eq (window-buffer (selected-window)) buffer))
+        (should (= (cdr (with-current-buffer controller (tmux-control--term-size)))
+                   (string-to-number
+                    (tmux-control-it--tmux "display-message" "-p" "-t" "t:0"
+                                           "#{pane_height}"))))))))
+
 (ert-deftest tmux-control-it-picked-buffer-becomes-the-current-window ()
   "A window's buffer shown in the selected window makes that window
 tmux's current one.  One shown only as a preview does not, and neither
@@ -1325,6 +1356,16 @@ does one shown beside another of the session's windows."
           (should (equal (tmux-control-it--current-index) "1"))
           (should (equal (with-current-buffer controller tmux-control--current-window)
                          "1"))
+          ;; A pick takes over from a switch tmux hasn't confirmed yet.
+          (with-current-buffer one (tmux-control-next-window))
+          (should (eq (window-buffer (selected-window)) two))
+          (set-window-buffer (selected-window) controller)
+          (tmux-control--select-shown-window (selected-window) controller)
+          (tmux-control-it--pump 0.2)
+          (should (tmux-control-it--ready controller))
+          (should (equal (tmux-control-it--current-index) "0"))
+          (should (eq (window-buffer (selected-window)) controller))
+          (show one (selected-window))
           ;; A view waiting for tmux to leave a window that closed is no
           ;; pick: this is what `tmux-control--forget-window' leaves.
           (let ((current (with-current-buffer controller

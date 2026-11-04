@@ -939,6 +939,9 @@ single command queue and process.  nil in the controller buffer itself.")
   "Non-nil in a controller buffer whose window is rendered as tiled panes.")
 (defvar-local tmux-control--panes nil
   "In a tiled controller, an alist (PANE-ID . RENDER-BUFFER) in layout order.")
+(defvar-local tmux-control--untiling nil
+  "In a controller leaving its tiled view, until tmux says what is current.
+It shows meanwhile, whichever window is tmux's.")
 (defvar-local tmux-control--tiled-focus-pane nil
   "In a tiled controller, a pane to select once a re-tile shows it.
 Set when `tmux-control-select-pane' moves to another tmux window, whose
@@ -10834,12 +10837,14 @@ that showed the buffer is done, as it may go on to select a window."
 
 (defun tmux-control--select-shown-window (window buffer)
   "Make the tmux window BUFFER renders current, if WINDOW still shows it.
-Nothing to do when tmux is there already, or on its way somewhere: a
-switch shown early is already moving the view, and when the current
-window has left the session the view waits on the controller for tmux
-to say where it went (`tmux-control--forget-window').  Nothing either
-when another Emacs window shows another of the session's windows: a
-switch swaps every view of the session
+A switch shown early moves the tab highlight with the view, so a window
+that differs from the current one here is your pick, and as the latest
+switch it takes over from any still unconfirmed.  Nothing to do when
+tmux is there already.  Nothing either while the view is only waiting
+for tmux to say where it is: when the current window has left the
+session (`tmux-control--forget-window'), or while untiling.  Nor when
+another Emacs window shows another of the session's windows: a switch
+swaps every view of the session
 \(`tmux-control--display-window-buffer'), and two windows side by side
 are yours to keep.  The target is the window's id: tmux renumbers
 windows without saying so, and an index could be another window's."
@@ -10859,7 +10864,7 @@ windows without saying so, and an index could be another window's."
                             (not (equal id current))
                             (process-live-p tmux-control--process)
                             (not tmux-control--tiled)
-                            (zerop tmux-control--switch-pending)
+                            (not tmux-control--untiling)
                             (tmux-control--session-window-p current)
                             (tmux-control--session-window-p id)
                             (not (cl-some
@@ -12157,6 +12162,8 @@ panes against a now-smaller Emacs window."
   (let ((controller (tmux-control--tiling-controller)))
     (unless controller
       (user-error "Not tiling"))
+    (with-current-buffer controller
+      (setq tmux-control--untiling t))
     (tmux-control--teardown-tiling controller nil t)
     (with-current-buffer controller
       ;; Hard-clear the frozen pre-tiling screen immediately, so the returning
@@ -12175,6 +12182,7 @@ panes against a now-smaller Emacs window."
        (lambda (lines)
          (when (buffer-live-p controller)
            (with-current-buffer controller
+             (setq tmux-control--untiling nil)
              (let* ((reply (and lines (string-trim (car lines))))
                     (wid (and reply
                               (string-match
@@ -12198,10 +12206,11 @@ panes against a now-smaller Emacs window."
                          (tmux-control--seed-window-buffer existing wid)))
                      ;; The controller's own screen was hard-cleared above and
                      ;; its active pane may have drifted while tiled; reseed it
-                     ;; in the background so its own window stays live.
+                     ;; in the background so its own window stays live.  Its
+                     ;; size too, which layout changes skip while tiled.
                      (when tmux-control--window-id
                        (tmux-control--seed-window-buffer
-                        controller tmux-control--window-id)))
+                        controller tmux-control--window-id t)))
                  (when pane
                    (setq tmux-control--active-pane pane))
                  (tmux-control--resize-to-window)

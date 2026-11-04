@@ -289,7 +289,10 @@ A list of (RULE . DETAIL)."
           (flag 'settled "commands unanswered: %d"
                 (length tmux-control--command-queue)))
         (when (> tmux-control--switch-pending 0)
-          (flag 'settled "switches unconfirmed: %d" tmux-control--switch-pending)))
+          (flag 'settled "switches unconfirmed: %d" tmux-control--switch-pending))
+        (when (or (timerp tmux-control--retile-timer)
+                  tmux-control--tiling-build-active)
+          (flag 'settled "a re-tile is on its way")))
       (nreverse problems))))
 
 (defun tmux-control-mirror--lisp-errors ()
@@ -338,6 +341,35 @@ A list of (RULE . DETAIL)."
                        (process-live-p tmux-control--process))))
               (buffer-list)))
 
+(defvar tmux-control-mirror--connected nil
+  "The sessions this run has been connected to.")
+
+(defun tmux-control-mirror--lost-connections ()
+  "A (connection . DETAIL) for each session still there that lost its client.
+The checks only visit live connections, so without this a run that lost
+one would go on passing."
+  (let ((sessions (tmux-control-mirror--sessions))
+        (live (mapcar (lambda (buffer)
+                        (buffer-local-value 'tmux-control--session buffer))
+                      (tmux-control-mirror--controllers))))
+    (setq tmux-control-mirror--connected
+          (seq-filter (lambda (session) (member session sessions))
+                      (delete-dups (append live tmux-control-mirror--connected))))
+    (mapcar (lambda (session)
+              (cons 'connection (format "%s: lost its connection" session)))
+            (seq-remove (lambda (session) (member session live))
+                        tmux-control-mirror--connected))))
+
+(defun tmux-control-mirror--run-retiles ()
+  "Run the re-tiles waiting for Emacs to idle, which batch never does."
+  (when noninteractive
+    (dolist (controller (tmux-control-mirror--controllers))
+      (with-current-buffer controller
+        (when (timerp tmux-control--retile-timer)
+          (let ((timer tmux-control--retile-timer))
+            (cancel-timer timer)
+            (apply (timer--function timer) (timer--args timer))))))))
+
 (defun tmux-control-mirror--pump (secs)
   "Let process output, timers and redisplay run for SECS."
   (let ((end (+ (float-time) secs)))
@@ -361,12 +393,14 @@ A list of (RULE . DETAIL)."
   (let ((end (+ (float-time) tmux-control-mirror-patience))
         problems)
     (while (progn
+             (tmux-control-mirror--run-retiles)
              (mapc #'tmux-control-mirror--barrier (tmux-control-mirror--controllers))
              (setq problems
                    (seq-remove
                     (lambda (problem)
                       (memq (car problem) tmux-control-mirror-skip))
                     (append tmux-control-mirror--prompt-problems
+                            (tmux-control-mirror--lost-connections)
                             (mapcan #'tmux-control-mirror-problems
                                     (tmux-control-mirror--controllers))
                             (tmux-control-mirror--lisp-errors))))
@@ -693,9 +727,11 @@ Only with a real minibuffer: batch would read standard input."
           (with-selected-window (selected-window)
             (with-current-buffer (tmux-control-mirror--shown-buffer)
               (when (derived-mode-p 'tmux-control-mode)
-                (condition-case nil
-                    (call-interactively command)
-                  (quit nil)))))
+                ;; Inline waits for the answer; the chooser returns at once.
+                (let ((tmux-control-window-preview 'inline))
+                  (condition-case nil
+                      (call-interactively command)
+                    (quit nil))))))
         (cancel-timer watch)
         (tmux-control-mirror--check-prompt)))))
 
@@ -758,7 +794,8 @@ An LCG: Emacs's seeded `random' differs between builds."
       (let ((kill-buffer-query-functions nil))
         (kill-buffer buffer))))
   (tmux-control-mirror--tmux "kill-server")
-  (setq tmux-control-mirror--prompt-problems nil)
+  (setq tmux-control-mirror--prompt-problems nil
+        tmux-control-mirror--connected nil)
   (when-let* ((buffer (get-buffer "*Messages*")))
     (with-current-buffer buffer
       (let ((inhibit-read-only t)) (erase-buffer)))))
