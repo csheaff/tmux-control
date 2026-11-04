@@ -65,6 +65,9 @@
 ;; Optional: `consult' drives the per-candidate preview for the `inline'
 ;; window-preview style.  Soft -- referenced only when bound.
 (declare-function consult--read "consult" (candidates &rest options))
+(declare-function project-files "project" (project &optional dirs))
+(declare-function project-root "project" (project))
+(declare-function url-unhex-string "url-util" (str &optional allow-newlines))
 
 (defgroup tmux-control nil
   "Drive a tmux pane from Emacs using tmux control mode."
@@ -488,7 +491,9 @@ pane on a remote host, finding a file roots at `/ssh:HOST:PANE-CWD/' and you
 type only the filename, instead of spelling out a full TRAMP path.  Other
 commands (`compile', `grep', and so on) are untouched and still run locally.
 Set this nil to make those commands open at the buffer's own (local)
-directory instead, like ordinary `find-file'."
+directory instead, like ordinary `find-file'.  `tmux-control-open-link' reads
+a relative file reference from the same directory, so with this nil it won't
+open one from a remote pane, whose files are on the pane's host."
   :type 'boolean)
 
 (defcustom tmux-control-pane-directory-sync-delay 0.15
@@ -4608,16 +4613,18 @@ A closing bracket stays when the URL opened it, as in a Wikipedia title."
           (setq done t)))))
   url)
 
-(defun tmux-control--urls-in-text (text width)
-  "URLs in TEXT, a screen of rows WIDTH columns wide, as (ROW . URL).
-ROW counts from 0 at the top and is the row the URL's line starts on.
-The lowest rows come first; within a row URLs run left to right.  A URL
-longer than the rest of its row runs on to the next, which a TUI may
-indent, so a row that fills WIDTH is joined to the one below it without
-that row's leading blanks."
+(defconst tmux-control--url-regexp "https?://[^ \t\n<>\"'`]+"
+  "A URL shown as text.")
+
+(defun tmux-control--screen-text-lines (text width)
+  "TEXT, a screen of rows WIDTH columns wide, as (ROW . LINE), the lowest first.
+ROW counts from 0 at the top and is the row LINE starts on.  Text longer
+than the rest of its row runs on to the next, which a TUI may indent, so
+a row that fills WIDTH is joined to the one below it without that row's
+leading blanks."
   (let ((rows (split-string text "\n"))
         (n 0)
-        lines urls)
+        lines)
     (while rows
       (let* ((row (pop rows))
              (line row)
@@ -4628,14 +4635,84 @@ that row's leading blanks."
                 n (1+ n)
                 line (concat line (string-trim-left row))))
         (push (cons first line) lines)))
-    (dolist (line lines)
+    lines))
+
+(defun tmux-control--urls-in-text (text width)
+  "URLs in TEXT, a screen of rows WIDTH columns wide, as (ROW . URL).
+ROW counts from 0 at the top and is the row the URL's line starts on.
+The lowest rows come first; within a row URLs run left to right.  A URL
+wrapped over rows is joined again, see `tmux-control--screen-text-lines'."
+  (let (urls)
+    (dolist (line (tmux-control--screen-text-lines text width))
       (let ((start 0) found)
-        (while (string-match "https?://[^ \t\n<>\"'`]+" (cdr line) start)
+        (while (string-match tmux-control--url-regexp (cdr line) start)
           (setq start (match-end 0))
           (push (cons (car line) (tmux-control--trim-url (match-string 0 (cdr line))))
                 found))
         (setq urls (append urls (nreverse found)))))
     urls))
+
+(defconst tmux-control--file-name-limit 1024
+  "The longest name a file reference may have.")
+
+(defconst tmux-control--file-reference-regexp
+  (let ((name "[:alnum:]_./~+@%-")
+        (number "[0-9]\\{1,9\\}")
+        (after "[^[:alnum:]_/:.-]"))
+    (concat "\\(?:\\`\\|[^:" name "]\\)"
+            "\\(?:\\(?1:[" name "]+\\):\\|(:\\)"
+            "\\(?2:\\(?3:" number "\\)\\(?:-" number "\\)?"
+            "\\(?::\\(?4:" number "\\)\\)?\\)"
+            "\\(?:\\'\\|" after "\\|[:.]\\(?:\\'\\|" after "\\)\\)"))
+  "A file reference in text: FILE:LINE, FILE:LINE:COLUMN or (:LINE).
+Group 1 is FILE, which (:LINE) leaves out, group 2 what follows it, 3
+the line and 4 the column.  A range of lines counts as its first.  A
+colon can't be in FILE or come before it, so what TRAMP would read as
+another host's file is never a reference, and what comes after keeps
+the rest of a longer word out.")
+
+(defun tmux-control--safe-file-name-p (name)
+  "Non-nil if NAME, read from a pane, can only name a file on the pane's host.
+A program prints what it likes, and a colon would make NAME a TRAMP name
+for a host of its own."
+  (and (<= (length name) tmux-control--file-name-limit)
+       (not (string-match-p "[:[:cntrl:]]" name))))
+
+(defun tmux-control--file-name-like-p (name)
+  "Non-nil if NAME reads as a file's, not as a time, host or version.
+It has a letter, and a directory, an extension or a name like Makefile."
+  (let ((case-fold-search nil))
+    (and (tmux-control--safe-file-name-p name)
+         (string-match-p "[[:alpha:]]" name)
+         (string-match-p (concat "/\\|\\.[[:alpha:]][[:alnum:]]*\\'"
+                                 "\\|\\`[[:upper:]][[:alnum:]]*file\\'")
+                         name))))
+
+(defun tmux-control--file-references-in-text (text width)
+  "File references in TEXT, a screen of rows WIDTH columns wide.
+The value is a list of (ROW . REFERENCE), as `tmux-control--urls-in-text'
+gives URLs, where a REFERENCE reads FILE:LINE or FILE:LINE:COLUMN.  A
+\\=`(:LINE)' names a line in the file named just before it, and reads as
+FILE:LINE.  What is only like a reference, such as a host and port with a
+dot in the host's name, is left for opening it to find out."
+  (let ((case-fold-search nil)
+        file references)
+    (dolist (line (reverse (tmux-control--screen-text-lines text width)))
+      (let ((prose (replace-regexp-in-string tmux-control--url-regexp " " (cdr line)))
+            (start 0)
+            found)
+        (while (string-match tmux-control--file-reference-regexp prose start)
+          (let ((name (match-string 1 prose))
+                (place (match-string 2 prose))
+                (end (match-end 2)))
+            (setq start end)
+            (cond ((and name (tmux-control--file-name-like-p name))
+                   (setq file name)
+                   (push (cons (car line) (concat name ":" place)) found))
+                  ((and (not name) file (eq (aref (concat prose " ") end) ?\)))
+                   (push (cons (car line) (concat file ":" place)) found)))))
+        (setq references (append (nreverse found) references))))
+    references))
 
 (defun tmux-control--hyperlinks-in-region (beg end)
   "OSC 8 hyperlinks between BEG and END, as (ROW URI . LABEL), lowest first.
@@ -4670,16 +4747,24 @@ one link."
 (defun tmux-control--screen-links ()
   "Links on the live screen as (URL . LABEL), the lowest first.
 They are the hyperlinks programs marked (OSC 8), with the text they
-show as LABEL, and the URLs shown as text, with a nil LABEL."
-  (let ((links
-         (append
-          (tmux-control--hyperlinks-in-region
-           (tmux-control--term-screen-start) (tmux-control--term-end))
-          (mapcar (lambda (url) (cons (car url) (cons (cdr url) nil)))
-                  (tmux-control--urls-in-text
-                   (string-join (tmux-control--visible-screen-lines (current-buffer)) "\n")
-                   (car (tmux-control--term-size))))))
-        result)
+show as LABEL, the URLs shown as text, with a nil LABEL, and the file
+references shown as text, with the LABEL \"file\".  A reference that is
+the text of a marked link is that link."
+  (let* ((marked (tmux-control--hyperlinks-in-region
+                  (tmux-control--term-screen-start) (tmux-control--term-end)))
+         (labels (mapcar #'cddr marked))
+         (text (string-join (tmux-control--visible-screen-lines (current-buffer)) "\n"))
+         (width (car (tmux-control--term-size)))
+         (links
+          (append
+           marked
+           (mapcar (lambda (url) (cons (car url) (cons (cdr url) nil)))
+                   (tmux-control--urls-in-text text width))
+           (mapcan (lambda (reference)
+                     (unless (member (cdr reference) labels)
+                       (list (cons (car reference) (cons (cdr reference) "file")))))
+                   (tmux-control--file-references-in-text text width))))
+         result)
     ;; `sort' is stable, so each row keeps the order found above.
     (dolist (link (sort links (lambda (a b) (> (car a) (car b)))))
       (let ((known (assoc (cadr link) result)))
@@ -4687,22 +4772,112 @@ show as LABEL, and the URLs shown as text, with a nil LABEL."
               ((not (cdr known)) (setcdr known (cddr link))))))
     (nreverse result)))
 
+(defun tmux-control--file-target (link)
+  "What LINK from the screen names, as (FILE LINE COLUMN), or nil if no file.
+LINK is a file reference or a `file:' URI, which may give a line after
+its path or as a fragment, such as #L12.  A URI's host is left out: the
+file is on the pane's host whatever the program says, so printing a URI
+can't reach another machine."
+  (let ((reference
+         (lambda (text)
+           (and (string-match (concat "\\`\\([^:]+\\):\\([0-9]\\{1,9\\}\\)"
+                                      "\\(?:-[0-9]\\{1,9\\}\\)?"
+                                      "\\(?::\\([0-9]\\{1,9\\}\\)\\)?\\'")
+                              text)
+                (tmux-control--file-name-like-p (match-string 1 text))
+                (list (match-string 1 text)
+                      (string-to-number (match-string 2 text))
+                      (and (match-string 3 text)
+                           (string-to-number (match-string 3 text))))))))
+    (if (not (string-match (concat "\\`file:\\(?://[^/?#]*\\)?\\(/[^?#]*\\)[^#]*"
+                                   "\\(?:#L?\\([0-9]\\{1,9\\}\\)"
+                                   "\\(?:[:C]\\([0-9]\\{1,9\\}\\)\\)?\\)?")
+                           link))
+        (funcall reference link)
+      (require 'url-util)
+      (let* ((line (match-string 2 link))
+             (column (match-string 3 link))
+             (path (decode-coding-string (url-unhex-string (match-string 1 link))
+                                         'utf-8)))
+        (if line
+            (list path (string-to-number line) (and column (string-to-number column)))
+          (or (funcall reference path) (list path nil nil)))))))
+
+(defun tmux-control--project-file (name directory)
+  "The one file in DIRECTORY's project that relative NAME ends, or nil.
+Programs shorten paths, so NAME may leave out leading directories.  Say
+so when NAME could be several files."
+  (when-let* ((project (project-current nil directory)))
+    (let* ((tail (concat "/" (string-remove-prefix "./" name)))
+           (matches (seq-filter (lambda (file) (string-suffix-p tail file))
+                                (project-files project))))
+      (when (cdr matches)
+        (user-error "%s could be any of %d files in %s"
+                    name (length matches) (project-root project)))
+      (car matches))))
+
+(defun tmux-control--reference-file (name)
+  "The file that NAME, read from a pane, means on the pane's host.
+Signal a `user-error' when there is none, or when NAME could reach
+another host.  Only the file chosen is looked for, so a remote screen
+of references costs no TRAMP call for each.  An absolute NAME takes the
+host's prefix, as `expand-file-name' would make it a local file."
+  (unless (tmux-control--safe-file-name-p name)
+    (user-error "Not opening %s: it isn't a plain file name"
+                (truncate-string-to-width name 80 nil nil t)))
+  (let* ((host (file-remote-p (tmux-control--directory-for-pane-path "/")))
+         (directory (unless (file-name-absolute-p name)
+                      (tmux-control--pane-aware-directory)))
+         (file (if directory
+                   (expand-file-name name directory)
+                 (concat host name))))
+    (unless (equal (file-remote-p file) host)
+      (user-error "Not opening %s: it isn't on the pane's host" file))
+    (cond ((or (file-regular-p file) (file-directory-p file)) file)
+          ((and directory (tmux-control--project-file name directory)))
+          (t (user-error "No file %s" file)))))
+
+(defun tmux-control--show-file (name line column)
+  "Show the file NAME from a pane at LINE and COLUMN in another window.
+The selected window stays selected, ready to open the next reference."
+  (let ((window (display-buffer
+                 (find-file-noselect (tmux-control--reference-file name)) t)))
+    (when (and window line)
+      (with-selected-window window
+        (widen)
+        (goto-char (point-min))
+        (forward-line (1- line))
+        (move-to-column (max 0 (1- (or column 1))))))))
+
+(defun tmux-control--open-link (link)
+  "Open LINK from the screen: a file in another window, else in the browser."
+  (if-let* ((target (tmux-control--file-target link)))
+      (apply #'tmux-control--show-file target)
+    (browse-url link))
+  (message "Opened %s" link))
+
 ;;;###autoload
 (defun tmux-control-open-link (&optional copy)
-  "Open a link on the live screen in the browser.
+  "Open a link or file reference on the live screen.
 A link is text a program marked as one (OSC 8), such as a pull request
-named by its number, or a URL shown as text.  With several, choose one,
-the lowest on the screen first, with the text a marked link shows beside
-it.  With prefix argument COPY, put it on the kill ring instead.  Bound
-to \\`C-c C-u'.  A URL that a TUI wrapped over rows is joined again."
+named by its number, or a URL shown as text, and opens in the browser.
+A file reference reads FILE:LINE or FILE:LINE:COLUMN, or is a marked
+`file:' link, and opens at that line in another window, on the pane's
+host, with this window still selected.  A relative name is under the
+pane's directory, or else is the one file in that directory's project
+it can mean.  With several, choose one, the lowest on the screen first,
+with the text a marked link shows, or \"file\", beside it.  With prefix
+argument COPY, put it on the kill ring instead.  Bound to \\`C-c C-u'.
+A URL or reference that a TUI wrapped over rows is joined again."
   (interactive "P")
   (unless (tmux-control--term-live-p)
     (user-error "No tmux-control terminal in this buffer"))
   (let* ((links (tmux-control--screen-links))
-         (url (cond ((null links) (user-error "No link on the screen"))
+         (url (cond ((null links)
+                     (user-error "No link or file reference on the screen"))
                     ((null (cdr links)) (caar links))
                     (t (completing-read
-                        (if copy "Copy link: " "Open link: ")
+                        (if copy "Copy: " "Open: ")
                         (lambda (string predicate action)
                           (if (eq action 'metadata)
                               `(metadata
@@ -4715,8 +4890,7 @@ to \\`C-c C-u'.  A URL that a TUI wrapped over rows is joined again."
                         nil t)))))
     (if copy
         (progn (kill-new url) (message "Copied %s" url))
-      (browse-url url)
-      (message "Opened %s" url))))
+      (tmux-control--open-link url))))
 
 (defun tmux-control--hyperlink-mouse-binding (command)
   "COMMAND while Eat sends the pane's program each mouse press, else nil.
@@ -4772,8 +4946,10 @@ other buttons, and clicks off links, still reach the program.")
                                         (current-buffer))))))
     (unless uri
       (user-error "No link here"))
-    (browse-url uri)
-    (message "Opened %s" uri)))
+    (if start
+        (with-selected-window (posn-window start)
+          (tmux-control--open-link uri))
+      (tmux-control--open-link uri))))
 
 (defun tmux-control--select-tiled-pane-window (pane)
   "In a tiled view, select the window that shows PANE in the selected frame.
@@ -5082,6 +5258,15 @@ directory."
                            "#{pane_current_path}"))))))
       (tmux-control--directory-for-pane-path path))))
 
+(defun tmux-control--pane-aware-directory ()
+  "The directory file commands start at in this buffer.
+It is the pane's, unless `tmux-control-pane-aware-find-file' says not, and
+`default-directory' already is when `tmux-control-pane-directory-mode' is on."
+  (or (and tmux-control-pane-aware-find-file
+           (not tmux-control-pane-directory-mode)
+           (tmux-control--pane-directory))
+      default-directory))
+
 (defun tmux-control--call-in-pane-directory (command arg)
   "Call interactive COMMAND with `default-directory' at the pane's directory.
 With ARG non-nil (a prefix argument), or when
@@ -5092,10 +5277,7 @@ own (local) directory instead -- like the plain command."
           ((and arg tmux-control-pane-directory-mode
                 tmux-control--pane-directory-saved)
            (cdr tmux-control--pane-directory-saved))
-          ((and (not arg) tmux-control-pane-aware-find-file)
-           (if tmux-control-pane-directory-mode
-               default-directory
-             (or (tmux-control--pane-directory) default-directory)))
+          ((not arg) (tmux-control--pane-aware-directory))
           (t default-directory))))
     (call-interactively command)))
 

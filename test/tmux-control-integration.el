@@ -1211,6 +1211,47 @@ initial+extend instead of initial)."
            (kill-buffer controller))
          (tmux-control-it--tmux-ok "kill-server")))))
 
+(ert-deftest tmux-control-it-open-link-opens-file-references ()
+  "What a program prints opens from the pane's directory, at its line.
+That is a reference shown as text and a marked `file:' link, whose own
+host is ignored, each with the terminal still selected."
+  (let* ((root (file-name-as-directory (file-truename (make-temp-file "tc-ert-refs" t))))
+         (file (expand-file-name "services/agent.py" root))
+         (shown (lambda (controller line)
+                  (save-window-excursion
+                    (delete-other-windows)
+                    (set-window-buffer nil controller)
+                    (split-window)
+                    (let ((terminal (selected-window)))
+                      (with-current-buffer controller (tmux-control-open-link))
+                      (should (eq (selected-window) terminal))
+                      (should (eq (window-buffer terminal) controller))
+                      (with-selected-window (next-window)
+                        (should (equal (buffer-file-name) file))
+                        (should (= (line-number-at-pos) line))))))))
+    (unwind-protect
+        (tmux-control-it--with-session
+          (make-directory (file-name-directory file))
+          (with-temp-file file
+            (dotimes (line 600) (insert (format "line %d\n" (1+ line)))))
+          (tmux-control-it--tmux
+           "send-keys" "-t" "t"
+           (format "cd %s; clear; printf '%%s:%%s\\n' services/agent.py 514" root) "Enter")
+          (should (tmux-control-it--pump-until
+                   5 (lambda () (member "services/agent.py:514"
+                                        (tmux-control-it--screen controller)))))
+          (funcall shown controller 514)
+          (tmux-control-it--tmux "send-keys" "-t" "t" "clear" "Enter")
+          (should (tmux-control-it--pump-until
+                   5 (lambda () (not (member "services/agent.py:514"
+                                             (tmux-control-it--screen controller))))))
+          (tmux-control-it--print-link (format "file://elsewhere%s#L7" file) "AGENT_LINK")
+          (should (tmux-control-it--pump-until
+                   5 (lambda () (tmux-control-it--link-on controller "AGENT_LINK"))))
+          (funcall shown controller 7))
+      (when-let* ((buffer (get-file-buffer file))) (kill-buffer buffer))
+      (delete-directory root t))))
+
 (defun tmux-control-it--window-buffer (controller index)
   "CONTROLLER's buffer for the tmux window at INDEX, once it has one."
   (let ((id (string-trim

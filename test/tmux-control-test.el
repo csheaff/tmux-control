@@ -9474,6 +9474,236 @@ saw); a `completing-read' answers with `choice'."
     (should-error (tmux-control-open-link) :type 'user-error)
     (should-not opened)))
 
+(ert-deftest tmux-control-test-file-references-on-the-screen ()
+  ;; The lowest row comes first, and within a row they run left to right.
+  (should (equal (tmux-control--file-references-in-text
+                  (concat "see services/agent.py:514 and\n"
+                          "  (file.c:12:5), report_draft.py:136-140.\n"
+                          "`test_a.py:278`: AssertionError\n"
+                          "Makefile:3: *** missing separator\n"
+                          "  --> ~/src/main.rs:7:9")
+                  80)
+                 '((4 . "~/src/main.rs:7:9") (3 . "Makefile:3") (2 . "test_a.py:278")
+                   (1 . "file.c:12:5") (1 . "report_draft.py:136-140")
+                   (0 . "services/agent.py:514"))))
+  (should-not (tmux-control--file-references-in-text "no references here\n" 80)))
+
+(ert-deftest tmux-control-test-file-reference-wrapped-over-rows ()
+  (should (equal (tmux-control--file-references-in-text
+                  "see services/agent.\n  py:514 for it" 19)
+                 '((0 . "services/agent.py:514")))))
+
+(ert-deftest tmux-control-test-file-reference-to-the-file-before ()
+  ;; (:LINE) is in the file named just before it, even a row above.
+  (should (equal (tmux-control--file-references-in-text
+                  "first a.py:1 then b.py:2\n  and (:251), (:7:2)" 80)
+                 '((1 . "b.py:251") (1 . "b.py:7:2") (0 . "a.py:1") (0 . "b.py:2"))))
+  (should-not (tmux-control--file-references-in-text "at (:251) alone" 80))
+  (should (equal (tmux-control--file-references-in-text "a.py:1 then (:251 open" 80)
+                 '((0 . "a.py:1")))))
+
+(ert-deftest tmux-control-test-what-is-not-a-file-reference ()
+  (dolist (text '("12:30" "12:30:45" "localhost:8080" "host:8080" "127.0.0.1:8080"
+                  "http://host:8080/x" "https://a.example/b.py:12"
+                  "https://a.example/?f=b.py:12" "v1.2:3" "1.2.3:4" "user@host:22"
+                  "a.py:12abc" "a.py:12.5" "a.py:1234567890" "a.py:1:2:3"
+                  "std::vector.py:12"))
+    (should-not (tmux-control--file-references-in-text (concat "at " text " now") 80))))
+
+(ert-deftest tmux-control-test-hostile-text-is-not-a-file-reference ()
+  (dolist (text (list "/ssh:evil:/etc/passwd:1" "/sudo::/etc/shadow:1"
+                      "/ssh:10:/etc/passwd:1" "/ssh:evil|sudo::/etc/shadow:1"
+                      (concat (make-string 2000 ?a) ".py:1")))
+    (should-not (tmux-control--file-references-in-text text 4000))))
+
+(ert-deftest tmux-control-test-file-target ()
+  (pcase-dolist (`(,link . ,target)
+                 '(("services/agent.py:514" "services/agent.py" 514 nil)
+                   ("file.c:12:5" "file.c" 12 5)
+                   ("report.py:136-140" "report.py" 136 nil)
+                   ("file:///tmp/a.py" "/tmp/a.py" nil nil)
+                   ("file:///tmp/a%20b.py#L12" "/tmp/a b.py" 12 nil)
+                   ("file://box.example/tmp/a.py#12:5" "/tmp/a.py" 12 5)
+                   ("file:///tmp/a.py:12:5" "/tmp/a.py" 12 5)
+                   ("file:/tmp/a.py" "/tmp/a.py" nil nil)
+                   ("https://a.example/b.py:12")
+                   ("vscode://file/a.py:12")
+                   ("mailto:a@b.example")
+                   ("tel:5551234")
+                   ("file:///tmp/caf%C3%A9.py#L2" "/tmp/café.py" 2 nil)
+                   ("file:///tmp/café.py" "/tmp/café.py" nil nil)))
+    (should (equal (tmux-control--file-target link) target))))
+
+(defmacro tmux-control-test--with-files (names &rest body)
+  "Run BODY at a new directory holding files NAMES, each of 600 numbered lines."
+  (declare (indent 1))
+  `(let* ((default-directory (file-name-as-directory
+                              (file-truename (make-temp-file "tmux-control" t))))
+          (root default-directory))
+     (unwind-protect
+         (progn
+           (dolist (name ,names)
+             (make-directory (or (file-name-directory (expand-file-name name)) ".") t)
+             (with-temp-file name
+               (dotimes (line 600) (insert (format "line %d\n" (1+ line))))))
+           ,@body)
+       (dolist (buffer (buffer-list))
+         (when (string-prefix-p root (or (buffer-file-name buffer) ""))
+           (kill-buffer buffer)))
+       (delete-directory root t))))
+
+(defmacro tmux-control-test--in-two-windows (&rest body)
+  "Run BODY with this buffer in the selected window and another beside it."
+  (declare (indent 0))
+  `(save-window-excursion
+     (delete-other-windows)
+     (set-window-buffer nil (current-buffer))
+     (split-window)
+     ,@body))
+
+(ert-deftest tmux-control-test-open-link-shows-a-file-at-its-line ()
+  (tmux-control-test--with-files '("services/agent.py")
+    (tmux-control-test--with-screen '("see services/agent.py:514:3 there")
+      (tmux-control-test--in-two-windows
+        (let ((terminal (selected-window)))
+          (tmux-control-open-link)
+          (should (eq (selected-window) terminal))
+          (should (eq (window-buffer terminal) (current-buffer)))
+          (should-not opened)
+          (with-selected-window (next-window)
+            (should (equal (buffer-file-name)
+                           (expand-file-name "services/agent.py" root)))
+            (should (= (line-number-at-pos) 514))
+            (should (= (current-column) 2))))))))
+
+(ert-deftest tmux-control-test-open-link-leaves-a-line-past-the-end-at-the-end ()
+  (tmux-control-test--with-files '("a.py")
+    (tmux-control-test--with-screen '("a.py:999999999:0")
+      (tmux-control-test--in-two-windows
+        (tmux-control-open-link)
+        (with-selected-window (next-window)
+          (should (eobp)))))))
+
+(ert-deftest tmux-control-test-open-link-offers-links-and-references-together ()
+  (tmux-control-test--with-files '("a.py")
+    (tmux-control-test--with-screen '("https://top.example" "a.py:3" "a.py:3")
+      (tmux-control-test--in-two-windows
+        (let (annotation)
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt collection &rest _)
+                       (setq asked (all-completions "" collection)
+                             annotation (alist-get 'annotation-function
+                                                   (cdr (funcall collection "" nil 'metadata))))
+                       "a.py:3")))
+            (tmux-control-open-link))
+          (should (equal asked '("a.py:3" "https://top.example")))
+          (should (equal (funcall annotation "a.py:3") "  file"))
+          (should-not opened)
+          (with-selected-window (next-window)
+            (should (= (line-number-at-pos) 3))))))))
+
+(ert-deftest tmux-control-test-open-link-copies-a-reference ()
+  (tmux-control-test--with-screen '("a.py:3")
+    (tmux-control-open-link t)
+    (should (equal copied '("a.py:3")))))
+
+(ert-deftest tmux-control-test-open-link-says-when-there-is-no-such-file ()
+  ;; A host with a dot in its name reads as a file until it is looked for.
+  (tmux-control-test--with-files '("a.py")
+    (tmux-control-test--with-screen '("at example.com:8080")
+      (should-error (tmux-control-open-link) :type 'user-error)
+      (should-not opened))))
+
+(ert-deftest tmux-control-test-open-link-refuses-what-is-not-a-regular-file ()
+  (tmux-control-test--with-screen '("see /dev/zero:1")
+    (should-error (tmux-control-open-link) :type 'user-error)))
+
+(ert-deftest tmux-control-test-reference-finds-the-one-file-in-the-project ()
+  ;; A name not under the pane's directory can leave out directories, but
+  ;; only one file may end with it.
+  (tmux-control-test--with-files '("lib/report_draft.py" "lib/same.py" "test/same.py" "pane/x")
+    (call-process "git" nil nil nil "init" "-q")
+    (let ((default-directory (expand-file-name "pane/" root)))
+      (should (equal (tmux-control--reference-file "report_draft.py")
+                     (expand-file-name "lib/report_draft.py" root)))
+      (should (equal (tmux-control--reference-file "./lib/report_draft.py")
+                     (expand-file-name "lib/report_draft.py" root)))
+      (should (string-match-p "could be any of 2 files"
+                              (cadr (should-error (tmux-control--reference-file "same.py")
+                                                  :type 'user-error))))
+      (should-error (tmux-control--reference-file "missing.py") :type 'user-error))))
+
+(defmacro tmux-control-test--on-remote-pane (&rest body)
+  "Run BODY in a buffer on a pane at /home/u/proj on the host box.
+Binds `found' to the files `find-file-noselect' was asked for, all of
+which exist."
+  (declare (indent 0))
+  `(with-temp-buffer
+     (let ((tmux-control-pane-aware-find-file t)
+           found)
+       (setq-local tmux-control--host "box"
+                   default-directory "/tmp/")
+       (cl-letf (((symbol-function 'tmux-control--remote-file-method)
+                  (lambda (_) "ssh"))
+                 ((symbol-function 'tmux-control--pane-directory)
+                  (lambda () "/ssh:box:/home/u/proj/"))
+                 ((symbol-function 'file-regular-p) (lambda (_) t))
+                 ((symbol-function 'display-buffer) #'ignore)
+                 ((symbol-function 'find-file-noselect)
+                  (lambda (file &rest _) (push file found) (current-buffer))))
+         ,@body))))
+
+(ert-deftest tmux-control-test-remote-pane-opens-files-on-its-host ()
+  (tmux-control-test--on-remote-pane
+    (dolist (link '("services/agent.py:514" "/etc/hosts:1" "~/notes.md:2"
+                    "file:///etc/hosts#L3" "file://evil.example/etc/hosts"))
+      (tmux-control--open-link link))
+    (should (equal (reverse found)
+                   '("/ssh:box:/home/u/proj/services/agent.py" "/ssh:box:/etc/hosts"
+                     "/ssh:box:~/notes.md" "/ssh:box:/etc/hosts" "/ssh:box:/etc/hosts")))))
+
+(ert-deftest tmux-control-test-remote-pane-opens-no-local-file ()
+  ;; Without the pane's directory there is only a local one, which would
+  ;; open a local file of the same name.
+  (tmux-control-test--on-remote-pane
+    (let ((tmux-control-pane-aware-find-file nil))
+      (should-error (tmux-control--open-link "services/agent.py:514") :type 'user-error))
+    (cl-letf (((symbol-function 'tmux-control--pane-directory) #'ignore))
+      (should-error (tmux-control--open-link "services/agent.py:514") :type 'user-error))
+    (should-not found)))
+
+(ert-deftest tmux-control-test-file-link-names-no-host-of-its-own ()
+  (dolist (link (list "file:///ssh:evil:/etc/passwd" "file:///sudo::/etc/shadow"
+                      "file:///ssh%3Aevil%3A/etc/passwd" "file:///etc/pass%00wd"
+                      (concat "file:///" (make-string 2000 ?a))))
+    (tmux-control-test--on-remote-pane
+      (should-error (tmux-control--open-link link) :type 'user-error)
+      (should-not found))
+    (with-temp-buffer
+      (let (found)
+        (cl-letf (((symbol-function 'find-file-noselect)
+                   (lambda (file &rest _) (push file found) (current-buffer))))
+          (should-error (tmux-control--open-link link) :type 'user-error)
+          (should-not found))))))
+
+(ert-deftest tmux-control-test-reference-that-the-marked-link-shows-is-that-link ()
+  (tmux-control-test--with-screen '("see a.py:3")
+    (insert "see "
+            (propertize "a.py:3" 'tmux-control-hyperlink "file:///r/a.py#L3"))
+    (should (equal (tmux-control--screen-links) '(("file:///r/a.py#L3" . "a.py:3"))))))
+
+(ert-deftest tmux-control-test-follow-hyperlink-opens-a-file-link-on-the-pane-host ()
+  (tmux-control-test--on-remote-pane
+    (let ((opened nil))
+      (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (push url opened))))
+        (insert (apply #'propertize "agent.py"
+                       (tmux-control--hyperlink-properties
+                        "file:///home/u/proj/agent.py#L5" tmux-control-hyperlink-map)))
+        (goto-char 2)
+        (tmux-control-follow-hyperlink)
+        (should (equal found '("/ssh:box:/home/u/proj/agent.py")))
+        (should-not opened)))))
+
 (ert-deftest tmux-control-test-hyperlink-runs ()
   ;; OSC 8 opens a link with a URI (after optional parameters such as an
   ;; id) and closes it with none, ended by BEL or by ST as `capture-pane'
