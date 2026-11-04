@@ -1661,10 +1661,12 @@ While any is unconfirmed, a %session-window-changed may be the echo of a
 switch since overtaken, so it moves nothing; the confirmation of the
 latest switch settles the view.")
 (defvar-local tmux-control--switch-before nil
-  "On the controller: (WINDOW-ID . HISTORY) before the latest early switch.
-The current window and `tmux-control--window-history' as they were
-before the latest switch shown early.  When tmux went elsewhere, it
-never left the window shown early, and the history goes back to this.")
+  "On the controller: (WINDOW-ID . HISTORY) as tmux has them, while switching.
+Taken from the current window and `tmux-control--window-history' when a
+switch is shown early with none unconfirmed, then moved along by each
+switch's reply, overtaken ones too, to the window tmux went to.  The
+latest switch's reply makes HISTORY the window history: the windows
+shown early on the way tmux may never have selected.")
 (defvar-local tmux-control--sessions nil
   "On the controller: the names of the sessions on its server, in tmux's order.
 Kept current over the control connection, so the session commands need
@@ -3511,15 +3513,22 @@ the controller."
            (seq-find (lambda (w) (equal (plist-get w :id) id))
                      tmux-control--windows))))
 
+(defun tmux-control--window-history-after (history from to)
+  "Return window HISTORY after the session went from FROM to TO.
+FROM and TO are window ids, FROM nil when unknown.  As tmux does: TO
+leaves the stack and FROM goes on top.  HISTORY itself is left as it
+was: `tmux-control--switch-before' may hold it."
+  (if (equal from to)
+      history
+    (let ((history (remove to history)))
+      (if from (cons from (remove from history)) history))))
+
 (defun tmux-control--remember-window-switch (from to)
   "Record in the window history that the session went from FROM to TO.
-FROM and TO are window ids, FROM nil when unknown.  As tmux does: TO
-leaves the stack and FROM goes on top.  Must run in the controller."
-  (unless (equal from to)
-    (setq tmux-control--window-history (delete to tmux-control--window-history))
-    (when from
-      (setq tmux-control--window-history
-            (cons from (delete from tmux-control--window-history))))))
+See `tmux-control--window-history-after'.  Must run in the controller."
+  (setq tmux-control--window-history
+        (tmux-control--window-history-after
+         tmux-control--window-history from to)))
 
 (defun tmux-control--note-current-window (id)
   "Make window ID current in the cached window list, ahead of tmux's reply.
@@ -3579,6 +3588,10 @@ alone, and tmux's echo switches the view."
         (tmux-control--send-command command)
       (with-current-buffer ctrl
         (let ((generation (cl-incf tmux-control--switch-generation)))
+          (when (zerop tmux-control--switch-pending)
+            (setq tmux-control--switch-before
+                  (cons (tmux-control--current-window-id)
+                        tmux-control--window-history)))
           (cl-incf tmux-control--switch-pending)
           (tmux-control--with-one-write
             (tmux-control--send-command command)
@@ -3587,27 +3600,37 @@ alone, and tmux's echo switches the view."
                      (tmux-control--window-target tmux-control--session))
              (lambda (lines)
                (tmux-control--switch-confirmed generation (car lines)))))
-          (setq tmux-control--switch-before
-                (cons (tmux-control--current-window-id)
-                      tmux-control--window-history))
           (tmux-control--note-current-window id)))
       (tmux-control--display-window-buffer id))))
 
 (defun tmux-control--switch-confirmed (generation id)
   "Settle the view on window ID, tmux's current one after switch GENERATION.
 The reply to the query `tmux-control--switch-window-to' sends with each
-switch it shows early.  Only the latest switch's reply moves anything:
+switch it shows early.  Only the latest switch's reply moves the view:
 an earlier one describes tmux before a switch the view already shows.
-ID is nil when the query failed.  Runs in the controller."
+Every reply says where tmux went, though, and the history behind
+`last-window' follows that, not the windows shown early: tmux never
+selected one it went past.  Taken for a window left, it came back at
+every `last-window', and a window tmux did select was missing.  ID is
+nil when the query failed.  Runs in the controller."
   (setq tmux-control--switch-pending (max 0 (1- tmux-control--switch-pending)))
-  (when (and (= generation tmux-control--switch-generation)
-             (not tmux-control--tiled)
-             (stringp id)
-             (string-match-p "\\`@[0-9]+\\'" id))
+  (unless (and (stringp id) (string-match-p "\\`@[0-9]+\\'" id))
+    (setq id nil))
+  ;; With a reply missing, where tmux went is unknown: the history keeps
+  ;; the windows shown early.
+  (when-let* ((before tmux-control--switch-before))
+    (setq tmux-control--switch-before
+          (and id (cons id (tmux-control--window-history-after
+                            (cdr before) (car before) id)))))
+  (when (and id
+             (= generation tmux-control--switch-generation)
+             (not tmux-control--tiled))
     ;; The cached list may be out of date: another client switched, or a
     ;; window came or went that the list hadn't caught up with.
     (unless (equal id (tmux-control--current-window-id))
       (tmux-control--switch-corrected id))
+    (when tmux-control--switch-before
+      (setq tmux-control--window-history (cdr tmux-control--switch-before)))
     ;; And the view may be off even when the list agrees with tmux: when
     ;; the window shown early closed before tmux ran the switch, a window
     ;; list that came meanwhile moved the highlight but not the view.  A
@@ -3616,26 +3639,19 @@ ID is nil when the query failed.  Runs in the controller."
 
 (defun tmux-control--switch-corrected (id)
   "Make window ID current: tmux went there, not where the view went early.
-Runs in the controller.  tmux never selected the window shown early, so
-the history behind `last-window' goes back to how it was before that
-switch, and records the switch tmux made instead.  Taken for a window
-left, the window shown early came back at every `last-window'.  A
-window the cached list doesn't have yet -- one just made -- leaves no
-window marked current until the list comes, for the same reason: the
-list would count the window shown early as left."
-  (let ((before tmux-control--switch-before))
-    (tmux-control--note-current-window id)
-    (unless (equal (tmux-control--current-window-id) id)
-      (setq tmux-control--windows
-            (mapcar (lambda (w)
-                      (if (plist-get w :active)
-                          (plist-put (copy-sequence w) :active nil)
-                        w))
-                    tmux-control--windows))
-      (force-mode-line-update t))
-    (when before
-      (setq tmux-control--window-history (cdr before))
-      (tmux-control--remember-window-switch (car before) id))))
+Runs in the controller.  A window the cached list doesn't have yet --
+one just made -- leaves no window marked current until the list comes:
+the list would count the window shown early as one tmux left, for
+`last-window' (see `tmux-control--switch-confirmed')."
+  (tmux-control--note-current-window id)
+  (unless (equal (tmux-control--current-window-id) id)
+    (setq tmux-control--windows
+          (mapcar (lambda (w)
+                    (if (plist-get w :active)
+                        (plist-put (copy-sequence w) :active nil)
+                      w))
+                  tmux-control--windows))
+    (force-mode-line-update t)))
 
 (defun tmux-control--switch-window (verb)
   "Switch the live view to another window via tmux command VERB.
