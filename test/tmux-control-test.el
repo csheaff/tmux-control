@@ -4763,6 +4763,250 @@ killed with it."
         (set-window-buffer win orig)
         (kill-buffer buf-b)))))
 
+(ert-deftest tmux-control-test-switch-shows-now-and-settles-on-the-latest-reply ()
+  ;; A switch whose target the window list knows shows it at once, tab
+  ;; highlight included, and asks tmux in the same write which window is
+  ;; current.  tmux's echoes of switches since overtaken move nothing; only
+  ;; the latest switch's reply may correct the view.  Over an 80 ms round
+  ;; trip, moving down the window picker used to step the view back
+  ;; through each window passed as the echoes came, and `C-c C-n' showed
+  ;; the new window a round trip late with the old tab still highlighted.
+  (with-temp-buffer
+    (let* ((tmux-control-window-buffers t)
+           (ctrl (current-buffer))
+           (buf-b (generate-new-buffer " *tc-switch-b*"))
+           (buf-c (generate-new-buffer " *tc-switch-c*"))
+           (win (selected-window))
+           (orig (window-buffer win))
+           (sent nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'tmux-control--ensure-live) #'ignore)
+                    ((symbol-function 'tmux-control--refresh-windows) #'ignore)
+                    ((symbol-function 'tmux-control--send-command)
+                     (lambda (cmd &optional kind) (push (cons cmd kind) sent))))
+            (setq-local tmux-control--session "s"
+                        tmux-control--session-id "$0"
+                        tmux-control--window-id "@1"
+                        tmux-control--current-window "0"
+                        tmux-control--windows
+                        (list (list :index "0" :name "a" :active t :id "@1")
+                              (list :index "1" :name "b" :id "@2")
+                              (list :index "2" :name "c" :id "@3")))
+            (tmux-control--register-window-buffer "@1" ctrl)
+            (dolist (pair `(("@2" . ,buf-b) ("@3" . ,buf-c)))
+              (with-current-buffer (cdr pair)
+                (setq-local tmux-control--window-id (car pair)
+                            tmux-control--controller ctrl))
+              (tmux-control--register-window-buffer (car pair) (cdr pair)))
+            (set-window-buffer win ctrl)
+            (tmux-control-next-window)
+            (should (eq (window-buffer win) buf-b))
+            (should (equal tmux-control--current-window "1"))
+            (tmux-control-next-window)
+            (should (eq (window-buffer win) buf-c))
+            (should (equal (tmux-control--current-window-id) "@3"))
+            (should (= tmux-control--switch-pending 2))
+            ;; Each switch goes with its question, in order.
+            (should (equal (seq-filter
+                            (lambda (c) (string-match-p "\\`\\(?:next-window\\|display-message\\)" c))
+                            (mapcar #'car (reverse sent)))
+                           '("next-window -t \"s\""
+                             "display-message -p -t \"s\": '#{window_id}'"
+                             "next-window -t \"s\""
+                             "display-message -p -t \"s\": '#{window_id}'")))
+            (let ((replies (mapcar #'cdr (seq-filter (lambda (e) (functionp (cdr e)))
+                                                     (reverse sent)))))
+              ;; tmux echoes the first switch: nothing moves.
+              (tmux-control--handle-line "%session-window-changed $0 @2")
+              (should (eq (window-buffer win) buf-c))
+              (should (equal (tmux-control--current-window-id) "@3"))
+              ;; The first switch's reply is overtaken: nothing moves.
+              (funcall (nth 0 replies) '("@2"))
+              (should (eq (window-buffer win) buf-c))
+              ;; The latest one corrects a list that was out of date.
+              (funcall (nth 1 replies) '("@1"))
+              (should (= tmux-control--switch-pending 0))
+              (should (eq (window-buffer win) ctrl))
+              (should (equal tmux-control--current-window "0"))
+              ;; Confirmed, an echo is followed again.
+              (tmux-control--handle-line "%session-window-changed $0 @3")
+              (should (eq (window-buffer win) buf-c))
+              (should (equal (tmux-control--current-window-id) "@3"))))
+        (set-window-buffer win orig)
+        (kill-buffer buf-b)
+        (kill-buffer buf-c)))))
+
+(ert-deftest tmux-control-test-switch-reply-settles-a-view-the-list-agrees-with ()
+  ;; The latest switch's reply settles the view even when the window list
+  ;; already agrees with tmux.  A window shown early that closes before
+  ;; tmux runs the switch takes its buffer with it, and the view falls
+  ;; back to the controller's window; a window list that comes meanwhile
+  ;; moves the highlight to tmux's current window but not the view, and
+  ;; no echo follows a switch tmux couldn't make.  The reply then matched
+  ;; the list and moved nothing, so the view stayed on the wrong window.
+  (with-temp-buffer
+    (let* ((tmux-control-window-buffers t)
+           (ctrl (current-buffer))
+           (buf-a (generate-new-buffer " *tc-settle-a*"))
+           (buf-b (generate-new-buffer " *tc-settle-b*"))
+           (win (selected-window))
+           (orig (window-buffer win))
+           (sent nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'tmux-control--ensure-live) #'ignore)
+                    ((symbol-function 'tmux-control--refresh-windows) #'ignore)
+                    ((symbol-function 'tmux-control--refresh-pane-window-map)
+                     #'ignore)
+                    ((symbol-function 'tmux-control--send-command)
+                     (lambda (cmd &optional kind) (push (cons cmd kind) sent))))
+            (setq-local tmux-control--session "s"
+                        tmux-control--session-id "$0"
+                        tmux-control--window-id "@3"
+                        tmux-control--current-window "0"
+                        tmux-control--windows
+                        (list (list :index "0" :name "a" :active t :id "@1")
+                              (list :index "1" :name "b" :id "@2")
+                              (list :index "2" :name "c" :id "@3")))
+            (tmux-control--register-window-buffer "@3" ctrl)
+            (dolist (pair `(("@1" . ,buf-a) ("@2" . ,buf-b)))
+              (with-current-buffer (cdr pair)
+                (setq-local tmux-control--window-id (car pair)
+                            tmux-control--controller ctrl))
+              (tmux-control--register-window-buffer (car pair) (cdr pair)))
+            (set-window-buffer win buf-a)
+            (tmux-control-next-window)
+            (should (eq (window-buffer win) buf-b))
+            ;; @2 closes before tmux runs the switch, and a window list
+            ;; comes: tmux is still on @1.
+            (tmux-control--handle-line "%unlinked-window-close @2")
+            (should (eq (window-buffer win) ctrl))
+            (tmux-control--update-windows
+             '("0\ta\t1\t0\t@1" "2\tc\t0\t0\t@3"))
+            (should (equal (tmux-control--current-window-id) "@1"))
+            ;; The switch's reply says @1, and the view goes there too.
+            (funcall (cdr (seq-find (lambda (e) (functionp (cdr e))) sent))
+                     '("@1"))
+            (should (= tmux-control--switch-pending 0))
+            (should (eq (window-buffer win) buf-a)))
+        (set-window-buffer win orig)
+        (when (buffer-live-p buf-a) (kill-buffer buf-a))
+        (when (buffer-live-p buf-b) (kill-buffer buf-b))))))
+
+(ert-deftest tmux-control-test-corrected-switch-keeps-the-history-tmux-has ()
+  ;; When tmux goes somewhere other than the window shown early, it never
+  ;; left that window.  Counted as left, it topped the history behind
+  ;; `last-window', which then showed it early at every press while tmux
+  ;; went back and forth between the two windows it really visited.
+  (dolist (known '(t nil))
+    (with-temp-buffer
+      (let ((tmux-control-window-buffers t)
+            (sent nil))
+        (cl-letf (((symbol-function 'tmux-control--ensure-live) #'ignore)
+                  ((symbol-function 'tmux-control--refresh-windows) #'ignore)
+                  ((symbol-function 'tmux-control--display-window-buffer)
+                   #'ignore)
+                  ((symbol-function 'tmux-control--send-command)
+                   (lambda (cmd &optional kind) (push (cons cmd kind) sent))))
+          (setq-local tmux-control--session "s"
+                      tmux-control--session-id "$0"
+                      tmux-control--window-id "@1"
+                      tmux-control--current-window "0"
+                      tmux-control--windows
+                      (append
+                       (list (list :index "0" :name "a" :active t :id "@1"))
+                       ;; KNOWN: the list has the window tmux goes to.
+                       ;; Otherwise it was just made, and the list has
+                       ;; yet to catch up.
+                       (and known (list (list :index "1" :name "b" :id "@2")))
+                       (list (list :index "2" :name "c" :id "@3"))))
+          ;; Shown early: @3.  tmux went to @2.
+          (if known
+              (tmux-control-select-window "2")
+            (tmux-control-next-window))
+          (should (equal (tmux-control--current-window-id) "@3"))
+          (funcall (cdr (seq-find (lambda (e) (functionp (cdr e))) sent))
+                   '("@2"))
+          (should (equal tmux-control--window-history '("@1")))
+          (if known
+              (should (equal (tmux-control--current-window-id) "@2"))
+            ;; Not marked current until the list has it, nor @3 either.
+            (should-not (tmux-control--current-window-id)))
+          (tmux-control--update-windows
+           '("0\ta\t0\t0\t@1" "1\tb\t1\t0\t@2" "2\tc\t0\t0\t@3"))
+          (should (equal tmux-control--window-history '("@1")))
+          (should (equal (tmux-control--predict-window "last-window")
+                         "@1")))))))
+
+(ert-deftest tmux-control-test-corrected-switch-keeps-the-whole-history ()
+  ;; The history as it was before a switch shown early, kept to go back
+  ;; to, shared its list with the history the switch then changed in
+  ;; place.  Corrected, the history lost a window tmux could still go
+  ;; back to: here @3, leaving (@1 @2).
+  (with-temp-buffer
+    (let ((tmux-control-window-buffers t)
+          (sent nil))
+      (cl-letf (((symbol-function 'tmux-control--ensure-live) #'ignore)
+                ((symbol-function 'tmux-control--refresh-windows) #'ignore)
+                ((symbol-function 'tmux-control--display-window-buffer)
+                 #'ignore)
+                ((symbol-function 'tmux-control--send-command)
+                 (lambda (cmd &optional kind) (push (cons cmd kind) sent))))
+        (setq-local tmux-control--session "s"
+                    tmux-control--session-id "$0"
+                    tmux-control--window-id "@1"
+                    tmux-control--current-window "0"
+                    tmux-control--window-history (list "@2" "@3" "@4")
+                    tmux-control--windows
+                    (list (list :index "0" :name "a" :active t :id "@1")
+                          (list :index "1" :name "b" :id "@2")
+                          (list :index "2" :name "c" :id "@3")
+                          (list :index "3" :name "d" :id "@4")))
+        ;; Shown early: @3.  tmux went to @4.
+        (tmux-control-select-window "2")
+        (should (equal (tmux-control--current-window-id) "@3"))
+        (funcall (cdr (seq-find (lambda (e) (functionp (cdr e))) sent))
+                 '("@4"))
+        (should (equal (tmux-control--current-window-id) "@4"))
+        (should (equal tmux-control--window-history '("@1" "@2" "@3")))))))
+
+(ert-deftest tmux-control-test-overtaken-switch-reply-keeps-tmuxs-history ()
+  ;; A reply overtaken by a later switch still says where tmux went.
+  ;; Switching fast with a list that missed a window just made, the view
+  ;; went to @2 then @3 while tmux went to the new @9 then @3.  Only the
+  ;; latest reply was read, and it agreed with the view, so the history
+  ;; kept @2, which tmux never selected, in place of @9, which it did:
+  ;; `last-window' showed @2 early and tmux went to @9.
+  (with-temp-buffer
+    (let ((tmux-control-window-buffers t)
+          (sent nil))
+      (cl-letf (((symbol-function 'tmux-control--ensure-live) #'ignore)
+                ((symbol-function 'tmux-control--refresh-windows) #'ignore)
+                ((symbol-function 'tmux-control--display-window-buffer)
+                 #'ignore)
+                ((symbol-function 'tmux-control--send-command)
+                 (lambda (cmd &optional kind) (push (cons cmd kind) sent))))
+        (setq-local tmux-control--session "s"
+                    tmux-control--session-id "$0"
+                    tmux-control--window-id "@1"
+                    tmux-control--current-window "0"
+                    tmux-control--windows
+                    (list (list :index "0" :name "a" :active t :id "@1")
+                          (list :index "2" :name "b" :id "@2")
+                          (list :index "3" :name "c" :id "@3")))
+        (tmux-control-next-window)
+        (tmux-control-select-window "3")
+        (should (equal (tmux-control--current-window-id) "@3"))
+        (let ((replies (mapcar #'cdr (seq-filter (lambda (e) (functionp (cdr e)))
+                                                 (reverse sent)))))
+          (funcall (nth 0 replies) '("@9"))
+          (should (equal (tmux-control--current-window-id) "@3"))
+          (funcall (nth 1 replies) '("@3")))
+        (should (equal (tmux-control--current-window-id) "@3"))
+        (should (equal tmux-control--window-history '("@9" "@1")))
+        (tmux-control--update-windows
+         '("0\ta\t0\t0\t@1" "1\tx\t0\t0\t@9" "2\tb\t0\t0\t@2" "3\tc\t1\t0\t@3"))
+        (should (equal (tmux-control--predict-window "last-window") "@9"))))))
+
 (ert-deftest tmux-control-test-another-sessions-switch-is-not-followed ()
   ;; tmux tells every control client of every session's window switches.
   ;; Followed, a switch in another session on the same server put that
@@ -4784,6 +5028,52 @@ killed with it."
         (tmux-control--handle-line "%session-window-changed $4 @3")
         (should (equal swapped "@3"))
         (should (= refreshed 1))))))
+
+(ert-deftest tmux-control-test-window-list-keeps-a-newer-switch ()
+  ;; A window list asked for before a switch the client has shown says the
+  ;; window it left is current; that must not move the highlight back.
+  (with-temp-buffer
+    (let ((tmux-control-window-buffers nil))
+      (setq-local tmux-control--windows
+                  (list (list :index "0" :name "a" :active t :id "@1")
+                        (list :index "1" :name "b" :id "@2")))
+      (setq-local tmux-control--switch-generation 1)
+      (tmux-control--note-current-window "@2")
+      (should (equal tmux-control--window-history '("@1")))
+      (tmux-control--update-windows '("0\ta\t1\t0\t@1" "1\tb\t0\t0\t@2") 0)
+      (should (equal (tmux-control--current-window-id) "@2"))
+      (should (equal tmux-control--current-window "1"))
+      ;; One asked for since is tmux's word, and the switch it shows is
+      ;; remembered for `last-window'.
+      (tmux-control--update-windows '("0\ta\t1\t0\t@1" "1\tb\t0\t0\t@2") 1)
+      (should (equal (tmux-control--current-window-id) "@1"))
+      (should (equal tmux-control--current-window "0"))
+      (should (equal tmux-control--window-history '("@2")))
+      ;; A closed window leaves the history.
+      (tmux-control--update-windows '("0\ta\t1\t0\t@1") 1)
+      (should-not tmux-control--window-history))))
+
+(ert-deftest tmux-control-test-predict-window-follows-tmux ()
+  ;; next/previous step through the windows in index order and wrap, as
+  ;; tmux does; last is the latest window left that still exists.
+  (with-temp-buffer
+    (setq-local tmux-control--windows
+                (list (list :index "0" :id "@1")
+                      (list :index "3" :active t :id "@4")
+                      (list :index "7" :id "@9")))
+    (should (equal (tmux-control--predict-window "next-window") "@9"))
+    (should (equal (tmux-control--predict-window "previous-window") "@1"))
+    (setq-local tmux-control--windows
+                (list (list :index "0" :id "@1")
+                      (list :index "3" :id "@4")
+                      (list :index "7" :active t :id "@9")))
+    (should (equal (tmux-control--predict-window "next-window") "@1"))
+    (setq-local tmux-control--window-history '("@5" "@4" "@1"))
+    (should (equal (tmux-control--predict-window "last-window") "@4"))
+    (setq-local tmux-control--window-history nil)
+    (should-not (tmux-control--predict-window "last-window"))
+    (setq-local tmux-control--windows nil)
+    (should-not (tmux-control--predict-window "next-window"))))
 
 (ert-deftest tmux-control-test-window-choices-come-from-the-window-list ()
   ;; The window picker completes over the list the connection keeps.

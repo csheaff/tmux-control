@@ -923,9 +923,8 @@ on-screen buffer.  It tracks swaps, not the frame: a render buffer
 displayed by hand leaves it stale until the next swap.  The swap itself
 \(`tmux-control--display-window-buffer') therefore keys off the windows
 really showing the session's buffers -- never off this pointer, nor off
-`tmux-control--current-window', whose index updates via a separate,
-slower :windows reply and lags rapid switches (the window preview menu,
-two fast `C-c C-n').")
+`tmux-control--current-window', which can lag the view: a switch it
+can't foresee is known only once tmux reports it.")
 
 ;; Multi-pane tiling (experimental).  In tiling mode the controller buffer
 ;; (the process buffer) stops rendering and instead fans the session's
@@ -988,6 +987,24 @@ active window back before the re-tile lands.  Cleared when the build finishes.")
 A pane buffer's `kill-buffer-hook' re-tiles to recover a pane killed out
 from under the tiling, but must not fire during teardown/reconciliation
 kills, which are deliberate.")
+
+(defvar tmux-control--command-batch nil
+  "While `tmux-control--with-one-write' runs, (PROCESS . LINES) to write.")
+
+(defmacro tmux-control--with-one-write (&rest body)
+  "Run BODY, writing the commands it sends this buffer's tmux in one go.
+tmux runs the commands it reads together before it reads any pane's
+output again, so their replies describe one moment: a pane printing
+meanwhile cannot move a row between one capture and the next.  Each
+stays a line of its own, so one that fails does not take the others
+with it."
+  (declare (indent 0) (debug t))
+  `(let ((tmux-control--command-batch (list tmux-control--process)))
+     (unwind-protect (progn ,@body)
+       (let ((process (car tmux-control--command-batch))
+             (lines (cdr tmux-control--command-batch)))
+         (when (and lines (process-live-p process))
+           (process-send-string process (apply #'concat (nreverse lines))))))))
 
 ;;;; Terminal interface
 
@@ -1627,6 +1644,29 @@ window list leave one out after all, its buffer goes then
 tmux reports every session's window switches to every control client,
 so a %session-window-changed is this session's only when it names this
 id.")
+(defvar-local tmux-control--window-history nil
+  "On the controller: the session's window ids, the latest current first.
+The stack tmux's `last-window' takes from: each switch pushes the window
+it leaves.  Lets the client show the window `last-window' goes to before
+tmux replies.")
+(defvar-local tmux-control--switch-generation 0
+  "On the controller: how many window switches this client has shown early.
+A switch whose target the client knows shows the window at once and
+counts one here.  A reply to a question asked before the latest such
+switch describes tmux from before it, so it must not move the view or
+the tab highlight back.")
+(defvar-local tmux-control--switch-pending 0
+  "On the controller: early-shown switches tmux has not yet confirmed.
+While any is unconfirmed, a %session-window-changed may be the echo of a
+switch since overtaken, so it moves nothing; the confirmation of the
+latest switch settles the view.")
+(defvar-local tmux-control--switch-before nil
+  "On the controller: (WINDOW-ID . HISTORY) as tmux has them, while switching.
+Taken from the current window and `tmux-control--window-history' when a
+switch is shown early with none unconfirmed, then moved along by each
+switch's reply, overtaken ones too, to the window tmux went to.  The
+latest switch's reply makes HISTORY the window history: the windows
+shown early on the way tmux may never have selected.")
 (defvar-local tmux-control--sessions nil
   "On the controller: the names of the sessions on its server, in tmux's order.
 Kept current over the control connection, so the session commands need
@@ -3436,29 +3476,31 @@ to the new window's panes, so only the single-pane view reseeds here."
     (when ctrl
       (with-current-buffer ctrl
         (setq tmux-control--suppress-focus-follow t)))
-    (tmux-control--send-command
-     (format "select-window -t %s"
-             (tmux-control--window-target tmux-control--session index)))
-    (unless ctrl
-      (if tmux-control-window-buffers
-          (progn
-            (tmux-control--quiet-activity)
-            ;; The target is KNOWN here (menu pick, tab click, chooser), so
-            ;; swap the display NOW -- zero round trips -- instead of
-            ;; waiting for tmux to echo %session-window-changed.  The echo
-            ;; still arrives and re-runs the swap idempotently, and remains
-            ;; the only driver for switches we did not initiate.  Falls
-            ;; through quietly when the window list has not delivered an id
-            ;; for INDEX yet; the echo then does the swap as before.
-            (when-let* ((idx (if (integerp index)
-                                 (number-to-string index)
-                               index))
-                        (id (and (stringp idx)
-                                 (with-current-buffer
-                                     (tmux-control--wb-controller)
-                                   (tmux-control--window-id-for-index idx)))))
-              (tmux-control--display-window-buffer id)))
-        (tmux-control--refresh-active-pane t)))))
+    (let ((command (format "select-window -t %s"
+                           (tmux-control--window-target tmux-control--session
+                                                        index))))
+      (cond
+       ((or ctrl (not tmux-control-window-buffers))
+        (tmux-control--send-command command)
+        (unless ctrl
+          (tmux-control--refresh-active-pane t)))
+       (t
+        (tmux-control--quiet-activity)
+        ;; The target is KNOWN here (menu pick, tab click, chooser): show
+        ;; it now, zero round trips.  Without an id for INDEX yet, tmux's
+        ;; echo does the swap.
+        (tmux-control--switch-window-to
+         (let ((idx (if (integerp index) (number-to-string index) index)))
+           (and (stringp idx)
+                (with-current-buffer (tmux-control--wb-controller)
+                  (tmux-control--window-id-for-index idx))))
+         command))))))
+
+(defun tmux-control--current-window-id ()
+  "Return the id of the window the cached list marks current, or nil.
+Must run in the controller."
+  (plist-get (seq-find (lambda (w) (plist-get w :active)) tmux-control--windows)
+             :id))
 
 (defun tmux-control--session-window-p (id)
   "Whether window ID may be one of the session's windows.
@@ -3470,6 +3512,146 @@ the controller."
            (member id tmux-control--added-windows)
            (seq-find (lambda (w) (equal (plist-get w :id) id))
                      tmux-control--windows))))
+
+(defun tmux-control--window-history-after (history from to)
+  "Return window HISTORY after the session went from FROM to TO.
+FROM and TO are window ids, FROM nil when unknown.  As tmux does: TO
+leaves the stack and FROM goes on top.  HISTORY itself is left as it
+was: `tmux-control--switch-before' may hold it."
+  (if (equal from to)
+      history
+    (let ((history (remove to history)))
+      (if from (cons from (remove from history)) history))))
+
+(defun tmux-control--remember-window-switch (from to)
+  "Record in the window history that the session went from FROM to TO.
+See `tmux-control--window-history-after'.  Must run in the controller."
+  (setq tmux-control--window-history
+        (tmux-control--window-history-after
+         tmux-control--window-history from to)))
+
+(defun tmux-control--note-current-window (id)
+  "Make window ID current in the cached window list, ahead of tmux's reply.
+Must run in the controller.  Moves the tab highlight, clears the
+window's unseen-output flag and records the switch for `last-window'.
+Does nothing when ID is not in the list."
+  (let ((from (tmux-control--current-window-id))
+        (window (seq-find (lambda (w) (equal (plist-get w :id) id))
+                          tmux-control--windows)))
+    (when (and window (not (equal from id)))
+      (setq tmux-control--windows
+            (mapcar (lambda (w)
+                      (let ((active (eq w window)))
+                        (if (eq active (and (plist-get w :active) t))
+                            w
+                          (plist-put (copy-sequence w) :active active))))
+                    tmux-control--windows))
+      (tmux-control--remember-window-switch from id)
+      (setq tmux-control--current-window (plist-get window :index))
+      (when (hash-table-p tmux-control--activity)
+        (remhash tmux-control--current-window tmux-control--activity))
+      ;; All buffers: the tab bar on screen may be a window buffer's.
+      (force-mode-line-update t))))
+
+(defun tmux-control--predict-window (verb)
+  "Return the id of the window tmux's VERB would make current, or nil.
+VERB is \"next-window\", \"previous-window\" or \"last-window\".  The
+answer comes from the cached window list and history, and is nil when
+they don't know.  Must run in the controller."
+  (let* ((windows tmux-control--windows)
+         (pos (cl-position-if (lambda (w) (plist-get w :active)) windows))
+         (n (length windows)))
+    (when pos
+      (pcase verb
+        ;; tmux orders a session's windows by index and wraps around.
+        ("next-window" (plist-get (nth (mod (1+ pos) n) windows) :id))
+        ("previous-window" (plist-get (nth (mod (1- pos) n) windows) :id))
+        ;; The most recent window left that still exists.
+        ("last-window"
+         (seq-find (lambda (id)
+                     (seq-find (lambda (w) (equal (plist-get w :id) id)) windows))
+                   tmux-control--window-history))))))
+
+(defun tmux-control--switch-window-to (id command)
+  "Send tmux COMMAND, which makes window ID current, and show ID now.
+Runs in any buffer of a session with per-window buffers and no tiled
+view.  The view and the tab highlight move at once, not a round trip
+later when tmux echoes the switch.  A query in the same write asks tmux
+which window is current after COMMAND, and its reply corrects the view
+if the cached window list was out of date (see
+`tmux-control--switch-confirmed').  Until the latest switch's reply, an
+echo moves nothing: switching fast, it may be of a window since passed,
+and the view stepped back through each one.  With ID nil, send COMMAND
+alone, and tmux's echo switches the view."
+  (let ((ctrl (tmux-control--wb-controller)))
+    (if (null id)
+        (tmux-control--send-command command)
+      (with-current-buffer ctrl
+        (let ((generation (cl-incf tmux-control--switch-generation)))
+          (when (zerop tmux-control--switch-pending)
+            (setq tmux-control--switch-before
+                  (cons (tmux-control--current-window-id)
+                        tmux-control--window-history)))
+          (cl-incf tmux-control--switch-pending)
+          (tmux-control--with-one-write
+            (tmux-control--send-command command)
+            (tmux-control--query
+             (format "display-message -p -t %s '#{window_id}'"
+                     (tmux-control--window-target tmux-control--session))
+             (lambda (lines)
+               (tmux-control--switch-confirmed generation (car lines)))))
+          (tmux-control--note-current-window id)))
+      (tmux-control--display-window-buffer id))))
+
+(defun tmux-control--switch-confirmed (generation id)
+  "Settle the view on window ID, tmux's current one after switch GENERATION.
+The reply to the query `tmux-control--switch-window-to' sends with each
+switch it shows early.  Only the latest switch's reply moves the view:
+an earlier one describes tmux before a switch the view already shows.
+Every reply says where tmux went, though, and the history behind
+`last-window' follows that, not the windows shown early: tmux never
+selected one it went past.  Taken for a window left, it came back at
+every `last-window', and a window tmux did select was missing.  ID is
+nil when the query failed.  Runs in the controller."
+  (setq tmux-control--switch-pending (max 0 (1- tmux-control--switch-pending)))
+  (unless (and (stringp id) (string-match-p "\\`@[0-9]+\\'" id))
+    (setq id nil))
+  ;; With a reply missing, where tmux went is unknown: the history keeps
+  ;; the windows shown early.
+  (when-let* ((before tmux-control--switch-before))
+    (setq tmux-control--switch-before
+          (and id (cons id (tmux-control--window-history-after
+                            (cdr before) (car before) id)))))
+  (when (and id
+             (= generation tmux-control--switch-generation)
+             (not tmux-control--tiled))
+    ;; The cached list may be out of date: another client switched, or a
+    ;; window came or went that the list hadn't caught up with.
+    (unless (equal id (tmux-control--current-window-id))
+      (tmux-control--switch-corrected id))
+    (when tmux-control--switch-before
+      (setq tmux-control--window-history (cdr tmux-control--switch-before)))
+    ;; And the view may be off even when the list agrees with tmux: when
+    ;; the window shown early closed before tmux ran the switch, a window
+    ;; list that came meanwhile moved the highlight but not the view.  A
+    ;; no-op when the view is already right.
+    (tmux-control--display-window-buffer id)))
+
+(defun tmux-control--switch-corrected (id)
+  "Make window ID current: tmux went there, not where the view went early.
+Runs in the controller.  A window the cached list doesn't have yet --
+one just made -- leaves no window marked current until the list comes:
+the list would count the window shown early as one tmux left, for
+`last-window' (see `tmux-control--switch-confirmed')."
+  (tmux-control--note-current-window id)
+  (unless (equal (tmux-control--current-window-id) id)
+    (setq tmux-control--windows
+          (mapcar (lambda (w)
+                    (if (plist-get w :active)
+                        (plist-put (copy-sequence w) :active nil)
+                      w))
+                  tmux-control--windows))
+    (force-mode-line-update t)))
 
 (defun tmux-control--switch-window (verb)
   "Switch the live view to another window via tmux command VERB.
@@ -3487,13 +3669,20 @@ window, so any other client attached to the session follows along."
     (when ctrl
       (with-current-buffer ctrl
         (setq tmux-control--suppress-focus-follow t)))
-    (tmux-control--send-command
-     (format "%s -t %s" verb (tmux-control--quote-tmux-arg tmux-control--session)))
-    (unless ctrl
-      ;; See `tmux-control--do-select-window' on the per-window-buffers case.
-      (if tmux-control-window-buffers
-          (tmux-control--quiet-activity)
-        (tmux-control--refresh-active-pane t)))))
+    (let ((command (format "%s -t %s" verb
+                           (tmux-control--quote-tmux-arg tmux-control--session))))
+      (cond
+       ((or ctrl (not tmux-control-window-buffers))
+        (tmux-control--send-command command)
+        (unless ctrl
+          (tmux-control--refresh-active-pane t)))
+       (t
+        (tmux-control--quiet-activity)
+        ;; The window list knows where tmux will go, so show it now.
+        (tmux-control--switch-window-to
+         (with-current-buffer (tmux-control--wb-controller)
+           (tmux-control--predict-window verb))
+         command))))))
 
 ;;;###autoload
 (defun tmux-control-next-window ()
@@ -3658,15 +3847,18 @@ It feeds the tab bar and tells the session's windows from other
 sessions' (`tmux-control--session-window-p'), so it is kept with every
 window display off too."
   (when (process-live-p tmux-control--process)
-    (tmux-control--send-command
-     (format "list-windows -t %s -F '%s'"
-             (tmux-control--window-target tmux-control--session)
-             (mapconcat
-              #'identity
-              '("#{window_index}" "#{window_name}" "#{window_active}"
-                "#{window_bell_flag}" "#{window_id}")
-              tmux-control--field-separator))
-     :windows)))
+    (let ((generation tmux-control--switch-generation))
+      (tmux-control--query
+       (format "list-windows -t %s -F '%s'"
+               (tmux-control--window-target tmux-control--session)
+               (mapconcat
+                #'identity
+                '("#{window_index}" "#{window_name}" "#{window_active}"
+                  "#{window_bell_flag}" "#{window_id}")
+                tmux-control--field-separator))
+       (lambda (lines)
+         (when lines
+           (tmux-control--update-windows lines generation)))))))
 
 (defun tmux-control--refresh-pane-window-map ()
   "Asynchronously refresh the pane-id -> window map for output routing."
@@ -3722,13 +3914,18 @@ close then swaps to the real new window."
       (let ((kill-buffer-query-functions nil))
         (kill-buffer buf)))))
 
-(defun tmux-control--update-windows (lines)
+(defun tmux-control--update-windows (lines &optional generation)
   "Parse a list-windows reply LINES into `tmux-control--windows'.
 Records the active window as the current one and clears its activity marker,
 then refreshes the header line.  With per-window buffers on, also claims the
 active window for the controller buffer the first time its id is learned --
-the controller renders its own window, so a switch back to it swaps here."
-  (let (parsed active active-id)
+the controller renders its own window, so a switch back to it swaps here.
+GENERATION is `tmux-control--switch-generation' when the list was asked
+for: a switch this client has shown since, or one tmux hasn't confirmed,
+is newer than the reply's active window, which then doesn't move the tab
+highlight."
+  (let ((before (tmux-control--current-window-id))
+        parsed active active-id)
     (dolist (line lines)
       (when (string-match
              (concat "\\`\\([0-9]+\\)" tmux-control--field-separator-regexp
@@ -3747,6 +3944,17 @@ the controller renders its own window, so a switch back to it swaps here."
                       :id id)
                 parsed)
           (when act (setq active idx active-id id)))))
+    (when-let* ((kept (and before
+                           (not (equal before active-id))
+                           (or (> tmux-control--switch-pending 0)
+                               (and generation
+                                    (/= generation tmux-control--switch-generation)))
+                           (seq-find (lambda (w) (equal (plist-get w :id) before))
+                                     parsed))))
+      (dolist (w parsed)
+        (plist-put w :active (eq w kept)))
+      (setq active (plist-get kept :index)
+            active-id before))
     ;; Reply line order is not guaranteed (the filter collects command output
     ;; in reverse); sort by numeric index so tabs read left-to-right 0,1,2,...
     (setq tmux-control--windows
@@ -3758,6 +3966,13 @@ the controller renders its own window, so a switch back to it swaps here."
     ;; it includes the windows added and leaves out the ones that left.
     (setq tmux-control--added-windows nil
           tmux-control--closed-windows nil)
+    (when active-id
+      (tmux-control--remember-window-switch before active-id))
+    (setq tmux-control--window-history
+          (seq-filter (lambda (id)
+                        (seq-find (lambda (w) (equal (plist-get w :id) id))
+                                  tmux-control--windows))
+                      tmux-control--window-history))
     ;; A window tmux said %window-close for that this list leaves out
     ;; left the session after all.  Before the controller is homed below:
     ;; its own window may be one.
@@ -7166,9 +7381,19 @@ backing off to the cap."
           (tmux-control--refresh-windows)
           (unless (string-match-p "\\`@[0-9]+\\'" (or window-id ""))
             (setq window-id nil))
+          ;; The tab highlight moves now, not when the window list asked
+          ;; for above comes back.  Unless this client's own switches are
+          ;; unconfirmed: the echo may be of one since overtaken, and the
+          ;; latest one's confirmation settles the view
+          ;; (`tmux-control--switch-window-to').  An echo comes after the
+          ;; replies to the commands tmux read with the switch, so one that
+          ;; comes later is current.
+          (when (and window-id (zerop tmux-control--switch-pending))
+            (tmux-control--note-current-window window-id))
           (cond
            (tmux-control--tiled
             (setq tmux-control--retile-pending t))
+           ((> tmux-control--switch-pending 0))
            ((and tmux-control-window-buffers window-id)
             ;; Per-window buffers: a switch -- ours or another client's --
             ;; just swaps the displayed buffer.  The swap is idempotent, so
@@ -7641,24 +7866,6 @@ historical drift at the next natural seed, whatever its cause."
 ;; until `:continue'.  Shown again, the buffer gets back the history the
 ;; pane printed meanwhile and a repaint of its screen, then tmux
 ;; continues it.
-
-(defvar tmux-control--command-batch nil
-  "While `tmux-control--with-one-write' runs, (PROCESS . LINES) to write.")
-
-(defmacro tmux-control--with-one-write (&rest body)
-  "Run BODY, writing the commands it sends this buffer's tmux in one go.
-tmux runs the commands it reads together before it reads any pane's
-output again, so their replies describe one moment: a pane printing
-meanwhile cannot move a row between one capture and the next.  Each
-stays a line of its own, so one that fails does not take the others
-with it."
-  (declare (indent 0) (debug t))
-  `(let ((tmux-control--command-batch (list tmux-control--process)))
-     (unwind-protect (progn ,@body)
-       (let ((process (car tmux-control--command-batch))
-             (lines (cdr tmux-control--command-batch)))
-         (when (and lines (process-live-p process))
-           (process-send-string process (apply #'concat (nreverse lines))))))))
 
 (defconst tmux-control--hidden-delay 1.0
   "Seconds a terminal stays out of sight before tmux pauses it.
