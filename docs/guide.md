@@ -319,13 +319,26 @@ view):
 
 - `C-c C-k` disconnects the Emacs control client.
 - `C-c C-r` reconnects it — see "Reconnecting" below.
-- `C-c C-u` (`tmux-control-open-link`) opens a link on the screen in your
-  browser, choosing among them when there are several, the lowest first.
+- `C-c C-u` (`tmux-control-open-link`) opens a link or file reference on the
+  screen, choosing among them when there are several, the lowest first.
   `C-u C-c C-u` copies it instead. A link is a URL shown as text, or text a
   program marked as a link (OSC 8), such as Claude Code naming a pull request
-  `#22`; the chooser shows that text beside its URL. A URL a TUI wrapped over
-  several rows is joined again, which assumes the row it left runs to the
-  window's edge.
+  `#22`; the chooser shows that text beside its URL. Links open in your
+  browser. A URL or reference a TUI wrapped over several rows is joined again,
+  which assumes the row it left runs to the window's edge.
+- A file reference is `FILE:LINE` or `FILE:LINE:COLUMN` shown as text, as
+  compilers, test runners and agents print them, or a marked `file:` link. It
+  opens at that line in another window, with the terminal still selected, so
+  you can open the next. A range such as `FILE:12-20` opens at its first line,
+  and `(:251)` after a reference is a line in the same file. A relative name is
+  under the pane's directory, or failing that is the one file in that
+  directory's project that ends with it; a name that could be several files
+  says so. The file is always on the pane's host, over TRAMP for a remote pane:
+  text that names another host, such as TRAMP syntax, is not offered, and a
+  `file:` link's own host is ignored. With
+  `tmux-control-pane-aware-find-file` off, a remote pane's relative references
+  don't open. Only the file you choose is looked for, so a host and port with
+  a dot in the name (`example.com:8080`) can be offered and then not found.
 - Text a program marked as a link is a link in Emacs too: hovering shows its
   URL, and a click opens it, here and in the scrollback view (where `RET` on it
   does as well). A click on a link opens it even when the program tracks the
