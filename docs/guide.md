@@ -71,6 +71,11 @@ bound in the live buffer; the rest are `M-x`, bind them to taste):
   repaint-in-place behavior (a switch then discards the previous window's
   scrollback).
 
+  Picking a window's buffer yourself, with `C-x b` say, makes it tmux's current
+  window, so the tab bar and `next-window` go on from what you are looking at.
+  A window's buffer shown beside another of the session's stays as you arranged
+  it, and tmux stays where it is.
+
   A window's buffer is named by its tmux ID, `*tmux dev:work @5*`.  To tell
   windows apart in a buffer list, and find one by typing its name, set
   `tmux-control-window-buffer-names` to `tab`: each buffer is then named as

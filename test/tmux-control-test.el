@@ -5408,6 +5408,25 @@ killed with it."
           (should (cl-some (lambda (c) (string-match-p "refresh-client -C 100x30" c))
                            sent)))))))
 
+(ert-deftest tmux-control-test-resize-leaves-the-grid-when-the-client-size-stays ()
+  ;; A split window's pane is smaller than the client.  A resize that asks
+  ;; tmux for nothing new gets no reply to put the grid back, so it must
+  ;; not move the grid to the Emacs window's size.
+  (let ((grids '()))
+    (cl-letf (((symbol-function 'tmux-control--send-command) #'ignore)
+              ((symbol-function 'tmux-control--refresh-pane-size) #'ignore)
+              ((symbol-function 'tmux-control--apply-term-size)
+               (lambda (width height) (push (cons width height) grids)))
+              ((symbol-function 'tmux-control--wb-controller)
+               (lambda () (current-buffer))))
+      (with-temp-buffer
+        (let ((tmux-control-window-buffers nil))
+          (setq-local tmux-control--requested-client-size nil)
+          (tmux-control--resize 120 40)
+          (should (equal grids '((120 . 40))))
+          (tmux-control--resize 120 40)
+          (should (equal grids '((120 . 40)))))))))
+
 (ert-deftest tmux-control-test-pinned-size-warns-once-and-recovers ()
   ;; tmux silently refusing our size requests (window-size manual after any
   ;; resize-window, or a competing client) must be surfaced: one probe+warn
