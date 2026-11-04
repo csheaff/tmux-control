@@ -9633,6 +9633,20 @@ saw); a `completing-read' answers with `choice'."
                                                   :type 'user-error))))
       (should-error (tmux-control--reference-file "missing.py") :type 'user-error))))
 
+(ert-deftest tmux-control-test-reference-in-a-project-must-be-openable ()
+  ;; The project lists a tracked file that was deleted, and whatever a
+  ;; link points at, so neither may open just for being listed.
+  (tmux-control-test--with-files '("lib/gone.py" "pane/x")
+    (call-process "git" nil nil nil "init" "-q")
+    (call-process "git" nil nil nil "add" "lib/gone.py")
+    (delete-file "lib/gone.py")
+    (make-symbolic-link "/dev/zero" "lib/device.py")
+    (let ((default-directory (expand-file-name "pane/" root)))
+      (dolist (name '("gone.py" "device.py"))
+        (should (string-match-p "\\`No file"
+                                (cadr (should-error (tmux-control--reference-file name)
+                                                    :type 'user-error))))))))
+
 (defmacro tmux-control-test--on-remote-pane (&rest body)
   "Run BODY in a buffer on a pane at /home/u/proj on the host box.
 Binds `found' to the files `find-file-noselect' was asked for, all of
@@ -9672,6 +9686,16 @@ which exist."
       (should-error (tmux-control--open-link "services/agent.py:514") :type 'user-error))
     (should-not found)))
 
+(ert-deftest tmux-control-test-remote-pane-opens-no-local-project-file ()
+  (tmux-control-test--on-remote-pane
+    (cl-letf (((symbol-function 'tmux-control--project-file)
+               (lambda (&rest _) "/local/report.py"))
+              ((symbol-function 'file-regular-p)
+               (lambda (file) (equal file "/local/report.py")))
+              ((symbol-function 'file-directory-p) #'ignore))
+      (should-error (tmux-control--open-link "report.py:1") :type 'user-error)
+      (should-not found))))
+
 (ert-deftest tmux-control-test-file-link-names-no-host-of-its-own ()
   (dolist (link (list "file:///ssh:evil:/etc/passwd" "file:///sudo::/etc/shadow"
                       "file:///ssh%3Aevil%3A/etc/passwd" "file:///etc/pass%00wd"
@@ -9690,7 +9714,15 @@ which exist."
   (tmux-control-test--with-screen '("see a.py:3")
     (insert "see "
             (propertize "a.py:3" 'tmux-control-hyperlink "file:///r/a.py#L3"))
-    (should (equal (tmux-control--screen-links) '(("file:///r/a.py#L3" . "a.py:3"))))))
+    (should (equal (tmux-control--screen-links) '(("file:///r/a.py#L3" . "a.py:3")))))
+  ;; Within longer text too, where it would open under the pane's directory
+  ;; and not where the link says.
+  (tmux-control-test--with-screen '("see open a.py:3 now")
+    (insert "see "
+            (propertize "open a.py:3" 'tmux-control-hyperlink "file:///r/a.py#L3")
+            " now")
+    (should (equal (tmux-control--screen-links)
+                   '(("file:///r/a.py#L3" . "open a.py:3"))))))
 
 (ert-deftest tmux-control-test-follow-hyperlink-opens-a-file-link-on-the-pane-host ()
   (tmux-control-test--on-remote-pane

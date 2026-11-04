@@ -4748,11 +4748,11 @@ one link."
   "Links on the live screen as (URL . LABEL), the lowest first.
 They are the hyperlinks programs marked (OSC 8), with the text they
 show as LABEL, the URLs shown as text, with a nil LABEL, and the file
-references shown as text, with the LABEL \"file\".  A reference that is
-the text of a marked link is that link."
+references shown as text, with the LABEL \"file\".  A reference in the
+text of a marked link is that link."
   (let* ((marked (tmux-control--hyperlinks-in-region
                   (tmux-control--term-screen-start) (tmux-control--term-end)))
-         (labels (mapcar #'cddr marked))
+         (labels (delq nil (mapcar #'cddr marked)))
          (text (string-join (tmux-control--visible-screen-lines (current-buffer)) "\n"))
          (width (car (tmux-control--term-size)))
          (links
@@ -4761,7 +4761,8 @@ the text of a marked link is that link."
            (mapcar (lambda (url) (cons (car url) (cons (cdr url) nil)))
                    (tmux-control--urls-in-text text width))
            (mapcan (lambda (reference)
-                     (unless (member (cdr reference) labels)
+                     (unless (seq-some (apply-partially #'string-search (cdr reference))
+                                       labels)
                        (list (cons (car reference) (cons (cdr reference) "file")))))
                    (tmux-control--file-references-in-text text width))))
          result)
@@ -4830,12 +4831,16 @@ host's prefix, as `expand-file-name' would make it a local file."
                       (tmux-control--pane-aware-directory)))
          (file (if directory
                    (expand-file-name name directory)
-                 (concat host name))))
-    (unless (equal (file-remote-p file) host)
-      (user-error "Not opening %s: it isn't on the pane's host" file))
-    (cond ((or (file-regular-p file) (file-directory-p file)) file)
-          ((and directory (tmux-control--project-file name directory)))
-          (t (user-error "No file %s" file)))))
+                 (concat host name)))
+         (openable (lambda (file)
+                     (unless (equal (file-remote-p file) host)
+                       (user-error "Not opening %s: it isn't on the pane's host" file))
+                     (and (or (file-regular-p file) (file-directory-p file)) file))))
+    (or (funcall openable file)
+        (when-let* ((match (and directory
+                                (tmux-control--project-file name directory))))
+          (funcall openable match))
+        (user-error "No file %s" file))))
 
 (defun tmux-control--show-file (name line column)
   "Show the file NAME from a pane at LINE and COLUMN in another window.
