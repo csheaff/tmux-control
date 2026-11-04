@@ -1211,6 +1211,245 @@ initial+extend instead of initial)."
            (kill-buffer controller))
          (tmux-control-it--tmux-ok "kill-server")))))
 
+(defun tmux-control-it--window-buffer (controller index)
+  "CONTROLLER's buffer for the tmux window at INDEX, once it has one."
+  (let ((id (string-trim
+             (tmux-control-it--tmux "display-message" "-p" "-t" (format "t:%d" index)
+                                    "#{window_id}"))))
+    (tmux-control-it--pump-until
+     6 (lambda ()
+         (or (equal id (buffer-local-value 'tmux-control--window-id controller))
+             (with-current-buffer controller
+               (tmux-control--window-buffer id)))))
+    (if (equal id (buffer-local-value 'tmux-control--window-id controller))
+        controller
+      (with-current-buffer controller (tmux-control--window-buffer id)))))
+
+(defun tmux-control-it--current-index ()
+  "The index of tmux's current window in session t."
+  (string-trim (tmux-control-it--tmux "display-message" "-p" "-t" "t:" "#{window_index}")))
+
+(ert-deftest tmux-control-it-arrival-keeps-a-split-window-at-its-pane-size ()
+  "Coming back to a split window leaves its buffer the size of its active
+pane, not of the Emacs window.  The client's size hasn't changed, so no
+reply comes to correct the grid, and the pane's output would scroll at
+the wrong row."
+  (let ((tmux-control-window-buffers 'all))
+    (tmux-control-it--with-session
+      (set-window-buffer (selected-window) controller)
+      (tmux-control-it--tmux "new-window" "-d" "-t" "t:")
+      (tmux-control-it--tmux "split-window" "-t" "t:0")
+      (should (tmux-control-it--ready controller))
+      (tmux-control-it--window-buffer controller 1)
+      (tmux-control-it--tmux "next-window" "-t" "t")
+      (tmux-control-it--pump 0.05)
+      (tmux-control-it--tmux "last-window" "-t" "t")
+      (tmux-control-it--pump 0.3)
+      (should (tmux-control-it--ready controller))
+      (should (eq (window-buffer (selected-window)) controller))
+      (let ((grid (cdr (with-current-buffer controller (tmux-control--term-size)))))
+        (should (= grid (string-to-number
+                         (tmux-control-it--tmux "display-message" "-p" "-t" "t:0"
+                                                "#{pane_height}"))))
+        (should (< grid (cdr (tmux-control--window-size (selected-window)))))))))
+
+(ert-deftest tmux-control-it-new-window-takes-its-pane-size ()
+  "A window made while a split window is shown gets a buffer of its own
+pane's size, not the split pane's."
+  (let ((tmux-control-window-buffers 'all))
+    (tmux-control-it--with-session
+      (set-window-buffer (selected-window) controller)
+      (tmux-control-it--tmux "split-window" "-t" "t:0")
+      (should (tmux-control-it--ready controller))
+      (tmux-control-it--pump 0.2)
+      (tmux-control-it--tmux "new-window" "-t" "t:")
+      (let ((buffer (tmux-control-it--window-buffer controller 1)))
+        (tmux-control-it--pump 0.2)
+        (should (tmux-control-it--ready controller))
+        (should (eq (window-buffer (selected-window)) buffer))
+        (should (= (cdr (with-current-buffer buffer (tmux-control--term-size)))
+                   (string-to-number
+                    (tmux-control-it--tmux "display-message" "-p" "-t" "t:1"
+                                           "#{pane_height}"))))))))
+
+(ert-deftest tmux-control-it-untiling-takes-the-panes-new-size ()
+  "When a split window's split closes in a tiled view, the single-pane
+view it returns to is the size of the whole pane.  The client's size is
+the same as before tiling, so it takes asking tmux."
+  (let ((tmux-control-window-buffers 'all))
+    (tmux-control-it--with-session
+      (set-window-buffer (selected-window) controller)
+      (tmux-control-it--tmux "split-window" "-t" "t:0")
+      (should (tmux-control-it--ready controller))
+      (tmux-control-it--pump 0.3)
+      (with-current-buffer controller (tmux-control-tile))
+      (should (tmux-control-it--settle-tiles controller 2))
+      (tmux-control-it--tmux "kill-pane" "-t" "t:0.1")
+      (should (tmux-control-it--pump-until
+               4 (lambda ()
+                   (buffer-local-value 'tmux-control--retile-timer controller))))
+      ;; Batch never idles: run the re-tile that closes the view.
+      (let ((timer (buffer-local-value 'tmux-control--retile-timer controller)))
+        (cancel-timer timer)
+        (apply (timer--function timer) (timer--args timer)))
+      (should (tmux-control-it--pump-until
+               6 (lambda ()
+                   (not (buffer-local-value 'tmux-control--tiled controller)))))
+      (should (tmux-control-it--ready controller))
+      (tmux-control-it--pump 0.3)
+      (should (= (cdr (with-current-buffer controller (tmux-control--term-size)))
+                 (string-to-number
+                  (tmux-control-it--tmux "display-message" "-p" "-t" "t:0"
+                                         "#{pane_height}")))))))
+
+(ert-deftest tmux-control-it-untiling-another-window-stays-on-it ()
+  "Untiling a window that isn't the controller's own returns to it, though
+the controller stands in until tmux says which window is current, and the
+controller, off screen, still takes its own pane's size."
+  (let ((tmux-control-window-buffers 'all))
+    (tmux-control-it--with-session
+      (set-window-buffer (selected-window) controller)
+      (tmux-control-it--tmux "split-window" "-t" "t:0")
+      (should (tmux-control-it--ready controller))
+      (tmux-control-it--tmux "new-window" "-t" "t:")
+      (tmux-control-it--tmux "split-window" "-t" "t:1")
+      (let ((buffer (tmux-control-it--window-buffer controller 1)))
+        (should (tmux-control-it--ready controller))
+        (tmux-control-it--pump 0.3)
+        (with-current-buffer buffer (tmux-control-tile))
+        (should (tmux-control-it--settle-tiles controller 2))
+        ;; While tiled: the controller's window loses its split.
+        (tmux-control-it--tmux "kill-pane" "-t" "t:0.1")
+        (tmux-control-it--pump 0.2)
+        (with-current-buffer controller (tmux-control-untile))
+        ;; The follow's timer, before tmux's reply.
+        (tmux-control--select-shown-window (selected-window) controller)
+        (should (tmux-control-it--ready controller))
+        (tmux-control-it--pump 0.3)
+        (should (equal (tmux-control-it--current-index) "1"))
+        (should (eq (window-buffer (selected-window)) buffer))
+        (should (= (cdr (with-current-buffer controller (tmux-control--term-size)))
+                   (string-to-number
+                    (tmux-control-it--tmux "display-message" "-p" "-t" "t:0"
+                                           "#{pane_height}"))))))))
+
+(ert-deftest tmux-control-it-picked-buffer-becomes-the-current-window ()
+  "A window's buffer shown in the selected window makes that window
+tmux's current one.  One shown only as a preview does not, and neither
+does one shown beside another of the session's windows."
+  (let ((tmux-control-window-buffers 'all))
+    (tmux-control-it--with-session
+      (set-window-buffer (selected-window) controller)
+      (tmux-control-it--tmux "new-window" "-d" "-t" "t:")
+      (tmux-control-it--tmux "new-window" "-d" "-t" "t:")
+      (let ((one (tmux-control-it--window-buffer controller 1))
+            (two (tmux-control-it--window-buffer controller 2)))
+        (should (tmux-control-it--ready controller))
+        (cl-flet ((show (buffer window)
+                    (set-window-buffer window buffer)
+                    (with-current-buffer buffer
+                      (tmux-control--follow-shown-window window))
+                    (tmux-control-it--pump 0.2)
+                    (tmux-control-it--ready controller)))
+          ;; Picked: tmux and the tab follow.
+          (show one (selected-window))
+          (should (equal (tmux-control-it--current-index) "1"))
+          (should (equal (with-current-buffer controller tmux-control--current-window)
+                         "1"))
+          ;; A pick takes over from a switch tmux hasn't confirmed yet.
+          (with-current-buffer one (tmux-control-next-window))
+          (should (eq (window-buffer (selected-window)) two))
+          (set-window-buffer (selected-window) controller)
+          (tmux-control--select-shown-window (selected-window) controller)
+          (tmux-control-it--pump 0.2)
+          (should (tmux-control-it--ready controller))
+          (should (equal (tmux-control-it--current-index) "0"))
+          (should (eq (window-buffer (selected-window)) controller))
+          (show one (selected-window))
+          ;; A view waiting for tmux to leave a window that closed is no
+          ;; pick: this is what `tmux-control--forget-window' leaves.
+          (let ((current (with-current-buffer controller
+                           (tmux-control--current-window-id))))
+            (with-current-buffer controller
+              (push current tmux-control--closed-windows))
+            (show two (selected-window))
+            (should (equal (tmux-control-it--current-index) "1"))
+            (with-current-buffer controller
+              (setq tmux-control--closed-windows nil))
+            (show one (selected-window)))
+          ;; By id: an index tmux changed without saying picks another window.
+          (tmux-control-it--tmux "swap-window" "-d" "-s" "t:0" "-t" "t:2")
+          (tmux-control-it--pump 0.2)
+          (show two (selected-window))
+          (should (equal (string-trim
+                          (tmux-control-it--tmux "display-message" "-p" "-t" "t:"
+                                                 "#{window_id}"))
+                         (buffer-local-value 'tmux-control--window-id two)))
+          (show one (selected-window))
+          ;; In a window that isn't selected, as a preview is: tmux stays.
+          (let ((other (split-window))
+                (tmux (lambda ()
+                        (string-trim
+                         (tmux-control-it--tmux "display-message" "-p" "-t" "t:"
+                                                "#{window_id}"))))
+                (id (buffer-local-value 'tmux-control--window-id one)))
+            (show two other)
+            (should (equal (funcall tmux) id))
+            ;; Selected beside another of the session's windows: both stay.
+            (select-window other)
+            (show two other)
+            (should (equal (funcall tmux) id))
+            (should (eq (window-buffer other) two))
+            (delete-window other)))))))
+
+(ert-deftest tmux-control-it-retiling-leaves-an-open-prompt-alone ()
+  "A tiled view that moves to another window while the minibuffer is
+selected tiles the session's own windows.  With none of the new panes on
+screen, it used to take the minibuffer's window, and either failed to
+split it or put a terminal in it."
+  (let ((tmux-control-window-buffers 'all))
+    (tmux-control-it--with-session
+      (set-window-buffer (selected-window) controller)
+      (tmux-control-it--tmux "split-window" "-d" "-t" "t:0")
+      (tmux-control-it--tmux "new-window" "-d" "-t" "t:")
+      (tmux-control-it--tmux "split-window" "-d" "-t" "t:1")
+      (should (tmux-control-it--ready controller))
+      (tmux-control-it--window-buffer controller 1)
+      (with-current-buffer controller (tmux-control-tile))
+      (should (tmux-control-it--pump-until
+               6 (lambda () (buffer-local-value 'tmux-control--tiled controller))))
+      (should (tmux-control-it--ready controller))
+      (let* ((messages '())
+             (note (lambda (text &rest _) (push text messages)))
+             (panes (lambda ()
+                      (string-split
+                       (string-trim
+                        (tmux-control-it--tmux "list-panes" "-t" "t:1" "-F" "#{pane_id}"))
+                       "\n" t))))
+        (advice-add 'tmux-control--message :before note)
+        (unwind-protect
+            (let ((minibuffer (minibuffer-window)))
+              (select-window minibuffer)
+              (tmux-control-it--tmux "select-window" "-t" "t:1")
+              (should (tmux-control-it--pump-until
+                       4 (lambda ()
+                           (buffer-local-value 'tmux-control--retile-timer controller))))
+              (should (tmux-control-it--settle-tiles controller 2))
+              (should (seq-every-p
+                       (lambda (pane)
+                         (assoc pane (buffer-local-value 'tmux-control--panes controller)))
+                       (funcall panes)))
+              (should (eq (selected-window) minibuffer))
+              (should (minibufferp (window-buffer minibuffer)))
+              (should-not (seq-find (lambda (text) (string-match-p "could not arrange" text))
+                                    messages))
+              (dolist (pane (funcall panes))
+                (should (get-buffer-window
+                         (cdr (assoc pane (buffer-local-value 'tmux-control--panes
+                                                              controller)))))))
+          (advice-remove 'tmux-control--message note)
+          (select-window (frame-first-window)))))))
+
 (ert-deftest tmux-control-it-stream-redraws-at-the-redisplay-pace ()
   "A pane printing a line every few milliseconds, as an agent at work
 does, is drawn about 1/`tmux-control-redisplay-interval' times a second,
