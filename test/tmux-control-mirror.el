@@ -331,30 +331,45 @@ A list of (RULE . DETAIL)."
 
 ;;;; Waiting for quiet
 
-(defun tmux-control-mirror--controllers ()
-  "The live controllers of this run's server."
+(defun tmux-control-mirror--run-controllers ()
+  "The controllers of this run's server, connected or not."
   (seq-filter (lambda (buffer)
                 (with-current-buffer buffer
                   (and (derived-mode-p 'tmux-control-mode)
                        (not tmux-control--controller)
-                       (equal tmux-control--socket-name tmux-control-mirror-socket)
-                       (process-live-p tmux-control--process))))
+                       (equal tmux-control--socket-name tmux-control-mirror-socket))))
               (buffer-list)))
+
+(defun tmux-control-mirror--controllers ()
+  "The live controllers of this run's server."
+  (seq-filter (lambda (buffer)
+                (let ((process (buffer-local-value 'tmux-control--process buffer)))
+                  (and (processp process) (process-live-p process))))
+              (tmux-control-mirror--run-controllers)))
 
 (defvar tmux-control-mirror--connected nil
   "The sessions this run has been connected to.")
 
+(defun tmux-control-mirror--session-names (controllers)
+  "The sessions CONTROLLERS are for."
+  (delq nil (mapcar (lambda (buffer)
+                      (buffer-local-value 'tmux-control--session buffer))
+                    controllers)))
+
 (defun tmux-control-mirror--lost-connections ()
   "A (connection . DETAIL) for each session still there that lost its client.
 The checks only visit live connections, so without this a run that lost
-one would go on passing."
+one would go on passing.  A controller names its session even if it
+dropped before the first check."
   (let ((sessions (tmux-control-mirror--sessions))
-        (live (mapcar (lambda (buffer)
-                        (buffer-local-value 'tmux-control--session buffer))
-                      (tmux-control-mirror--controllers))))
+        (live (tmux-control-mirror--session-names
+               (tmux-control-mirror--controllers))))
     (setq tmux-control-mirror--connected
           (seq-filter (lambda (session) (member session sessions))
-                      (delete-dups (append live tmux-control-mirror--connected))))
+                      (delete-dups
+                       (append (tmux-control-mirror--session-names
+                                (tmux-control-mirror--run-controllers))
+                               tmux-control-mirror--connected))))
     (mapcar (lambda (session)
               (cons 'connection (format "%s: lost its connection" session)))
             (seq-remove (lambda (session) (member session live))
