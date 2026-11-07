@@ -1680,7 +1680,8 @@ window list leave one out after all, its buffer goes then
   "On the controller: tmux's id for the session, as \"$3\", once known.
 tmux reports every session's window switches and renames to every control
 client, so a %session-window-changed or %session-renamed is this session's
-only when it names this id.")
+only when it names this id.  It stays the id of the session the client
+attached to if tmux moves the client to another one, as the name does.")
 (defvar-local tmux-control--window-history nil
   "On the controller: the session's window ids, the latest current first.
 The stack tmux's `last-window' takes from: each switch pushes the window
@@ -2126,7 +2127,11 @@ defaults to `tmux-control-default-session'.
 
 Interactively, the session prompt completes over existing sessions on the
 chosen host and socket; entering a name that does not exist creates that
-session (tmux attaches if it exists, otherwise creates it)."
+session (tmux attaches if it exists, otherwise creates it).
+
+tmux rewrites some names, `my.proj' to `my_proj', and the connection goes
+by the name tmux gave.  If that session turns out to be connected already,
+the buffer returned gives way to that connection and is killed."
   (interactive
    (let* ((host (read-string
                  "Host (empty for local): "
@@ -7694,10 +7699,19 @@ backing off to the cap."
            (t
             (setq tmux-control--self-reseed-pending 0)
             (tmux-control--refresh-active-pane))))))
-     ((string-match "\\`%session-changed \\(\\$[0-9]+\\) " line)
+     ((string-match "\\`%session-changed \\(\\$[0-9]+\\) \\(.+\\)\\'" line)
       ;; This client attached to a session: tmux's first word after the
-      ;; startup reply, naming the session's id.
-      (setq tmux-control--session-id (match-string 1 line)))
+      ;; startup reply, naming the session as tmux has it.  tmux says it
+      ;; again when it moves the client (`switch-client', or the session
+      ;; ending under `detach-on-destroy off'), but that session is not
+      ;; this one under a new name: the buffers still show this one's
+      ;; panes, and another connection may have it.  So the first word
+      ;; alone says which session this is.
+      (unless tmux-control--session-id
+        (let ((name (match-string 2 line)))
+          (setq tmux-control--session-id (match-string 1 line))
+          (unless (equal name tmux-control--session)
+            (tmux-control--attached-as name)))))
      ((or (string-prefix-p "%sessions-changed" line)
           (string-prefix-p "%session-renamed " line))
       ;; tmux tells every control client of every session's rename, by id.
@@ -11029,8 +11043,42 @@ That is the window, pane or tab the buffer is for and `scrollback' for a
 pager.  They go inside the closing asterisk, or after a name Emacs
 numbered, as `tmux-control--derived-buffer-name' adds them.")
 
+(defun tmux-control--attached-as (name)
+  "Go by NAME, what tmux made of the session name asked for.
+Must run in the controller.  tmux rewrites a name it can't use, `my.proj'
+to `my_proj'.  Looked up by the name asked for, a connection to that
+session isn't found, so this can be a second one: then it gives way."
+  (if (tmux-control--session-live-buffer
+       tmux-control--host name tmux-control--socket-name)
+      ;; Not from here: the filter is still reading this buffer's lines.
+      ;; Emacs runs timers before it reads another process, so the
+      ;; connection found has this name still when this runs.
+      (run-at-time 0 nil #'tmux-control--give-way (current-buffer) name)
+    (tmux-control--follow-session-rename name)))
+
+(defun tmux-control--give-way (buffer session)
+  "Close the connection in BUFFER, for the live one to SESSION on its server.
+That one keeps its screen, scrollback and windows.  A window showing
+BUFFER or one of its render buffers shows SESSION instead: a window
+switch tmux reported as it attached swaps a render buffer in."
+  (when (buffer-live-p buffer)
+    (let ((host (buffer-local-value 'tmux-control--host buffer))
+          (socket (buffer-local-value 'tmux-control--socket-name buffer)))
+      (dolist (shown (cons buffer (mapcar #'cdr (buffer-local-value
+                                                 'tmux-control--window-buffers
+                                                 buffer))))
+        (dolist (window (get-buffer-window-list shown nil t))
+          (with-selected-window window
+            (tmux-control--connect-or-switch host socket session))))
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer buffer))
+      (tmux-control--schedule-reflock)
+      (message "tmux-control: already connected to %s"
+               (tmux-control--connection-name host session)))))
+
 (defun tmux-control--follow-session-rename (name)
-  "Take NAME as the session's name, now that tmux has renamed it.
+  "Take NAME as the session's name, as tmux has it now.
+tmux renamed the session, or made NAME of the one asked for.
 Must run in the controller.  Commands target the session by name, and a
 reconnect and finding the connection go by it, so every buffer holding
 the name takes the new one: the controller, its render buffers and
@@ -11059,8 +11107,8 @@ yourself is left as it is."
             (let ((rest (substring (buffer-name) (length old-prefix))))
               (when (string-match-p tmux-control--generated-name-rest rest)
                 (rename-buffer (concat new-prefix rest) t)))))))
-    ;; What was asked for by the old name since tmux renamed the session
-    ;; failed.  The window list's reply also repaints the header line.
+    ;; What was asked for by the old name since tmux changed it failed.
+    ;; The window list's reply also repaints the header line.
     (tmux-control--refresh-windows)
     (tmux-control--refresh-pane-window-map)))
 

@@ -1734,6 +1734,116 @@ live connection and reset it, and went on retrying as it was still dead."
         (with-current-buffer lost (ignore-errors (tmux-control-disconnect)))
         (kill-buffer lost)))))
 
+(ert-deftest tmux-control-it-connect-to-a-name-tmux-rewrites ()
+  "Connecting to a name tmux rewrites works under the name tmux gave.
+Commands targeted the name asked for, which tmux refused, so the window
+list stayed empty.  Connecting again shows that connection rather than
+attaching the session twice, and a reconnect finds the session."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (let* ((tmux-control-auto-reconnect nil)
+         (controller (tmux-control-connect nil tmux-control-it--socket "my.proj"))
+         (clients (lambda ()
+                    (split-string (tmux-control-it--tmux
+                                   "list-clients" "-F" "#{client_name}")
+                                  "\n" t)))
+         (sessions (lambda ()
+                     (split-string (tmux-control-it--tmux
+                                    "list-sessions" "-F" "#{session_name}")
+                                   "\n" t))))
+    (unwind-protect
+        (progn
+          (should (tmux-control-it--ready controller))
+          (should (equal (funcall sessions) '("my_proj")))
+          (should (equal (buffer-local-value 'tmux-control--session controller)
+                         "my_proj"))
+          (should (equal (buffer-name controller)
+                         (tmux-control--buffer-name
+                          nil tmux-control-it--socket "my_proj")))
+          (should (buffer-local-value 'tmux-control--windows controller))
+          (with-current-buffer controller (tmux-control-new-window "made"))
+          (should (tmux-control-it--pump-until
+                   5 (lambda ()
+                       (string-search "made" (tmux-control-it--tmux
+                                              "list-windows" "-t" "my_proj"
+                                              "-F" "#{window_name}")))))
+          (should (tmux-control-it--pump-until
+                   5 (lambda ()
+                       (seq-find (lambda (window)
+                                   (equal (plist-get window :name) "made"))
+                                 (buffer-local-value 'tmux-control--windows
+                                                     controller)))))
+          (let ((again (tmux-control-connect nil tmux-control-it--socket "my.proj")))
+            (should-not (eq again controller))
+            (should (tmux-control-it--pump-until
+                     5 (lambda () (not (buffer-live-p again))))))
+          (should (eq (with-current-buffer (window-buffer (selected-window))
+                        (tmux-control--wb-controller))
+                      controller))
+          (should (tmux-control-it--pump-until
+                   5 (lambda () (= (length (funcall clients)) 1))))
+          (should (process-live-p (buffer-local-value 'tmux-control--process
+                                                      controller)))
+          (with-current-buffer controller (tmux-control-reconnect))
+          (should (tmux-control-it--ready controller))
+          (should (equal (funcall sessions) '("my_proj"))))
+      (when (buffer-live-p controller)
+        (with-current-buffer controller (ignore-errors (tmux-control-disconnect)))
+        (kill-buffer controller))
+      (tmux-control-it--tmux-ok "kill-server"))))
+
+(ert-deftest tmux-control-it-giving-way-after-a-window-switch ()
+  "A window switch heard with the attach doesn't cost the window its session.
+The switch showed a render buffer in the second connection's place, so
+closing that connection found no window to give the session to."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (let* ((tmux-control-auto-reconnect nil)
+         (controller (tmux-control-connect nil tmux-control-it--socket "my_proj"))
+         (elsewhere (get-buffer-create "*tc-it-elsewhere*")))
+    (unwind-protect
+        (progn
+          (should (tmux-control-it--ready controller))
+          (tmux-control-it--tmux "new-window" "-d" "-t" "my_proj")
+          (delete-other-windows)
+          (switch-to-buffer elsewhere)
+          (bury-buffer controller)
+          (let ((again (tmux-control-connect nil tmux-control-it--socket "my.proj")))
+            ;; While Emacs reads nothing, tmux attaches this connection and
+            ;; another client switches window: one read brings both.
+            (call-process "sleep" nil nil nil "0.5")
+            (tmux-control-it--tmux "next-window" "-t" "my_proj")
+            (should (tmux-control-it--pump-until
+                     5 (lambda () (not (buffer-live-p again))))))
+          (should (tmux-control-it--pump-until
+                   5 (lambda ()
+                       (eq (with-current-buffer (window-buffer (selected-window))
+                             (tmux-control--wb-controller))
+                           controller)))))
+      (kill-buffer elsewhere)
+      (when (buffer-live-p controller)
+        (with-current-buffer controller (ignore-errors (tmux-control-disconnect)))
+        (kill-buffer controller))
+      (tmux-control-it--tmux-ok "kill-server"))))
+
+(ert-deftest tmux-control-it-moved-client-keeps-its-sessions-name ()
+  "A client moved to another session isn't that session under a new name.
+Its buffers still hold the old session's panes, so they go on being named
+after it, and a rename of the session it was moved to isn't its own."
+  (tmux-control-it--with-session
+    (tmux-control-it--tmux "new-session" "-d" "-s" "side")
+    (let ((client (string-trim (tmux-control-it--tmux
+                                "list-clients" "-t" "t" "-F" "#{client_name}"))))
+      (tmux-control-it--tmux "switch-client" "-c" client "-t" "side")
+      (tmux-control-it--tmux "rename-session" "-t" "side" "side2")
+      ;; The session list asked for at the rename comes after both words.
+      (should (tmux-control-it--pump-until
+               5 (lambda () (member "side2" (buffer-local-value
+                                             'tmux-control--sessions controller)))))
+      (should (equal (buffer-local-value 'tmux-control--session controller) "t"))
+      (should (equal (buffer-name controller)
+                     (tmux-control--buffer-name nil tmux-control-it--socket "t"))))))
+
 (ert-deftest tmux-control-it-reconnect-fits-the-window-with-its-header-line ()
   "A reconnect in place sized tmux before the header line was back, one row
 taller than the window, so the view's top row was out of sight."

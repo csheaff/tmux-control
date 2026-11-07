@@ -138,6 +138,10 @@ and a buffer you named yourself keeps yours.  tmux can't tell a client that
 isn't connected, so reconnecting after a rename made meanwhile makes a new
 session of the old name.  A bookmark likewise keeps the name it was saved with.
 
+tmux rewrites some names as it makes a session, `.` and `:` becoming `_`.
+Connecting to `my.proj` makes `my_proj`, and the connection goes by that name;
+connecting to `my.proj` again shows that connection.
+
 ### Which session wants you
 
 When you are looking at one session and **another connected session produces
