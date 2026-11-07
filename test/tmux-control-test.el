@@ -5293,19 +5293,24 @@ killed with it."
              (tmux-control-window-buffers t)
              (window (tmux-control--make-window-buffer "@6" ctrl))
              (pager (tmux-control-test--make-pager window)))
-        (tmux-control--handle-line "%session-renamed $2 new")
-        (should (equal (alist-get 'tmux-control-session
-                                  (tmux-control--bookmark-record))
-                       "new"))
-        (cl-letf (((symbol-function 'tmux-control-connect)
-                   (lambda (&rest args) (push args connected))))
-          (with-current-buffer window (tmux-control-reconnect))
-          (should (equal (car connected) '(nil "sock" "new")))
-          ;; A pager outlives its window's buffer, and reconnects by itself.
-          (kill-buffer window)
-          (with-current-buffer pager (tmux-control-reconnect))
-          (should (equal (car connected) '(nil "sock" "new"))))
-        (should (= (length connected) 2))))))
+        (unwind-protect
+            (progn
+              (tmux-control--handle-line "%session-renamed $2 new")
+              (should (equal (alist-get 'tmux-control-session
+                                        (tmux-control--bookmark-record))
+                             "new"))
+              (cl-letf (((symbol-function 'tmux-control-connect)
+                         (lambda (&rest args) (push args connected))))
+                (with-current-buffer window (tmux-control-reconnect))
+                (should (equal (car connected) '(nil "sock" "new")))
+                ;; A pager outlives its window's buffer, and reconnects by
+                ;; itself.
+                (kill-buffer window)
+                (with-current-buffer pager (tmux-control-reconnect))
+                (should (equal (car connected) '(nil "sock" "new"))))
+              (should (= (length connected) 2)))
+          ;; With its window gone, the fixture no longer finds it.
+          (kill-buffer pager))))))
 
 (ert-deftest tmux-control-test-rename-onto-a-dead-controllers-name ()
   ;; A rename can give a session the name a disconnected controller still
@@ -5328,6 +5333,83 @@ killed with it."
             (should (equal (buffer-name dead) "*tmux local:new*"))
             (should (equal (buffer-name ctrl) "*tmux local:new*<2>")))
         (kill-buffer dead)))))
+
+(ert-deftest tmux-control-test-session-rename-keeps-names-like-its-own ()
+  ;; A name you chose can start as the session's buffers do.  Only a name
+  ;; tmux-control made, whole, follows the session.
+  (tmux-control-test--with-controller "*tmux local:work*"
+    (tmux-control-test--with-rename
+      (let* ((tmux-control-window-buffers t)
+             (names '("*tmux local:work-notes*"
+                      "*tmux local:work notes*"
+                      "*tmux local:work @6 notes*"
+                      "*tmux local:work*-old"))
+             (buffers
+              (seq-map-indexed
+               (lambda (name index)
+                 (let ((buffer (tmux-control--make-window-buffer
+                                (format "@%d" (+ 6 index)) ctrl)))
+                   (with-current-buffer buffer (rename-buffer name))
+                   buffer))
+               names)))
+        (tmux-control--handle-line "%session-renamed $2 new")
+        (should (equal (buffer-name ctrl) "*tmux local:new*"))
+        (should (equal (mapcar #'buffer-name buffers) names))
+        (dolist (buffer buffers)
+          (should (equal (buffer-local-value 'tmux-control--session buffer)
+                         "new")))))))
+
+(ert-deftest tmux-control-test-session-rename-with-numbered-names ()
+  ;; A buffer Emacs numbered because its name was taken is still named after
+  ;; the session, and so is what is named after it.
+  (tmux-control-test--with-controller "*tmux local:work*<2>"
+    (tmux-control-test--with-rename
+      (let* ((tmux-control-window-buffers t)
+             (window (tmux-control--make-window-buffer "@6" ctrl))
+             (pane (tmux-control-test--make-pane ctrl "%3"))
+             (pager (tmux-control-test--make-pager window)))
+        (should (equal (buffer-name window) "*tmux local:work*<2> @6"))
+        (should (equal (buffer-name pane) "*tmux local:work*<2> %3"))
+        (should (equal (buffer-name pager) "*tmux local:work*<2> @6 scrollback"))
+        (tmux-control--handle-line "%session-renamed $2 new")
+        (should (equal (buffer-name ctrl) "*tmux local:new*<2>"))
+        (should (equal (buffer-name window) "*tmux local:new*<2> @6"))
+        (should (equal (buffer-name pane) "*tmux local:new*<2> %3"))
+        (should (equal (buffer-name pager) "*tmux local:new*<2> @6 scrollback"))))))
+
+(ert-deftest tmux-control-test-auto-reconnect-leaves-a-renamed-session-alone ()
+  ;; A rename can give a session the name of a lost connection waiting to
+  ;; reconnect.  Connecting by that name finds the session's own live
+  ;; connection and resets it, and the lost one, still dead, retries: it
+  ;; gives up instead.
+  (tmux-control-test--with-controller "*tmux local:work*"
+    (let ((lost (generate-new-buffer "*tmux local:gone*"))
+          (connected nil)
+          (reflock nil))
+      (unwind-protect
+          (progn
+            (with-current-buffer lost
+              (tmux-control-mode)
+              (setq-local tmux-control--socket-name "sock"
+                          tmux-control--session "gone"
+                          tmux-control--auto-reconnect-attempts 2
+                          tmux-control--auto-reconnect-timer
+                          (run-with-timer 3600 nil #'ignore)))
+            (tmux-control-test--with-rename
+              (tmux-control--handle-line "%session-renamed $2 gone"))
+            (cl-letf (((symbol-function 'tmux-control-connect)
+                       (lambda (&rest args) (push args connected)))
+                      ((symbol-function 'tmux-control--schedule-reflock)
+                       (lambda () (setq reflock t))))
+              (tmux-control--auto-reconnect-now lost))
+            (should-not connected)
+            (should reflock)
+            (with-current-buffer lost
+              (should-not tmux-control--auto-reconnect-timer)
+              (should (= tmux-control--auto-reconnect-attempts 0))
+              (should (string-search "not reconnecting" (buffer-string)))))
+        (with-current-buffer lost (tmux-control--cancel-auto-reconnect))
+        (kill-buffer lost)))))
 
 (ert-deftest tmux-control-test-select-pane-crosses-windows ()
   ;; `tmux-control-select-pane' can be handed (or complete to) a pane in

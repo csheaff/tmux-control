@@ -1697,6 +1697,43 @@ one of the old name."
       (should (tmux-control-it--pump-until
                5 (lambda () (equal (funcall session) "again")))))))
 
+(ert-deftest tmux-control-it-lost-connection-leaves-a-renamed-session-alone ()
+  "A session renamed onto a lost connection's name keeps its connection.
+The lost connection's retry connected by that name, found the session's
+live connection and reset it, and went on retrying as it was still dead."
+  (tmux-control-it--with-session
+    (tmux-control-it--tmux "new-session" "-d" "-s" "gone")
+    (let* ((tmux-control-auto-reconnect t)
+           (lost (tmux-control-connect nil tmux-control-it--socket "gone"))
+           (process (buffer-local-value 'tmux-control--process controller))
+           (pending (lambda ()
+                      (buffer-local-value 'tmux-control--auto-reconnect-timer lost)))
+           (replaced (lambda ()
+                       (not (eq (buffer-local-value 'tmux-control--process controller)
+                                process)))))
+      (unwind-protect
+          (progn
+            (should (tmux-control-it--ready lost))
+            (tmux-control-it--tmux "kill-session" "-t" "gone")
+            (should (tmux-control-it--pump-until 5 pending))
+            (tmux-control-it--tmux "rename-session" "-t" "t" "gone")
+            (should (tmux-control-it--pump-until
+                     1 (lambda () (equal (buffer-local-value 'tmux-control--session
+                                                             controller)
+                                         "gone"))))
+            ;; The retry comes two seconds after the connection was lost.
+            (should (tmux-control-it--pump-until
+                     5 (lambda () (or (funcall replaced)
+                                      (not (funcall pending))))))
+            (should-not (funcall replaced))
+            (should (process-live-p process))
+            (should-not (funcall pending))
+            (should (equal (string-trim (tmux-control-it--tmux
+                                         "list-sessions" "-F" "#{session_name}"))
+                           "gone")))
+        (with-current-buffer lost (ignore-errors (tmux-control-disconnect)))
+        (kill-buffer lost)))))
+
 (ert-deftest tmux-control-it-reconnect-fits-the-window-with-its-header-line ()
   "A reconnect in place sized tmux before the header line was back, one row
 taller than the window, so the view's top row was out of sight."
