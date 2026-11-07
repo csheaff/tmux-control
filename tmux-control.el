@@ -4246,6 +4246,14 @@ buffer\"."
   (let ((host (buffer-local-value 'tmux-control--host buffer)))
     (and host (not (string-empty-p host)) host)))
 
+(defun tmux-control--click-window (event)
+  "Return the window EVENT clicked, or the selected one if it has gone.
+Emacs finds a header-line click's binding through the clicked window's
+buffer but runs it in the selected window's, which may be another
+session's.  A click handler goes by this window, not the current buffer."
+  (let ((window (posn-window (event-start event))))
+    (if (window-live-p window) window (selected-window))))
+
 (defun tmux-control--corner-session (buffer)
   "Return a clickable corner token for the flagged session in BUFFER.
 The session NAME is plain and a bright `●' marks that it wants attention;
@@ -4257,8 +4265,10 @@ clicking switches to it."
                       (propertize " ●" 'face 'tmux-control-tab-activity)))
          (map (make-sparse-keymap)))
     (define-key map [header-line mouse-1]
-      (lambda (_event)
+      (lambda (event)
         (interactive "e")
+        ;; The switch replaces the selected window's buffer.
+        (select-window (tmux-control--click-window event))
         (tmux-control--switch-to-flagged-buffer buffer)))
     (propertize tok
                 'mouse-face (tmux-control--tab-mouse-face)
@@ -4327,16 +4337,22 @@ switcher."
                                             n (if (= n 1) "" "s"))))
         (map (make-sparse-keymap)))
     (define-key map [header-line mouse-1]
-      (lambda (_event) (interactive "e") (tmux-control-switch-to-flagged)))
+      (lambda (event)
+        (interactive "e")
+        (select-window (tmux-control--click-window event))
+        (tmux-control-switch-to-flagged)))
     (propertize dot 'keymap map)))
 
 (defun tmux-control--tab-keymap (index)
-  "Return a header-line keymap that switches to window INDEX on a click."
+  "Return a header-line keymap that switches to window INDEX on a click.
+The switch is in the session of the header clicked, and the selected
+window stays as it was."
   (let ((map (make-sparse-keymap)))
     (define-key map [header-line mouse-1]
-      (lambda (_event)
+      (lambda (event)
         (interactive "e")
-        (tmux-control--do-select-window index)))
+        (with-current-buffer (window-buffer (tmux-control--click-window event))
+          (tmux-control--do-select-window index))))
     map))
 
 (defun tmux-control--window-tab-bar (&optional no-keymap)

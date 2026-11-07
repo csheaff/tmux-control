@@ -2199,6 +2199,96 @@ each wrapped in an evolving prompt line and a status bar.")
     (should (string-match-p "●3" (substring-no-properties c)))
     (should (get-text-property (1- (length c)) 'keymap c))))
 
+(defmacro tmux-control-test--with-side-by-side (&rest body)
+  "Run BODY with session \"demo\" selected and session \"work\" beside it.
+BODY sees their buffers as `demo' and `work', their windows as
+`demo-window' and `work-window', and `click', a header-line click in
+`work-window'."
+  (declare (indent 0))
+  `(save-window-excursion
+     (let ((demo (generate-new-buffer " *tc-click-demo*"))
+           (work (generate-new-buffer " *tc-click-work*")))
+       (unwind-protect
+           (progn
+             (with-current-buffer demo
+               (setq-local tmux-control--session "demo"))
+             (with-current-buffer work
+               (setq-local tmux-control--session "work"))
+             (delete-other-windows)
+             (switch-to-buffer demo)
+             (let* ((demo-window (selected-window))
+                    (work-window (split-window-right))
+                    (click (list 'mouse-1
+                                 (list work-window 'header-line '(0 . 0) 0))))
+               (set-window-buffer work-window work)
+               ,@body))
+         (kill-buffer demo)
+         (kill-buffer work)))))
+
+(defun tmux-control-test--header-click (keymap event)
+  "Run KEYMAP's header-line binding for a click on EVENT."
+  (funcall (lookup-key keymap [header-line mouse-1]) event))
+
+(ert-deftest tmux-control-test-tab-click-acts-on-clicked-session ()
+  ;; Emacs finds a header-line click's binding through the clicked window's
+  ;; buffer but runs it in the selected window's: a tab in `work''s header
+  ;; switched `demo' to that window, and `work' did not move.
+  (tmux-control-test--with-side-by-side
+    (let ((tmux-control-window-buffers nil))
+      (should (equal (tmux-control-test--capture-commands
+                      (lambda ()
+                        (tmux-control-test--header-click
+                         (tmux-control--tab-keymap 2) click)))
+                     '("select-window -t \"work\":2")))
+      (should (eq (selected-window) demo-window))
+      (should (eq (window-buffer demo-window) demo))
+      (should (eq (window-buffer work-window) work)))))
+
+(ert-deftest tmux-control-test-tab-click-in-a-gone-window ()
+  ;; The window can close between the click and its command.  The selected
+  ;; buffer is the one left to act on; the capture names its session "0".
+  (tmux-control-test--with-side-by-side
+    (let ((tmux-control-window-buffers nil))
+      (delete-window work-window)
+      (should (equal (tmux-control-test--capture-commands
+                      (lambda ()
+                        (tmux-control-test--header-click
+                         (tmux-control--tab-keymap 2) click)))
+                     '("select-window -t \"0\":2"))))))
+
+(ert-deftest tmux-control-test-corner-click-shows-session-in-clicked-window ()
+  ;; The token knows its session, but the switch shows it in the selected
+  ;; window: clicking `work''s corner replaced `demo'.
+  (tmux-control-test--with-side-by-side
+    (let ((flagged (generate-new-buffer " *tc-click-flagged*")))
+      (unwind-protect
+          (let ((token (with-current-buffer flagged
+                         (setq-local tmux-control--session "flagged")
+                         (tmux-control--corner-session flagged))))
+            (tmux-control-test--header-click
+             (get-text-property 1 'keymap token) click)
+            (should (eq (window-buffer work-window) flagged))
+            (should (eq (window-buffer demo-window) demo))
+            (should (eq (selected-window) work-window)))
+        (kill-buffer flagged)))))
+
+(ert-deftest tmux-control-test-collapsed-corner-click-counts-from-clicked-session ()
+  ;; The count is of sessions other than the header's own.  Run in the
+  ;; selected window's buffer, the click offered `work' from `work''s header.
+  (tmux-control-test--with-side-by-side
+    (dolist (buffer (list demo work))
+      (with-current-buffer buffer
+        (setq-local tmux-control--session-activity t)))
+    (let (offered)
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'tmux-control--switch-to-flagged-buffer)
+                 (lambda (buffer) (push buffer offered))))
+        (let ((corner (tmux-control--corner-collapsed 1)))
+          (tmux-control-test--header-click
+           (get-text-property 1 'keymap corner) click)))
+      (should (equal offered (list demo)))
+      (should (eq (selected-window) work-window)))))
+
 (ert-deftest tmux-control-test-window-buffer-sizes-follow-their-windows ()
   ;; A window render buffer has no process, so Emacs never reports its
   ;; window's new size; tmux must still be resized to it.
