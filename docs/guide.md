@@ -130,6 +130,12 @@ view stays put.  Because every session is its own buffer, you can also just keep
 several open and switch with the ordinary `C-x b` / `switch-to-buffer`; the
 session commands are the tmux-aware shortcut.
 
+A session renamed in tmux, by another client say, keeps its connection: the
+header line, the buffers named after it and `C-c C-r` all take the new name,
+and a buffer you named yourself keeps yours.  tmux can't tell a client that
+isn't connected, so reconnecting after a rename made meanwhile makes a new
+session of the old name.  A bookmark likewise keeps the name it was saved with.
+
 ### Which session wants you
 
 When you are looking at one session and **another connected session produces

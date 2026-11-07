@@ -5129,6 +5129,206 @@ killed with it."
           (should (= refreshed 2)))
       (kill-buffer ctrl))))
 
+;;; A session renamed from outside Emacs.
+
+(defmacro tmux-control-test--with-rename (&rest body)
+  "Run BODY in a controller for session \"work\", id $2, collecting `sent'.
+`sent' holds the commands the connection sent, the latest first."
+  (declare (indent 0))
+  `(let ((sent nil))
+     (setq-local tmux-control--session-id "$2")
+     (cl-letf (((symbol-function 'tmux-control--flush-output-batch) #'ignore)
+               ((symbol-function 'tmux-control--send-command)
+                (lambda (command &rest _) (push command sent))))
+       ,@body)))
+
+(defun tmux-control-test--make-pane (ctrl pane)
+  "Return a tiled pane buffer for PANE of session \"work\" under CTRL."
+  (tmux-control--make-pane-buffer
+   pane '(:w 40 :h 10) ctrl
+   (list :socket (buffer-local-value 'tmux-control--socket-name ctrl)
+         :host (buffer-local-value 'tmux-control--host ctrl)
+         :session "work" :fallback "work:"
+         :local-directory default-directory)))
+
+(defun tmux-control-test--make-pager (live)
+  "Return a scrollback pager for LIVE, as its session opens one."
+  (let ((pager (tmux-control--scrollback-buffer-for live))
+        (host (buffer-local-value 'tmux-control--host live))
+        (socket (buffer-local-value 'tmux-control--socket-name live)))
+    (with-current-buffer pager
+      (tmux-control-scrollback-mode)
+      (setq-local tmux-control--live-buffer live
+                  tmux-control--host host
+                  tmux-control--socket-name socket
+                  tmux-control--session "work"
+                  tmux-control--scrollback-target "work:"))
+    pager))
+
+(ert-deftest tmux-control-test-session-rename-reaches-every-buffer ()
+  ;; Each buffer of the connection keeps the session's name, and sends
+  ;; commands with it: all of them must follow, or they target a session
+  ;; tmux no longer has.
+  (tmux-control-test--with-controller "*tmux local:work*"
+    (tmux-control-test--with-rename
+      (let* ((tmux-control-window-buffers t)
+             (window (tmux-control--make-window-buffer "@6" ctrl))
+             (pane (tmux-control-test--make-pane ctrl "%3"))
+             (pager (tmux-control-test--make-pager window)))
+        (tmux-control--handle-line "%session-renamed $2 new name")
+        (dolist (buffer (list ctrl window pane pager))
+          (should (equal (buffer-local-value 'tmux-control--session buffer)
+                         "new name")))
+        (dolist (buffer (list ctrl window pane))
+          (should (equal (buffer-local-value 'tmux-control--fallback-target buffer)
+                         "new name:")))
+        (should (equal (buffer-local-value 'tmux-control--scrollback-target pager)
+                       "new name:"))
+        (should (equal (buffer-name ctrl) "*tmux local:new name*"))
+        (should (equal (buffer-name window) "*tmux local:new name @6*"))
+        (should (equal (buffer-name pane) "*tmux local:new name %3*"))
+        (should (equal (buffer-name pager) "*tmux local:new name @6 scrollback*"))
+        ;; A window list that failed between the rename and this
+        ;; notification is asked for again, and the session list as ever.
+        (should (seq-find (lambda (command)
+                            (string-prefix-p "list-windows -t \"new name\":" command))
+                          sent))
+        (should (seq-find (lambda (command)
+                            (string-prefix-p "list-sessions" command))
+                          sent))
+        (with-current-buffer window (tmux-control-new-window))
+        (should (equal (car sent) "new-window -t \"new name\":"))
+        ;; A new buffer starts with the new name.
+        (with-current-buffer (tmux-control--make-window-buffer "@7" ctrl)
+          (should (equal tmux-control--session "new name"))
+          (should (equal (buffer-name) "*tmux local:new name @7*")))
+        (should (eq (tmux-control--session-live-buffer nil "new name" "sock") ctrl))
+        (should-not (tmux-control--session-live-buffer nil "work" "sock"))))))
+
+(ert-deftest tmux-control-test-session-rename-of-another-session ()
+  ;; tmux tells every control client of every session's rename: only the
+  ;; session list changes for one that isn't this session.
+  (tmux-control-test--with-controller "*tmux local:work*"
+    (tmux-control-test--with-rename
+      (tmux-control--handle-line "%session-renamed $7 elsewhere")
+      (should (equal tmux-control--session "work"))
+      (should (equal tmux-control--fallback-target "work:"))
+      (should (equal (buffer-name ctrl) "*tmux local:work*"))
+      (should (equal (length sent) 1))
+      (should (string-prefix-p "list-sessions" (car sent)))
+      ;; Nor is one this session's before tmux has said which this is.
+      (setq-local tmux-control--session-id nil)
+      (tmux-control--handle-line "%session-renamed $2 elsewhere")
+      (should (equal tmux-control--session "work")))))
+
+(ert-deftest tmux-control-test-session-rename-stays-on-its-server ()
+  ;; Session names are per server: the same name on another socket or
+  ;; host is another session.
+  (tmux-control-test--with-controller "*tmux local:work*"
+    (let ((sockets (generate-new-buffer "*tmux local:work (other)*"))
+          (hosts (generate-new-buffer "*tmux dev:work*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer sockets
+              (tmux-control-mode)
+              (setq-local tmux-control--socket-name "other"
+                          tmux-control--session "work"))
+            (with-current-buffer hosts
+              (tmux-control-mode)
+              (setq-local tmux-control--host "dev"
+                          tmux-control--socket-name "sock"
+                          tmux-control--session "work"))
+            (tmux-control-test--with-rename
+              (tmux-control--handle-line "%session-renamed $2 new"))
+            (should (equal tmux-control--session "new"))
+            (dolist (buffer (list sockets hosts))
+              (should (equal (buffer-local-value 'tmux-control--session buffer)
+                             "work")))
+            (should (equal (buffer-name sockets) "*tmux local:work (other)*"))
+            (should (equal (buffer-name hosts) "*tmux dev:work*")))
+        (kill-buffer sockets)
+        (kill-buffer hosts)))))
+
+(ert-deftest tmux-control-test-session-rename-keeps-names-you-chose ()
+  ;; A buffer named after the session follows it, its server and socket
+  ;; kept.  One you named yourself stays as it is.
+  (tmux-control-test--with-controller "*tmux dev:work (build)*"
+    (setq-local tmux-control--host "dev"
+                tmux-control--socket-name "build")
+    (tmux-control-test--with-rename
+      (let* ((tmux-control-window-buffers t)
+             (window (tmux-control--make-window-buffer "@6" ctrl))
+             (mine (tmux-control--make-window-buffer "@7" ctrl)))
+        (with-current-buffer mine (rename-buffer "mine"))
+        (should (equal (buffer-name window) "*tmux dev:work (build) @6*"))
+        (tmux-control--handle-line "%session-renamed $2 new")
+        (should (equal (buffer-name ctrl) "*tmux dev:new (build)*"))
+        (should (equal (buffer-name window) "*tmux dev:new (build) @6*"))
+        (should (equal (buffer-name mine) "mine"))
+        (should (equal (buffer-local-value 'tmux-control--session mine) "new"))))))
+
+(ert-deftest tmux-control-test-session-rename-with-tab-names ()
+  ;; Named as their tabs read, window buffers and the tiled panes named
+  ;; after the session all take its new name.
+  (tmux-control-test--with-controller "*tmux local:work*"
+    (tmux-control-test--with-rename
+      (let ((tmux-control-window-buffer-names 'tab)
+            (tmux-control-window-buffers t)
+            (windows '("0\tagent\t1\t0\t@5" "1\tbash\t0\t0\t@6")))
+        (tmux-control--update-windows windows)
+        (let ((window (tmux-control--make-window-buffer "@6" ctrl))
+              (pane (tmux-control-test--make-pane ctrl "%3")))
+          (tmux-control--handle-line "%session-renamed $2 new")
+          (tmux-control--update-windows windows)
+          (should (equal (buffer-name ctrl) "*tmux local:new 0:agent*"))
+          (should (equal (buffer-name window) "*tmux local:new 1:bash*"))
+          (should (equal (buffer-name pane) "*tmux local:new %3*")))))))
+
+(ert-deftest tmux-control-test-session-rename-survives-reconnect ()
+  ;; The session is gone by its old name: a reconnect under that name, or a
+  ;; bookmark made now, would make a new empty session of that name.
+  (tmux-control-test--with-controller "*tmux local:work*"
+    (tmux-control-test--with-rename
+      (let* ((connected nil)
+             (tmux-control-window-buffers t)
+             (window (tmux-control--make-window-buffer "@6" ctrl))
+             (pager (tmux-control-test--make-pager window)))
+        (tmux-control--handle-line "%session-renamed $2 new")
+        (should (equal (alist-get 'tmux-control-session
+                                  (tmux-control--bookmark-record))
+                       "new"))
+        (cl-letf (((symbol-function 'tmux-control-connect)
+                   (lambda (&rest args) (push args connected))))
+          (with-current-buffer window (tmux-control-reconnect))
+          (should (equal (car connected) '(nil "sock" "new")))
+          ;; A pager outlives its window's buffer, and reconnects by itself.
+          (kill-buffer window)
+          (with-current-buffer pager (tmux-control-reconnect))
+          (should (equal (car connected) '(nil "sock" "new"))))
+        (should (= (length connected) 2))))))
+
+(ert-deftest tmux-control-test-rename-onto-a-dead-controllers-name ()
+  ;; A rename can give a session the name a disconnected controller still
+  ;; holds.  The live one is the connection: taking the dead one's buffer
+  ;; for it would attach the session a second time.
+  (tmux-control-test--with-controller "*tmux local:work*"
+    (let ((dead (generate-new-buffer "*tmux local:new*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer dead
+              (tmux-control-mode)
+              (setq-local tmux-control--socket-name "sock"
+                          tmux-control--session "new"))
+            ;; The dead one comes first in the buffer list.
+            (bury-buffer ctrl)
+            (tmux-control-test--with-rename
+              (tmux-control--handle-line "%session-renamed $2 new"))
+            (should (eq (tmux-control--session-live-buffer nil "new" "sock") ctrl))
+            (should (eq (tmux-control--connection-buffer nil "sock" "new") ctrl))
+            (should (equal (buffer-name dead) "*tmux local:new*"))
+            (should (equal (buffer-name ctrl) "*tmux local:new*<2>")))
+        (kill-buffer dead)))))
+
 (ert-deftest tmux-control-test-select-pane-crosses-windows ()
   ;; `tmux-control-select-pane' can be handed (or complete to) a pane in
   ;; another window, but tmux's bare `select-pane' cannot move the session

@@ -1652,6 +1652,51 @@ same rows in Eat as in tmux."
         (when (buffer-live-p other) (kill-buffer other))
         (call-process "tmux" nil nil nil "-L" other-socket "kill-server")))))
 
+(ert-deftest tmux-control-it-session-renamed-from-outside ()
+  "A session another client renames goes on working under its new name.
+Commands targeted the old name, which tmux refused: the tabs stopped
+following and a new window failed.  Another session's rename changes
+nothing here, and a reconnect finds the session rather than making a new
+one of the old name."
+  (tmux-control-it--with-session
+    (let ((session (lambda ()
+                     (buffer-local-value 'tmux-control--session controller)))
+          (sessions (lambda ()
+                      (split-string (tmux-control-it--tmux
+                                     "list-sessions" "-F" "#{session_name}")
+                                    "\n" t))))
+      (tmux-control-it--tmux "new-session" "-d" "-s" "side")
+      (tmux-control-it--tmux "rename-session" "-t" "side" "side2")
+      (should (tmux-control-it--pump-until
+               5 (lambda () (member "side2" (buffer-local-value
+                                             'tmux-control--sessions controller)))))
+      (should (equal (funcall session) "t"))
+      (tmux-control-it--tmux "rename-session" "-t" "t" "my work")
+      (should (tmux-control-it--pump-until
+               5 (lambda () (equal (funcall session) "my work"))))
+      (should (equal (buffer-name controller)
+                     (tmux-control--buffer-name nil tmux-control-it--socket "my work")))
+      (should (eq (tmux-control--session-live-buffer nil "my work" tmux-control-it--socket)
+                  controller))
+      (tmux-control-it--tmux "rename-window" "-t" "my work:" "fresh")
+      (should (tmux-control-it--pump-until
+               5 (lambda ()
+                   (seq-find (lambda (window) (equal (plist-get window :name) "fresh"))
+                             (buffer-local-value 'tmux-control--windows controller)))))
+      (with-current-buffer controller (tmux-control-new-window "made"))
+      (should (tmux-control-it--pump-until
+               5 (lambda ()
+                   (string-search "made" (tmux-control-it--tmux
+                                          "list-windows" "-t" "my work"
+                                          "-F" "#{window_name}")))))
+      (with-current-buffer controller (tmux-control-reconnect))
+      (should (tmux-control-it--ready controller))
+      (should (equal (sort (funcall sessions) #'string<) '("my work" "side2")))
+      ;; The new connection is told the session's id again.
+      (tmux-control-it--tmux "rename-session" "-t" "my work" "again")
+      (should (tmux-control-it--pump-until
+               5 (lambda () (equal (funcall session) "again")))))))
+
 (ert-deftest tmux-control-it-reconnect-fits-the-window-with-its-header-line ()
   "A reconnect in place sized tmux before the header line was back, one row
 taller than the window, so the view's top row was out of sight."
