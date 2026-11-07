@@ -92,7 +92,9 @@ bound in the live buffer; the rest are `M-x`, bind them to taste):
   restore the window's remembered position in the buffer, which a window
   that kept streaming in the background has long since outgrown.
 - `M-x tmux-control-new-window` creates a window (optionally named) and
-  switches to it.
+  switches to it.  The `+` at the end of the
+  [tab bar](#the-window-tab-bar) does the same in one click, without asking
+  for a name.
 - `M-x tmux-control-rename-window` renames a window, with completion over
   the session's windows.
 - `M-x tmux-control-kill-window` removes a window after confirmation, with
@@ -208,17 +210,24 @@ highlighted.  It is the at-a-glance map of the session: click a tab to switch
 to it, and watch a **dot** appear on any *background* window whose pane
 produces output while you are looking elsewhere — the "which window wants
 me?" signal.  Visiting a window clears its dot; a window that rings its bell
-shows a `!`.
+shows a `!`.  The `+` after the last tab opens a new window in the session and
+switches to it; tmux names it as it names any new window.
 
 The dot reflects genuine background output: the prompt/redraw burst that a
 connect, window switch, or frame resize provokes in every pane is deliberately
 *not* counted, so an idle session does not light up.  The bar costs one
-terminal row (tmux is sized to match, so nothing clips) and is hidden in the
-tiled view, where each pane already carries its own label.  Turn it off with:
+terminal row (tmux is sized to match, so nothing clips), and a tiled view shows
+it once, over its top-left pane.  Turn it off, or just the `+`, with:
 
 ```elisp
 (setq tmux-control-window-tab-bar nil)
+(setq tmux-control-window-tab-bar-new-button nil)
 ```
+
+Session and window names wider than 20 columns are cut in the header line, with
+`…` marking the cut, so one long name can't push the rest of the bar out of
+view; hover over a name to see all of it.  Set the width with
+`tmux-control-header-name-max-width`, or set it to nil to show names in full.
 
 The **mode line** names the host and the window you are looking at,
 `dev › build`, rather than the buffer's name (`*tmux dev:work @2*`), which
