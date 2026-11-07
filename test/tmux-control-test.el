@@ -1776,6 +1776,69 @@ each wrapped in an evolving prompt line and a status bar.")
     (setq-local tmux-control--tiled t)
     (should (string-match-p "1:beta" (tmux-control--window-tab-bar)))))
 
+(ert-deftest tmux-control-test-window-tab-bar-new-button ()
+  ;; The bar ends with a dim, clickable `+' that opens a new window; it is
+  ;; left off the read-only scrollback tabs and when the option is off.
+  (with-temp-buffer
+    (setq-local tmux-control--windows
+                '((:index "0" :name "alpha" :active t :bell nil)
+                  (:index "1" :name "beta" :active nil :bell nil)))
+    (let ((tmux-control-window-tab-bar-new-button t))
+      (let* ((bar (tmux-control--window-tab-bar))
+             (plus (string-match "+ \\'" bar))
+             (map (and plus (get-text-property plus 'keymap bar))))
+        (should plus)
+        (should (string-suffix-p "1:beta  + " (substring-no-properties bar)))
+        (should (eq (get-text-property plus 'face bar)
+                    'tmux-control-tab-inactive))
+        (should (get-text-property plus 'help-echo bar))
+        (should (eq (lookup-key map [header-line mouse-1])
+                    #'tmux-control--new-window-click))
+        ;; An unbound double click falls back to the single click's binding,
+        ;; so without this a double click would open two windows.
+        (should (eq (lookup-key map [header-line double-mouse-1]) #'ignore))
+        ;; Its hover highlight stops at the `+' rather than joining the
+        ;; last tab's (see `tmux-control--tab-mouse-face').
+        (should (get-text-property plus 'mouse-face bar))
+        (should-not (eq (get-text-property plus 'mouse-face bar)
+                        (get-text-property (string-match "1:beta" bar)
+                                           'mouse-face bar))))
+      (should-not (string-match-p
+                   "+" (substring-no-properties (tmux-control--window-tab-bar t)))))
+    (let ((tmux-control-window-tab-bar-new-button nil))
+      (should-not (string-match-p
+                   "+" (substring-no-properties (tmux-control--window-tab-bar))))))
+  ;; No windows yet: no tabs, and no lone `+' either.
+  (with-temp-buffer
+    (let ((tmux-control-window-tab-bar-new-button t))
+      (should (equal (tmux-control--window-tab-bar) "")))))
+
+(ert-deftest tmux-control-test-new-window-click-uses-clicked-session ()
+  ;; Emacs runs a header-line click in the SELECTED window's buffer, so the
+  ;; `+' takes its session from the window it was clicked in.
+  (let ((clicked (generate-new-buffer " *tmux-control-test-clicked*"))
+        (other (generate-new-buffer " *tmux-control-test-other*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (with-current-buffer clicked (setq-local tmux-control--session "work"))
+          (with-current-buffer other (setq-local tmux-control--session "main"))
+          (set-window-buffer (selected-window) other)
+          (let ((win (split-window)))
+            (set-window-buffer win clicked)
+            (with-current-buffer other
+              (should (equal (tmux-control-test--capture-commands
+                              (lambda ()
+                                (tmux-control--new-window-click
+                                 (list 'mouse-1
+                                       (list win 'header-line '(0 . 0) 0)))))
+                             ;; No name: a click never prompts.
+                             '("new-window -t \"work\":"))))
+            ;; The click leaves the selected window alone.
+            (should-not (eq (selected-window) win))))
+      (kill-buffer clicked)
+      (kill-buffer other))))
+
 (ert-deftest tmux-control-test-note-pane-activity ()
   ;; Output in a background window flags it; output in the current window, or
   ;; during the post-repaint quiet period, does not.
@@ -2606,6 +2669,50 @@ each wrapped in an evolving prompt line and a status bar.")
   (should (equal (tmux-control--mode-line-safe "a%b") "a%%b"))
   (should (equal (tmux-control--mode-line-safe "%999m") "%%999m"))
   (should (null (tmux-control--mode-line-safe nil))))
+
+(ert-deftest tmux-control-test-header-name-caps-width ()
+  ;; A name wider than the cap is cut to it, with `…' marking the cut, and one
+  ;; that fits is left alone.  The cap is columns, so a wide character counts
+  ;; double; nil means no cap.
+  (let ((tmux-control-header-name-max-width 10))
+    (should (equal (tmux-control--header-name "0123456789") "0123456789"))
+    (should (equal (tmux-control--header-name "0123456789a") "012345678…"))
+    (should (equal (tmux-control--header-name "日本語日本語") "日本語日…"))
+    (should (null (tmux-control--header-name nil))))
+  (let ((tmux-control-header-name-max-width nil)
+        (long (make-string 100 ?a)))
+    (should (equal (tmux-control--header-name long) long))))
+
+(ert-deftest tmux-control-test-header-name-cuts-before-escaping ()
+  ;; SECURITY: cutting after the `%'s are doubled could split a `%%', leaving a
+  ;; lone `%' for the mode-line engine to expand.
+  (let ((tmux-control-header-name-max-width 5))
+    (should (equal (tmux-control--header-name "abc%def") "abc%%…"))
+    (should (equal (tmux-control--header-name "ab%%") "ab%%%%"))))
+
+(ert-deftest tmux-control-test-header-shortens-long-names ()
+  ;; Window tabs, the session label and the corner all shorten long names,
+  ;; so one long name can't push the rest of the bar out of view.  Hovering
+  ;; still shows the whole name.
+  (let ((long "feature-header-line-redesign-agent")
+        (tmux-control-header-name-max-width 10))
+    (with-temp-buffer
+      (setq-local tmux-control--windows
+                  (list (list :index "0" :name long :active t)))
+      (let ((bar (tmux-control--window-tab-bar)))
+        (should (string-match-p "0:feature-h… " (substring-no-properties bar)))
+        (should (string-match-p long (get-text-property 1 'help-echo bar)))))
+    (with-temp-buffer
+      (setq-local tmux-control--host "aurora")
+      (setq-local tmux-control--session long)
+      (let ((label (tmux-control--session-label)))
+        (should (string-suffix-p "aurora:feature-h…"
+                                 (substring-no-properties label)))
+        (should (string-match-p long (get-text-property 1 'help-echo label))))
+      (let* ((other (current-buffer))
+             (token (tmux-control--corner-session other)))
+        (should (string-match-p "feature-h… ●" (substring-no-properties token)))
+        (should (string-match-p long (get-text-property 1 'help-echo token)))))))
 
 (ert-deftest tmux-control-test-window-tab-bar-escapes-percent ()
   ;; SECURITY: a window name (attacker-influenced) reaches the header line, an

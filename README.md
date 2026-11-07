@@ -71,6 +71,7 @@ attaches, typing a new name creates it.
   looking at, with an activity **dot** on
   background windows; flip them like browser tabs (`C-c C-n` / `C-c C-p`),
   jump straight to one with `C-c 0`…`C-c 9`, or pick from a chooser (`C-c C-w`).
+  Click the `+` at the end of the bar to open a new window.
   Each visited window keeps its own scrollback across flips and **keeps
   streaming in the background** — flip back and see everything it printed
   while you were away.

@@ -555,6 +555,23 @@ a tmux session, and the natural companion to `tmux-control-next-window' and
 friends.  Set to nil to hide it."
   :type 'boolean)
 
+(defcustom tmux-control-window-tab-bar-new-button t
+  "Non-nil ends the window tab bar with a `+' that opens a new window.
+Clicking it creates a window in the session and switches to it, as
+`tmux-control-new-window' does, without asking for a name: tmux names it
+as it names any new window.  Shown only with `tmux-control-window-tab-bar'
+on.  Set to nil to hide it."
+  :type 'boolean
+  :package-version '(tmux-control . "0.9.0"))
+
+(defcustom tmux-control-header-name-max-width 20
+  "Widest a session or window name may be in the header line, in columns.
+A wider name is cut to this width, with `…' marking the cut, so that one
+long name can't push the rest of the bar out of view.  Hovering over the
+name shows all of it.  Set to nil to show names in full."
+  :type '(choice (const :tag "No limit" nil) natnum)
+  :package-version '(tmux-control . "0.9.0"))
+
 (defcustom tmux-control-allow-clipboard-write nil
   "Non-nil lets a tmux pane drive the Emacs `kill-ring' / clipboard (OSC 52).
 A program running in any pane can emit an OSC 52 escape to set (or read) the
@@ -4176,6 +4193,17 @@ displayed session/window identity, leak buffer or file state via constructs
 like %b/%f, or hang Emacs with a huge field width such as %999999999m."
   (and string (replace-regexp-in-string "%" "%%" string)))
 
+(defun tmux-control--header-name (name)
+  "Return NAME shortened for the header line, and safe to place there.
+See `tmux-control-header-name-max-width'.  NAME is cut before its `%'s are
+doubled: cutting after could split a `%%' and leave a lone `%' for the
+mode-line engine to expand (see `tmux-control--mode-line-safe')."
+  (let ((width tmux-control-header-name-max-width))
+    (tmux-control--mode-line-safe
+     (if (and name width (> (string-width name) width))
+         (truncate-string-to-width name width nil nil "…")
+       name))))
+
 (defun tmux-control--tab-mouse-face ()
   "Return a fresh `highlight'-equivalent face for a tab's `mouse-face'.
 Header-line mouse highlighting spans the maximal run of text sharing one
@@ -4252,7 +4280,7 @@ The session NAME is plain and a bright `●' marks that it wants attention;
 clicking switches to it."
   (let* ((sid (buffer-local-value 'tmux-control--session buffer))
          (host (buffer-local-value 'tmux-control--host buffer))
-         (tok (concat " " (propertize (tmux-control--mode-line-safe sid)
+         (tok (concat " " (propertize (tmux-control--header-name sid)
                                       'face 'tmux-control-tab-session)
                       (propertize " ●" 'face 'tmux-control-tab-activity)))
          (map (make-sparse-keymap)))
@@ -4339,12 +4367,44 @@ switcher."
         (tmux-control--do-select-window index)))
     map))
 
+(defun tmux-control--new-window-click (event)
+  "Create a new tmux window from a click on the tab bar's `+'.
+EVENT is the click.  Emacs runs a header-line click in the selected
+window's buffer, so the window is made in the session of the buffer that
+was clicked, and the selected window is left as it was."
+  (interactive "e")
+  (let ((window (posn-window (event-start event))))
+    (with-current-buffer (if (window-live-p window)
+                             (window-buffer window)
+                           (current-buffer))
+      (tmux-control-new-window nil))))
+
+(defvar tmux-control--new-window-button-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [header-line mouse-1] #'tmux-control--new-window-click)
+    ;; An unbound double click runs the single click's binding, so a quick
+    ;; double click would open two windows (a triple click falls back to
+    ;; this binding too).
+    (define-key map [header-line double-mouse-1] #'ignore)
+    map)
+  "Header-line keymap of the tab bar's `+'.")
+
+(defun tmux-control--new-window-button ()
+  "Return the tab bar's `+', which opens a new window on a click."
+  (propertize " + "
+              'face 'tmux-control-tab-inactive
+              'mouse-face (tmux-control--tab-mouse-face)
+              'help-echo "Create a new tmux window"
+              'keymap tmux-control--new-window-button-map))
+
 (defun tmux-control--window-tab-bar (&optional no-keymap)
   "Return the header-line string of the session's windows as tabs.
 Empty before the first window list arrives.  With NO-KEYMAP the tabs are not
 clickable -- used for the read-only scrollback header, which renders the live
-buffer's tabs purely for orientation.  In a per-window render buffer the
-window list and activity state live on the controller; render from there."
+buffer's tabs purely for orientation -- and the new-window `+' that
+otherwise ends the bar (see `tmux-control-window-tab-bar-new-button') is
+left off.  In a per-window render buffer the window list and activity state
+live on the controller; render from there."
   (if (and tmux-control--controller
            (buffer-live-p tmux-control--controller)
            (null tmux-control--windows))
@@ -4352,32 +4412,36 @@ window list and activity state live on the controller; render from there."
         (tmux-control--window-tab-bar no-keymap))
     (if (null tmux-control--windows)
         ""
-    (mapconcat
-     (lambda (w)
-       (let* ((idx (plist-get w :index))
-              (name (plist-get w :name))
-              (active (plist-get w :active))
-              (busy (and (not active)
-                         (hash-table-p tmux-control--activity)
-                         (gethash idx tmux-control--activity)))
-              (mark (cond ((plist-get w :bell) " !")
-                          (busy " ●")
-                          (t "")))
-              (face (cond (active 'tmux-control-tab-active)
-                          (busy 'tmux-control-tab-activity)
-                          (t 'tmux-control-tab-inactive)))
-              (tab (propertize (format " %s:%s%s " idx
-                                       (tmux-control--mode-line-safe name) mark)
-                               'face face
-                               'mouse-face (tmux-control--tab-mouse-face)
-                               'help-echo (format "Switch to tmux window %s (%s)"
-                                                  idx name))))
-         (unless no-keymap
-           (put-text-property 0 (length tab) 'keymap
-                              (tmux-control--tab-keymap idx) tab))
-         tab))
-     tmux-control--windows
-     ""))))
+      (concat
+       (mapconcat
+        (lambda (w)
+          (let* ((idx (plist-get w :index))
+                 (name (plist-get w :name))
+                 (active (plist-get w :active))
+                 (busy (and (not active)
+                            (hash-table-p tmux-control--activity)
+                            (gethash idx tmux-control--activity)))
+                 (mark (cond ((plist-get w :bell) " !")
+                             (busy " ●")
+                             (t "")))
+                 (face (cond (active 'tmux-control-tab-active)
+                             (busy 'tmux-control-tab-activity)
+                             (t 'tmux-control-tab-inactive)))
+                 (tab (propertize (format " %s:%s%s " idx
+                                          (tmux-control--header-name name) mark)
+                                  'face face
+                                  'mouse-face (tmux-control--tab-mouse-face)
+                                  'help-echo (format "Switch to tmux window %s (%s)"
+                                                     idx name))))
+            (unless no-keymap
+              (put-text-property 0 (length tab) 'keymap
+                                 (tmux-control--tab-keymap idx) tab))
+            tab))
+        tmux-control--windows
+        "")
+       (if (and tmux-control-window-tab-bar-new-button (not no-keymap))
+           (tmux-control--new-window-button)
+         "")))))
 
 (defun tmux-control--session-label ()
   "Return the current connection's HOST:SESSION label for the header line.
@@ -4388,7 +4452,7 @@ server is always named (see `tmux-control--connection-name')."
          (hl (if (and host (not (string-empty-p host))) host "local"))
          (s (concat (propertize (format " %s:" (tmux-control--mode-line-safe hl))
                                 'face 'tmux-control-tab-inactive)
-                    (propertize (tmux-control--mode-line-safe tmux-control--session)
+                    (propertize (tmux-control--header-name tmux-control--session)
                                 'face 'tmux-control-tab-session))))
     (propertize s 'help-echo
                 (format "tmux session %s"
