@@ -1016,6 +1016,18 @@ kills, which are deliberate.")
 (defvar tmux-control--command-batch nil
   "While `tmux-control--with-one-write' runs, (PROCESS . LINES) to write.")
 
+(defun tmux-control--write (process string)
+  "Write STRING to tmux's PROCESS, which may be on its way out.
+`process-live-p' cannot say: tmux's client can close its end of the pipe
+or exit before Emacs hears of it, and the write signals then.  Commands
+go out from the process filter too, where that error would lose the rest
+of what tmux said, `%exit' among it.  Ignoring it loses nothing: the
+sentinel reports the connection, and a command not written stays on the
+queue, unacknowledged."
+  (condition-case nil
+      (process-send-string process string)
+    (error nil)))
+
 (defmacro tmux-control--with-one-write (&rest body)
   "Run BODY, writing the commands it sends this buffer's tmux in one go.
 tmux runs the commands it reads together before it reads any pane's
@@ -1029,7 +1041,7 @@ with it."
        (let ((process (car tmux-control--command-batch))
              (lines (cdr tmux-control--command-batch)))
          (when (and lines (process-live-p process))
-           (process-send-string process (apply #'concat (nreverse lines))))))))
+           (tmux-control--write process (apply #'concat (nreverse lines))))))))
 
 ;;;; Terminal interface
 
@@ -1666,9 +1678,9 @@ window list leave one out after all, its buffer goes then
 \(`tmux-control--update-windows').")
 (defvar-local tmux-control--session-id nil
   "On the controller: tmux's id for the session, as \"$3\", once known.
-tmux reports every session's window switches to every control client,
-so a %session-window-changed is this session's only when it names this
-id.")
+tmux reports every session's window switches and renames to every control
+client, so a %session-window-changed or %session-renamed is this session's
+only when it names this id.")
 (defvar-local tmux-control--window-history nil
   "On the controller: the session's window ids, the latest current first.
 The stack tmux's `last-window' takes from: each switch pushes the window
@@ -2234,16 +2246,22 @@ session (tmux attaches if it exists, otherwise creates it)."
 (defun tmux-control--connection-buffer (host socket session)
   "Find the controller for HOST, SOCKET and SESSION, including a dead one.
 Use connection metadata rather than buffer names: names may be changed, and
-the same session name can exist on several sockets."
-  (cl-find-if
-   (lambda (buffer)
-     (with-current-buffer buffer
-       (and (derived-mode-p 'tmux-control-mode)
-            (null tmux-control--controller)
-            (equal (or host "") (or tmux-control--host ""))
-            (equal socket tmux-control--socket-name)
-            (equal session tmux-control--session))))
-   (buffer-list)))
+the same session name can exist on several sockets.  A live controller is
+found first: tmux renaming a session can give it a name a dead one holds."
+  (let ((controllers
+         (seq-filter
+          (lambda (buffer)
+            (with-current-buffer buffer
+              (and (derived-mode-p 'tmux-control-mode)
+                   (null tmux-control--controller)
+                   (equal (or host "") (or tmux-control--host ""))
+                   (equal socket tmux-control--socket-name)
+                   (equal session tmux-control--session))))
+          (buffer-list))))
+    (or (seq-find (lambda (buffer)
+                    (process-live-p (buffer-local-value 'tmux-control--process buffer)))
+                  controllers)
+        (car controllers))))
 
 (defun tmux-control--session-live-buffer (host session &optional socket)
   "Return a live controller for HOST/SESSION on SOCKET, or nil.
@@ -7682,6 +7700,10 @@ backing off to the cap."
       (setq tmux-control--session-id (match-string 1 line)))
      ((or (string-prefix-p "%sessions-changed" line)
           (string-prefix-p "%session-renamed " line))
+      ;; tmux tells every control client of every session's rename, by id.
+      (when (and (string-match "\\`%session-renamed \\(\\$[0-9]+\\) \\(.+\\)\\'" line)
+                 (equal (match-string 1 line) tmux-control--session-id))
+        (tmux-control--follow-session-rename (match-string 2 line)))
       (tmux-control--refresh-sessions))
      ((or (string-prefix-p "%window-add " line)
                (string-prefix-p "%window-close " line)
@@ -9877,7 +9899,7 @@ so every reply stays matched to the right handler on one queue."
           (tmux-control--arm-command-watchdog)
           (if (eq (car-safe tmux-control--command-batch) tmux-control--process)
               (push (concat command "\n") (cdr tmux-control--command-batch))
-            (process-send-string tmux-control--process
+            (tmux-control--write tmux-control--process
                                  (concat command "\n"))))))))
 
 (defun tmux-control--arm-command-watchdog ()
@@ -10501,30 +10523,46 @@ Re-applies the attempt count after the connect (which resets the buffer's
 locals) so a still-failing link advances toward the cap instead of looping
 at zero; a successful reconnect resets the count when data reaches the
 filter.  Runs inside `save-window-excursion' so a timer-driven reconnect
-never steals the window the user is looking at."
+never steals the window the user is looking at.
+
+A live connection holding the session's name is another session, which
+tmux has renamed since BUFFER lost its own.  Connecting by that name
+would reset that connection and leave BUFFER dead to try again, so
+BUFFER gives up instead."
   (when (and (buffer-live-p buffer)
              (not (process-live-p (buffer-local-value 'tmux-control--process buffer))))
     (with-current-buffer buffer
-      (let ((n (1+ tmux-control--auto-reconnect-attempts))
-            (host tmux-control--host)
-            (socket tmux-control--socket-name)
-            (session tmux-control--session))
-        (setq tmux-control--auto-reconnect-timer nil)
-        (save-window-excursion
-          (let ((display-buffer-overriding-action '((display-buffer-same-window))))
-            (ignore-errors (tmux-control-connect host socket session))))
-        (when (buffer-live-p buffer)
-          (with-current-buffer buffer
-            (setq tmux-control--auto-reconnect-attempts n)
-            ;; A normal connect installs a live process whose own sentinel will
-            ;; drive the next retry on failure.  But if the connect threw or
-            ;; produced no process, no sentinel is coming -- re-arm here (while
-            ;; the budget lasts) so a transient failure still backs off toward
-            ;; the cap instead of stalling silently.
-            (when (and (not (process-live-p tmux-control--process))
-                       (< tmux-control--auto-reconnect-attempts
-                          tmux-control--auto-reconnect-max))
-              (tmux-control--schedule-auto-reconnect buffer))))))))
+      (if-let* ((live (tmux-control--session-live-buffer
+                       tmux-control--host tmux-control--session
+                       tmux-control--socket-name)))
+          (progn
+            (tmux-control--cancel-auto-reconnect)
+            (tmux-control--message
+             (format "not reconnecting: %s is another session now, connected in %s"
+                     tmux-control--session (buffer-name live)))
+            (force-mode-line-update t)
+            ;; Not coming back, so its frozen cell leaves any flock.
+            (tmux-control--schedule-reflock))
+        (let ((n (1+ tmux-control--auto-reconnect-attempts))
+              (host tmux-control--host)
+              (socket tmux-control--socket-name)
+              (session tmux-control--session))
+          (setq tmux-control--auto-reconnect-timer nil)
+          (save-window-excursion
+            (let ((display-buffer-overriding-action '((display-buffer-same-window))))
+              (ignore-errors (tmux-control-connect host socket session))))
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer
+              (setq tmux-control--auto-reconnect-attempts n)
+              ;; A normal connect installs a live process whose own sentinel
+              ;; will drive the next retry on failure.  But if the connect
+              ;; threw or produced no process, no sentinel is coming -- re-arm
+              ;; here (while the budget lasts) so a transient failure still
+              ;; backs off toward the cap instead of stalling silently.
+              (when (and (not (process-live-p tmux-control--process))
+                         (< tmux-control--auto-reconnect-attempts
+                            tmux-control--auto-reconnect-max))
+                (tmux-control--schedule-auto-reconnect buffer)))))))))
 
 (defun tmux-control--schedule-auto-reconnect (buffer)
   "Schedule an in-place reconnect of BUFFER after exponential backoff."
@@ -10975,6 +11013,56 @@ Its scrollback buffer, if it has one, is renamed after it."
             (rename-buffer (tmux-control--derived-buffer-name (buffer-name buffer)
                                                               "scrollback")
                            t)))))))
+
+(defconst tmux-control--generated-name-rest
+  (rx string-start
+      (? " " (or (seq (any "@%") (+ digit))
+                 (seq (+ digit) ":" (* anything))))
+      (? " scrollback")
+      "*" (? "<" (+ digit) ">")
+      (? " " (any "@%") (+ digit))
+      (? " scrollback")
+      (? "<" (+ digit) ">")
+      string-end)
+  "Matches what follows the session in a buffer name tmux-control made.
+That is the window, pane or tab the buffer is for and `scrollback' for a
+pager.  They go inside the closing asterisk, or after a name Emacs
+numbered, as `tmux-control--derived-buffer-name' adds them.")
+
+(defun tmux-control--follow-session-rename (name)
+  "Take NAME as the session's name, now that tmux has renamed it.
+Must run in the controller.  Commands target the session by name, and a
+reconnect and finding the connection go by it, so every buffer holding
+the name takes the new one: the controller, its render buffers and
+their pagers, a pager perhaps outliving the buffer it came from.  A
+buffer named after the session is renamed with it, and one you named
+yourself is left as it is."
+  (let* ((host tmux-control--host)
+         (socket tmux-control--socket-name)
+         (old tmux-control--session)
+         (old-target (concat old ":"))
+         (old-prefix (string-remove-suffix
+                      "*" (tmux-control--buffer-name host socket old)))
+         (new-prefix (string-remove-suffix
+                      "*" (tmux-control--buffer-name host socket name))))
+    (dolist (buffer (buffer-list))
+      (with-current-buffer buffer
+        (when (and (equal old tmux-control--session)
+                   (equal socket tmux-control--socket-name)
+                   (equal (or host "") (or tmux-control--host "")))
+          (setq tmux-control--session name)
+          (dolist (target '(tmux-control--fallback-target
+                            tmux-control--scrollback-target))
+            (when (equal (symbol-value target) old-target)
+              (set target (concat name ":"))))
+          (when (string-prefix-p old-prefix (buffer-name))
+            (let ((rest (substring (buffer-name) (length old-prefix))))
+              (when (string-match-p tmux-control--generated-name-rest rest)
+                (rename-buffer (concat new-prefix rest) t)))))))
+    ;; What was asked for by the old name since tmux renamed the session
+    ;; failed.  The window list's reply also repaints the header line.
+    (tmux-control--refresh-windows)
+    (tmux-control--refresh-pane-window-map)))
 
 (defun tmux-control--window-buffer-killed ()
   "Deregister a killed window render buffer from its controller."
