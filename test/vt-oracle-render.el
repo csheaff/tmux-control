@@ -11,7 +11,9 @@
 ;; its UTF-8 reassembly and any Eat adjustments, then
 ;; `tmux-control--flush-display') into a fresh WxH terminal.
 ;; OUT.json gets each screen's rows, the cursor as shown (1-based) and as
-;; Eat records it, or the error the render signalled.
+;; the terminal records it, or the error the render signalled.  With
+;; TMUX_CONTROL_RENDERER=ghostel in the environment, and Ghostel on the
+;; load path, the terminal is Ghostel's.
 
 ;;; Code:
 
@@ -29,29 +31,33 @@ second column; `capture-pane' prints only the glyph."
       (setq beg (1+ beg)))
     (apply #'string (nreverse out))))
 
+(when-let* ((renderer (getenv "TMUX_CONTROL_RENDERER")))
+  (setq tmux-control-renderer (intern renderer)))
+
 (defun tmux-control-vt-oracle--render (width height bytes)
   "Render BYTES in a fresh WIDTHxHEIGHT tmux-control terminal; return an alist."
   (with-temp-buffer
     (tmux-control--reset-buffer)
-    (let ((term tmux-control--terminal))
-      (eat-term-resize term width height)
-      (tmux-control--feed-terminal (decode-coding-string bytes 'utf-8-unix))
-      (tmux-control--flush-display nil)
-      (let* ((top (eat-term-display-beginning term))
-             (rows (split-string (tmux-control-vt-oracle--visible
-                                  top (eat-term-end term))
-                                 "\n"))
-             (shown (eat-term-display-cursor term))
-             (bol (save-excursion (goto-char shown) (line-beginning-position)))
-             ;; Eat's own record of the cursor.  After a character fills the
-             ;; last column it holds column WIDTH+1, a pending wrap, as tmux
-             ;; does, while the cursor is shown on that character.
-             (cursor (eat--t-disp-cursor (eat--t-term-display term))))
-        `((rows . ,(vconcat rows))
-          (cy . ,(1+ (count-lines top bol)))
-          (cx . ,(1+ (string-width (tmux-control-vt-oracle--visible bol shown))))
-          (sy . ,(eat--t-cur-y cursor))
-          (sx . ,(eat--t-cur-x cursor)))))))
+    (when (and (eq tmux-control-renderer 'ghostel) (not tmux-control--ghostel))
+      (error "Ghostel did not load"))
+    (tmux-control--term-resize width height)
+    (tmux-control--feed-terminal (decode-coding-string bytes 'utf-8-unix))
+    (tmux-control--flush-display nil)
+    (let* ((top (tmux-control--term-screen-start))
+           (rows (split-string (tmux-control--term-screen-text) "\n"))
+           (shown (tmux-control--term-cursor))
+           (bol (save-excursion (goto-char shown) (line-beginning-position)))
+           ;; The terminal's own record of the cursor.  After a character
+           ;; fills the last column Eat holds column WIDTH+1, a pending
+           ;; wrap, as tmux does, while the cursor is shown on that
+           ;; character.  Ghostel keeps it on the last column.
+           (cursor (tmux-control--term-cursor-xy)))
+      `((rows . ,(vconcat rows))
+        (cy . ,(1+ (count-lines top bol)))
+        (cx . ,(1+ (string-width (tmux-control-vt-oracle--visible bol shown))))
+        (sy . ,(1+ (cdr cursor)))
+        (sx . ,(1+ (car cursor)))
+        (wrap . ,(if (tmux-control--term-pending-wrap-known-p) t :json-false))))))
 
 (let* ((in (pop command-line-args-left))
        (out (pop command-line-args-left))

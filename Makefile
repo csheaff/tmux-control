@@ -12,10 +12,18 @@ EMACS  ?= emacs
 EAT_DIR ?= $(HOME)/.emacs.d/straight/build/eat
 PYTHON ?= python3
 
+# GHOSTEL_DIR, a directory with ghostel.el and its native module, puts
+# Ghostel on the load path, so the tests of the optional Ghostel renderer
+# run instead of skipping:
+#
+#   make test GHOSTEL_DIR=/path/to/ghostel
+GHOSTEL_DIR ?=
+GHOSTEL_L = $(if $(GHOSTEL_DIR),-L "$(GHOSTEL_DIR)")
+
 .PHONY: test
 test:
 	$(EMACS) -Q --batch \
-	  -L "$(EAT_DIR)" -L . \
+	  -L "$(EAT_DIR)" $(GHOSTEL_L) -L . \
 	  -l tmux-control.el \
 	  -l test/tmux-control-test.el \
 	  -f ert-run-tests-batch-and-exit
@@ -37,7 +45,7 @@ compile:
 .PHONY: test-elc
 test-elc: compile
 	$(EMACS) -Q --batch \
-	  -L "$(EAT_DIR)" -L . \
+	  -L "$(EAT_DIR)" $(GHOSTEL_L) -L . \
 	  -l tmux-control.elc \
 	  -l test/tmux-control-test.el \
 	  -f ert-run-tests-batch-and-exit
@@ -75,7 +83,7 @@ test-scroll-trace:
 .PHONY: test-integration
 test-integration:
 	$(EMACS) -Q --batch \
-	  -L "$(EAT_DIR)" -L . \
+	  -L "$(EAT_DIR)" $(GHOSTEL_L) -L . \
 	  -l tmux-control.el \
 	  -l test/tmux-control-integration.el \
 	  -f ert-run-tests-batch-and-exit
@@ -87,7 +95,7 @@ test-integration:
 #   make test-vt-oracle
 .PHONY: test-vt-oracle
 test-vt-oracle:
-	EMACS="$(EMACS)" EAT_DIR="$(EAT_DIR)" $(PYTHON) test/vt-oracle.py corpus
+	EMACS="$(EMACS)" EAT_DIR="$(EAT_DIR)" GHOSTEL_DIR="$(GHOSTEL_DIR)" $(PYTHON) test/vt-oracle.py corpus
 
 # Look for new divergences with random escape sequences; prints minimized,
 # corpus-ready lines.  Pass options through VT_FUZZ, e.g.
@@ -95,4 +103,4 @@ test-vt-oracle:
 #   make vt-fuzz VT_FUZZ="--n 400 --seed 7 -s 20x8"
 .PHONY: vt-fuzz
 vt-fuzz:
-	EMACS="$(EMACS)" EAT_DIR="$(EAT_DIR)" $(PYTHON) test/vt-oracle.py fuzz $(VT_FUZZ)
+	EMACS="$(EMACS)" EAT_DIR="$(EAT_DIR)" GHOSTEL_DIR="$(GHOSTEL_DIR)" $(PYTHON) test/vt-oracle.py fuzz $(VT_FUZZ)
