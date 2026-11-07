@@ -999,6 +999,18 @@ kills, which are deliberate.")
 (defvar tmux-control--command-batch nil
   "While `tmux-control--with-one-write' runs, (PROCESS . LINES) to write.")
 
+(defun tmux-control--write (process string)
+  "Write STRING to tmux's PROCESS, which may be on its way out.
+`process-live-p' cannot say: tmux's client can close its end of the pipe
+or exit before Emacs hears of it, and the write signals then.  Commands
+go out from the process filter too, where that error would lose the rest
+of what tmux said, `%exit' among it.  Ignoring it loses nothing: the
+sentinel reports the connection, and a command not written stays on the
+queue, unacknowledged."
+  (condition-case nil
+      (process-send-string process string)
+    (error nil)))
+
 (defmacro tmux-control--with-one-write (&rest body)
   "Run BODY, writing the commands it sends this buffer's tmux in one go.
 tmux runs the commands it reads together before it reads any pane's
@@ -1012,7 +1024,7 @@ with it."
        (let ((process (car tmux-control--command-batch))
              (lines (cdr tmux-control--command-batch)))
          (when (and lines (process-live-p process))
-           (process-send-string process (apply #'concat (nreverse lines))))))))
+           (tmux-control--write process (apply #'concat (nreverse lines))))))))
 
 ;;;; Terminal interface
 
@@ -9811,7 +9823,7 @@ so every reply stays matched to the right handler on one queue."
           (tmux-control--arm-command-watchdog)
           (if (eq (car-safe tmux-control--command-batch) tmux-control--process)
               (push (concat command "\n") (cdr tmux-control--command-batch))
-            (process-send-string tmux-control--process
+            (tmux-control--write tmux-control--process
                                  (concat command "\n"))))))))
 
 (defun tmux-control--arm-command-watchdog ()

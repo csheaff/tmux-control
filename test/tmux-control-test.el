@@ -5411,6 +5411,27 @@ killed with it."
         (with-current-buffer lost (tmux-control--cancel-auto-reconnect))
         (kill-buffer lost)))))
 
+(ert-deftest tmux-control-test-write-to-a-connection-going-down ()
+  ;; tmux's client can be gone before Emacs knows it, so `process-live-p'
+  ;; passes and the write signals, here in a process filter: that lost the
+  ;; rest of what tmux had said, and killed a batch Emacs.  A stub, because
+  ;; a real closed pipe can kill a batch Emacs with SIGPIPE before it signals.
+  (dolist (failure '("Process %s no longer connected to pipe; closed it"
+                     "Process %s not running: finished"))
+    (tmux-control-test--with-controller "*tmux local:work*"
+      (cl-letf (((symbol-function 'process-send-string)
+                 (lambda (process _string)
+                   (error failure (process-name process)))))
+        (tmux-control--filter tmux-control--process
+                              "%sessions-changed\n%exit server exited\n")
+        (should (equal tmux-control--exit-reason "server exited"))
+        ;; Commands written together fail together.
+        (tmux-control--with-one-write
+          (tmux-control--send-command "list-windows"))
+        ;; No reply will come: they stay on the queue for the sentinel,
+        ;; which counts any input among them as unacknowledged.
+        (should (= (length tmux-control--command-queue) 2))))))
+
 (ert-deftest tmux-control-test-select-pane-crosses-windows ()
   ;; `tmux-control-select-pane' can be handed (or complete to) a pane in
   ;; another window, but tmux's bare `select-pane' cannot move the session
