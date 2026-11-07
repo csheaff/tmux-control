@@ -4385,15 +4385,11 @@ window stays as it was."
 
 (defun tmux-control--new-window-click (event)
   "Create a new tmux window from a click on the tab bar's `+'.
-EVENT is the click.  Emacs runs a header-line click in the selected
-window's buffer, so the window is made in the session of the buffer that
-was clicked, and the selected window is left as it was."
+EVENT is the click.  The window is made in the session of the header
+clicked, and the selected window stays as it was."
   (interactive "e")
-  (let ((window (posn-window (event-start event))))
-    (with-current-buffer (if (window-live-p window)
-                             (window-buffer window)
-                           (current-buffer))
-      (tmux-control-new-window nil))))
+  (with-current-buffer (window-buffer (tmux-control--click-window event))
+    (tmux-control-new-window nil)))
 
 (defvar tmux-control--new-window-button-map
   (let ((map (make-sparse-keymap)))
