@@ -5450,6 +5450,42 @@ killed with it."
                   (should-not (get-buffer-window live t)))))
           (kill-buffer elsewhere))))))
 
+;; A window switch tmux reports in the same read as the attach.
+(ert-deftest tmux-control-test-giving-way-takes-over-a-render-buffers-window ()
+  ;; The switch shows a render buffer in the controller's place, and the
+  ;; buffer goes with the controller.  Looking only for the controller found
+  ;; no window, which Emacs then filled with whatever came next.
+  (let (later)
+    (tmux-control-test--with-controller "*tmux local:my_proj*"
+      (setq-local tmux-control--session "my_proj")
+      (let ((live ctrl) (elsewhere (generate-new-buffer "*tc-elsewhere*")))
+        (unwind-protect
+            (tmux-control-test--with-controller "*tmux local:my.proj*"
+              (tmux-control-test--with-rename
+                (tmux-control-test--connecting "my.proj")
+                ;; As `tmux-control-connect' does.
+                (add-hook 'kill-buffer-hook #'tmux-control--kill-process nil t)
+                (save-window-excursion
+                  (delete-other-windows)
+                  (set-window-buffer (selected-window) elsewhere)
+                  (set-window-buffer (selected-window) ctrl)
+                  (bury-buffer live)
+                  (cl-letf (((symbol-function 'tmux-control--seed-window-buffer)
+                             #'ignore)
+                            ((symbol-function 'run-at-time)
+                             (lambda (_time _repeat fn &rest args)
+                               (when (eq fn 'tmux-control--give-way)
+                                 (push (lambda () (apply fn args)) later)))))
+                    (tmux-control--handle-line "%session-changed $4 my_proj")
+                    (tmux-control--handle-line "%session-window-changed $4 @5"))
+                  (let ((render (tmux-control--window-buffer "@5")))
+                    (should (eq (window-buffer (selected-window)) render))
+                    (funcall (car later))
+                    (should-not (buffer-live-p ctrl))
+                    (should-not (buffer-live-p render)))
+                  (should (eq (window-buffer (selected-window)) live)))))
+          (kill-buffer elsewhere))))))
+
 (ert-deftest tmux-control-test-connecting-past-a-dead-controller ()
   ;; A disconnected controller holding the name can't show the session, so
   ;; it's no reason to give way.  As with a rename onto its name, the live

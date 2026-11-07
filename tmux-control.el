@@ -10932,19 +10932,25 @@ session isn't found, so this can be a second one: then it gives way."
   (if (tmux-control--session-live-buffer
        tmux-control--host name tmux-control--socket-name)
       ;; Not from here: the filter is still reading this buffer's lines.
+      ;; Emacs runs timers before it reads another process, so the
+      ;; connection found has this name still when this runs.
       (run-at-time 0 nil #'tmux-control--give-way (current-buffer) name)
     (tmux-control--follow-session-rename name)))
 
 (defun tmux-control--give-way (buffer session)
   "Close the connection in BUFFER, for the live one to SESSION on its server.
 That one keeps its screen, scrollback and windows.  A window showing
-BUFFER shows SESSION instead."
+BUFFER or one of its render buffers shows SESSION instead: a window
+switch tmux reported as it attached swaps a render buffer in."
   (when (buffer-live-p buffer)
     (let ((host (buffer-local-value 'tmux-control--host buffer))
           (socket (buffer-local-value 'tmux-control--socket-name buffer)))
-      (dolist (window (get-buffer-window-list buffer nil t))
-        (with-selected-window window
-          (tmux-control--connect-or-switch host socket session)))
+      (dolist (shown (cons buffer (mapcar #'cdr (buffer-local-value
+                                                 'tmux-control--window-buffers
+                                                 buffer))))
+        (dolist (window (get-buffer-window-list shown nil t))
+          (with-selected-window window
+            (tmux-control--connect-or-switch host socket session))))
       (let ((kill-buffer-query-functions nil))
         (kill-buffer buffer))
       (tmux-control--schedule-reflock)

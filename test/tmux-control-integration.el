@@ -1755,6 +1755,40 @@ attaching the session twice, and a reconnect finds the session."
         (kill-buffer controller))
       (tmux-control-it--tmux-ok "kill-server"))))
 
+(ert-deftest tmux-control-it-giving-way-after-a-window-switch ()
+  "A window switch heard with the attach doesn't cost the window its session.
+The switch showed a render buffer in the second connection's place, so
+closing that connection found no window to give the session to."
+  (skip-unless (tmux-control-it--available-p))
+  (tmux-control-it--tmux-ok "kill-server")
+  (let* ((tmux-control-auto-reconnect nil)
+         (controller (tmux-control-connect nil tmux-control-it--socket "my_proj"))
+         (elsewhere (get-buffer-create "*tc-it-elsewhere*")))
+    (unwind-protect
+        (progn
+          (should (tmux-control-it--ready controller))
+          (tmux-control-it--tmux "new-window" "-d" "-t" "my_proj")
+          (delete-other-windows)
+          (switch-to-buffer elsewhere)
+          (bury-buffer controller)
+          (let ((again (tmux-control-connect nil tmux-control-it--socket "my.proj")))
+            ;; While Emacs reads nothing, tmux attaches this connection and
+            ;; another client switches window: one read brings both.
+            (call-process "sleep" nil nil nil "0.5")
+            (tmux-control-it--tmux "next-window" "-t" "my_proj")
+            (should (tmux-control-it--pump-until
+                     5 (lambda () (not (buffer-live-p again))))))
+          (should (tmux-control-it--pump-until
+                   5 (lambda ()
+                       (eq (with-current-buffer (window-buffer (selected-window))
+                             (tmux-control--wb-controller))
+                           controller)))))
+      (kill-buffer elsewhere)
+      (when (buffer-live-p controller)
+        (with-current-buffer controller (ignore-errors (tmux-control-disconnect)))
+        (kill-buffer controller))
+      (tmux-control-it--tmux-ok "kill-server"))))
+
 (ert-deftest tmux-control-it-moved-client-keeps-its-sessions-name ()
   "A client moved to another session isn't that session under a new name.
 Its buffers still hold the old session's panes, so they go on being named
