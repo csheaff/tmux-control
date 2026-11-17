@@ -8609,37 +8609,59 @@ must not cause the following literal digits to be decoded again."
   "Return non-nil when CHAR is an octal digit."
   (and (<= ?0 char) (<= char ?7)))
 
+(defun tmux-control--screen-text-end ()
+  "Return where the terminal screen's last text ends, if it is to stay in view.
+Return nil for an alternate screen or a tiled pane.  Those show from
+their first row (see `tmux-control--anchor-windows-to-screen-top'), so
+what does not fit runs off the bottom.  Elsewhere Eat's sync cuts it
+from the top, and `tmux-control--keep-cursor-visible' does the same for
+a window that sync left alone."
+  (unless (or (tmux-control--tiled-mode-p) (tmux-control--alt-screen-p))
+    (save-excursion
+      (goto-char (tmux-control--term-end))
+      (skip-chars-backward " \t\n")
+      (point))))
+
 (defun tmux-control--keep-cursor-visible (windows)
-  "Ensure the terminal cursor line is fully visible in WINDOWS.
+  "Ensure the terminal cursor line and the text under it fit in WINDOWS.
 Eat positions the view by counting screen lines, but tall glyphs
 \(e.g. a prompt ornament rendered with a fallback font) make some
 rows exceed the default line height, so the line-counted view can
 overflow the window body in pixels and clip the active bottom row.
 Pull the window start forward by pixels until the cursor line fits,
-keeping the live terminal bottom in view.  The start never advances
-onto the cursor's own line, so the view can never go blank.  WINDOWS
-are the live-following windows Eat just synchronized; scrollback
-windows are excluded so they are not yanked to the bottom."
-  (dolist (window windows)
-    (when (windowp window)
-      (let* ((body (window-body-height window t))
-             (cursor (window-point window))
-             (line-end (save-excursion (goto-char cursor)
-                                       (line-end-position)))
-             (start (window-start window))
-             (guard 0))
-        (while (and (< guard 256)
-                    (< start line-end)
-                    (> (cdr (window-text-pixel-size window start line-end))
-                       body))
-          (setq start (save-excursion (goto-char start)
-                                      (forward-line 1)
-                                      (point)))
-          (setq guard (1+ guard)))
-        ;; Setting even the same start makes the next redisplay lay the
-        ;; whole window out again.
-        (unless (= start (window-start window))
-          (set-window-start window start t))))))
+keeping the live terminal bottom in view.  A TUI can keep its cursor
+above its last rows, as on an input row over a status line, so the
+last text on the screen has to fit too, where it counts: see
+`tmux-control--screen-text-end'.  The cursor can sit below that text,
+on a blank row, so the fit is measured to whichever comes last.  The
+start never advances past the start of the cursor's line, so the
+cursor stays in view and the view can never go blank.  WINDOWS are the
+live-following windows Eat just synchronized; scrollback windows are
+excluded so they are not yanked to the bottom."
+  (let ((text-end (tmux-control--screen-text-end)))
+    (dolist (window windows)
+      (when (windowp window)
+        (let* ((body (window-body-height window t))
+               (cursor (window-point window))
+               (row (save-excursion (goto-char cursor)
+                                    (line-beginning-position)))
+               (end (max (or text-end 0)
+                         (save-excursion (goto-char cursor)
+                                         (line-end-position))))
+               (start (window-start window))
+               (guard 0))
+          (while (and (< guard 256)
+                      (< start row)
+                      (> (cdr (window-text-pixel-size window start end))
+                         body))
+            (setq start (save-excursion (goto-char start)
+                                        (forward-line 1)
+                                        (point)))
+            (setq guard (1+ guard)))
+          ;; Setting even the same start makes the next redisplay lay the
+          ;; whole window out again.
+          (unless (= start (window-start window))
+            (set-window-start window start t)))))))
 
 (defvar tmux-control--suppress-responses nil
   "When non-nil, drop terminal replies Eat would send back to the pane.
