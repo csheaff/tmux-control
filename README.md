@@ -3,6 +3,20 @@
 [![CI](https://github.com/csheaff/tmux-control/actions/workflows/ci.yml/badge.svg)](https://github.com/csheaff/tmux-control/actions/workflows/ci.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/csheaff/tmux-control/badge)](https://scorecard.dev/viewer/?uri=github.com/csheaff/tmux-control)
 
+> [!IMPORTANT]
+> **tmux-control is no longer developed.** 0.8.4 is its last release, and
+> the repository is archived. It still works with Eat 0.9.4 and tmux 3.x,
+> but Eat, which draws its panes, has had no upstream commits since February
+> 2025, so nobody is fixing problems on either side.
+>
+> If you use [Ghostel](https://github.com/dakra/ghostel), try
+> [ghostel-tmux](https://github.com/dakra/ghostel-tmux), a control-mode
+> client by Ghostel's author that is being developed. You are welcome to
+> fork this one. Parts that may be worth carrying elsewhere: reconnecting
+> after a dropped connection, `pause-after` flow control for busy panes, and
+> the VT oracle (`test/vt-oracle.py`), which checks an emulator's screen
+> against tmux's own.
+
 `tmux-control` turns Emacs into a **control-mode client for a tmux pane** —
 the [iTerm2 tmux-integration](https://iterm2.com/documentation-tmux-integration.html)
 idea, but in Emacs.
@@ -142,8 +156,7 @@ screen and clears the glitch instantly.  Drift comes from places where Eat's
 terminal emulation departs from tmux's.  tmux-control corrects several of them
 (see `tmux-control-correct-emulation`); `make test-vt-oracle` checks those
 against tmux and tracks the ones still open, mostly tab stops, emoji and other
-wide or combined characters.  If drift keeps happening, please open an issue
-with the program and what you did.
+wide or combined characters.
 
 **Switching to a window always heals it**: a window's buffer keeps streaming
 while you are looking at another one, so it can accumulate that drift in the

@@ -1,17 +1,10 @@
 # Security policy
 
-## Reporting a vulnerability
+## Status
 
-Please report security issues **privately** via GitHub's
-[**Report a vulnerability**](https://github.com/csheaff/tmux-control/security/advisories/new)
-button on the repository's Security tab (private vulnerability reporting),
-rather than opening a public issue. This is a single-maintainer project, so
-response is best-effort, but security reports are prioritized.
-
-## Supported versions
-
-`tmux-control` is a rolling single-file package; fixes land on the `main`
-branch. Please test against `main` before reporting.
+`tmux-control` is no longer maintained, and its repository is archived. No
+version is supported, and security issues will not be fixed here. If you
+depend on it, fix them in a fork; the threat model below says where to look.
 
 ## Threat model / what to look for
 
@@ -34,10 +27,4 @@ attacker could influence — and therefore the areas most worth scrutiny — are
 
 If you find a way for any of the above to achieve code execution, command
 injection, unsafe file access, data exfiltration, or a crash/hang of Emacs,
-that is in scope — please report it.
-
-## Automated checks
-
-This repository runs Dependabot (GitHub Actions supply chain), CodeQL on its
-workflows for every pull request, and OpenSSF Scorecard, and has GitHub secret
-scanning with push protection enabled.
+that is in scope.
