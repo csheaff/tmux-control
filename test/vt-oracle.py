@@ -408,13 +408,18 @@ def cmd_corpus(args):
                    and not line.lstrip().startswith("//")]
     cases = [(*parse_size(e["size"]), e["input"].encode()) for e in entries]
     results = compare(cases)
+    # Some tmux builds draw a case differently: "expect_by_tmux" maps a
+    # `tmux -V' line to the expectation for that build.
+    version = subprocess.run(["tmux", "-V"], capture_output=True,
+                             text=True).stdout.strip()
     regressions, stale, known = [], [], 0
     for entry, (diff, t, e) in zip(entries, results):
-        if entry["expect"] == "match" and diff:
+        expect = entry.get("expect_by_tmux", {}).get(version, entry["expect"])
+        if expect == "match" and diff:
             regressions.append((entry, diff, t, e))
-        elif entry["expect"] == "diverge" and not diff:
+        elif expect == "diverge" and not diff:
             stale.append(entry)
-        elif entry["expect"] == "diverge":
+        elif expect == "diverge":
             known += 1
     for entry, diff, t, e in regressions:
         w, h = parse_size(entry["size"])
@@ -422,7 +427,8 @@ def cmd_corpus(args):
         show(w, h, t, e)
     for entry in stale:
         print(f"NOW MATCHES {entry['name']}: mark it \"expect\": \"match\"")
-    print(f"{len(entries)} cases: {len(entries) - known - len(regressions) - len(stale)} "
+    print(f"{version}, {len(entries)} cases: "
+          f"{len(entries) - known - len(regressions) - len(stale)} "
           f"match, {known} known divergences, {len(regressions)} regressions, "
           f"{len(stale)} newly matching")
     return 1 if regressions or stale else 0
