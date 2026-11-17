@@ -7461,22 +7461,28 @@ Return the window."
         (should (looking-at-p "\\[tmux-control\\] connection lost"))
         (eat-term-delete tmux-control--terminal)))))
 
+(defmacro tmux-control-test--with-tall-rows (&rest body)
+  "Run BODY with each row starting TALL measuring two lines high.
+Batch Emacs draws every line a pixel high, whatever its glyphs, so a
+row of tall fallback glyphs is only ever a measurement here."
+  (declare (indent 0))
+  `(let ((pixel-size (symbol-function 'window-text-pixel-size)))
+     (cl-letf (((symbol-function 'window-text-pixel-size)
+                (lambda (window from to &rest args)
+                  (let ((size (apply pixel-size window from to args)))
+                    (cons (car size)
+                          (+ (cdr size)
+                             (how-many "^TALL" from
+                                       (if (eq to t) (point-max) to))))))))
+       ,@body)))
+
 (ert-deftest tmux-control-test-drop-measures-tall-rows ()
   ;; Counted in lines, the note fits under a screen whose bottom row was
   ;; blank; a row of tall fallback glyphs leaves it clipped all the same.
-  ;; Batch Emacs draws every line a pixel high, so the first row is made
-  ;; two high here.
   (save-window-excursion
     (with-temp-buffer
-      (let ((rows (floor (window-screen-lines)))
-            (pixel-size (symbol-function 'window-text-pixel-size)))
-        (cl-letf (((symbol-function 'window-text-pixel-size)
-                   (lambda (window from to &rest args)
-                     (let ((size (apply pixel-size window from to args)))
-                       (cons (car size)
-                             (+ (cdr size)
-                                (how-many "^TALL" from
-                                          (if (eq to t) (point-max) to))))))))
+      (let ((rows (floor (window-screen-lines))))
+        (tmux-control-test--with-tall-rows
           (let ((window (tmux-control-test--drop
                          (concat "TALL\r\n" (tmux-control-test--rows (- rows 2))
                                  "\r\n" (format "\e[%d;1H" (1- rows))))))
@@ -7484,6 +7490,106 @@ Return the window."
             (should (looking-at-p "R1$"))
             (forward-line (- rows 2))
             (should (looking-at-p "\\[tmux-control\\] connection lost"))))
+        (eat-term-delete tmux-control--terminal)))))
+
+(defun tmux-control-test--full-screen (&optional prelude)
+  "Fill a screen as high as the selected window, shown from its top.
+Eat's sync would leave the window there.  PRELUDE is output to draw
+first.  Return the window."
+  (let ((window (selected-window))
+        (rows (floor (window-screen-lines))))
+    (switch-to-buffer (current-buffer))
+    (tmux-control--reset-buffer)
+    (eat-term-resize tmux-control--terminal 40 rows)
+    (tmux-control--write-terminal
+     (concat prelude (tmux-control-test--rows rows)))
+    (set-window-start window (eat-term-display-beginning tmux-control--terminal))
+    (set-window-point window (eat-term-display-cursor tmux-control--terminal))
+    window))
+
+(defun tmux-control-test--draw (window output)
+  "Draw OUTPUT on the terminal WINDOW follows."
+  (tmux-control--feed-terminal output)
+  (tmux-control--flush-display (list window)))
+
+(defun tmux-control-test--tall-status-rows (rows)
+  "Return output that makes the last two of ROWS rows tall status rows.
+The cursor ends on the input row above them."
+  (format "\e[%d;1H\e[2KTALL a\e[%d;1H\e[2KTALL b\e[%d;1H"
+          (1- rows) rows (- rows 2)))
+
+(ert-deftest tmux-control-test-tall-rows-under-the-cursor-stay-in-view ()
+  ;; A TUI keeps its cursor on an input row with status rows under it.
+  ;; Eat's sync fits such a screen, but it leaves a settled window alone,
+  ;; and measured to the cursor's line the window fit: the screen's last
+  ;; rows were cut off at the window's bottom edge.
+  (save-window-excursion
+    (with-temp-buffer
+      (tmux-control-test--with-tall-rows
+        (let ((window (tmux-control-test--full-screen))
+              (rows (floor (window-screen-lines))))
+          (tmux-control-test--draw
+           window (tmux-control-test--tall-status-rows rows))
+          (should (= (window-point window)
+                     (eat-term-display-cursor tmux-control--terminal)))
+          (should (<= (cdr (window-text-pixel-size window (window-start window) t))
+                      (window-body-height window t)))
+          ;; Two rows too many: the screen loses its two oldest.
+          (goto-char (window-start window))
+          (should (looking-at-p "R3$"))))
+      (eat-term-delete tmux-control--terminal))))
+
+(ert-deftest tmux-control-test-tall-rows-measure-down-to-a-lower-cursor ()
+  ;; The cursor can sit below the last text, with a blank row between.
+  ;; The text fits here; the rows down to the cursor do not.
+  (save-window-excursion
+    (with-temp-buffer
+      (tmux-control-test--with-tall-rows
+        (let ((window (tmux-control-test--full-screen))
+              (rows (floor (window-screen-lines))))
+          (tmux-control-test--draw
+           window (format "\e[1;1H\e[2KTALL\e[2;1H\e[2KTALL\e[%d;1H\e[2K\e[%d;1H\e[2K"
+                          (1- rows) rows))
+          ;; One row too many: the screen loses its first.
+          (should (= (line-number-at-pos (window-start window))
+                     (1+ (line-number-at-pos
+                          (eat-term-display-beginning tmux-control--terminal)))))))
+      (eat-term-delete tmux-control--terminal))))
+
+(ert-deftest tmux-control-test-tall-rows-never-push-the-cursor-out ()
+  ;; With the cursor near the top of a screen that cannot fit, the rows
+  ;; under it give way: the window stops at the cursor's line.
+  (save-window-excursion
+    (with-temp-buffer
+      (tmux-control-test--with-tall-rows
+        (let ((window (tmux-control-test--full-screen))
+              (rows (floor (window-screen-lines))))
+          (tmux-control-test--draw
+           window (concat (mapconcat (lambda (row)
+                                       (format "\e[%d;1H\e[2KTALL" row))
+                                     (number-sequence 4 rows) "")
+                          "\e[3;1H"))
+          (should (= (window-start window)
+                     (save-excursion
+                       (goto-char (eat-term-display-cursor tmux-control--terminal))
+                       (line-beginning-position))))))
+      (eat-term-delete tmux-control--terminal))))
+
+(ert-deftest tmux-control-test-tall-rows-leave-an-anchored-screen-at-its-top ()
+  ;; An alternate screen and a tiled pane show from their first row, a
+  ;; full-screen TUI's header, and what does not fit runs off the bottom.
+  (save-window-excursion
+    (dolist (tiled '(nil t))
+      (with-temp-buffer
+        (tmux-control-test--with-tall-rows
+          (let ((window (tmux-control-test--full-screen
+                         (unless tiled "\e[?1049h\e[H")))
+                (rows (floor (window-screen-lines))))
+            (setq-local tmux-control--tiled tiled)
+            (tmux-control-test--draw
+             window (tmux-control-test--tall-status-rows rows))
+            (should (= (window-start window)
+                       (eat-term-display-beginning tmux-control--terminal)))))
         (eat-term-delete tmux-control--terminal)))))
 
 (ert-deftest tmux-control-test-drop-undoes-the-echo-areas-recenter ()
