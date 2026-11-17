@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026  Clay Sheaff
 
 ;; Author: Clay Sheaff
-;; Version: 0.8.3
+;; Version: 0.8.4
 ;; Package-Requires: ((emacs "29.1") (eat "0.9.4"))
 ;; Keywords: terminals, tmux
 ;; URL: https://github.com/csheaff/tmux-control
@@ -24,6 +24,9 @@
 
 ;;; Commentary:
 
+;; tmux-control is no longer developed: 0.8.4 is its last release.  The
+;; README at the URL above names an alternative.
+;;
 ;; tmux-control turns Emacs into a control-mode client for a tmux pane --
 ;; the iTerm2 tmux-integration idea, but in Emacs.  Rather than running
 ;; tmux inside a terminal buffer (where it dies with the frame), it speaks
@@ -42,8 +45,7 @@
 ;; build.  vterm and term.el are both tied to a process they own and do not
 ;; fit this "render an external stream" model -- and vterm needs a compiled C
 ;; module besides.  The trade-off: Eat is a quiet single-maintainer project,
-;; so tmux-control stays ready to pin or fork it and carries its own
-;; resilience for emulator quirks -- e.g. `tmux-control-clear-and-repaint',
+;; so tmux-control carries its own resilience for emulator quirks -- e.g. `tmux-control-clear-and-repaint',
 ;; which reseeds the view from `capture-pane' (see
 ;; https://codeberg.org/akib/emacs-eat/issues/263 for one such quirk).
 ;;
@@ -59,7 +61,7 @@
 (require 'subr-x)
 (require 'ucs-normalize)
 
-(defconst tmux-control-version "0.8.3"
+(defconst tmux-control-version "0.8.4"
   "Version of tmux-control, included in diagnostic reports.")
 
 ;; Optional: `consult' drives the per-candidate preview for the `inline'
