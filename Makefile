@@ -72,9 +72,13 @@ test-scroll-trace:
 # environment-dependent, so kept out of the default `make test'.
 #
 #   make test-integration
+#
+# SIGPIPE is ignored because a batch Emacs 32 leaves it fatal: writing to a tmux
+# client that has just gone would kill Emacs, where an interactive one gets an
+# error for tmux-control to handle.  That error is what these should exercise.
 .PHONY: test-integration
 test-integration:
-	$(EMACS) -Q --batch \
+	trap '' PIPE; $(EMACS) -Q --batch \
 	  -L "$(EAT_DIR)" -L . \
 	  -l tmux-control.el \
 	  -l test/tmux-control-integration.el \
