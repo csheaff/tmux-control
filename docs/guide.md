@@ -927,7 +927,9 @@ compares the screen text and cursor.  `test/vt-corpus.jsonl` holds everyday
 output that must match, plus minimized repros of known Eat divergences
 (marked `"expect": "diverge"`, each with a note).  The run fails on a
 regression, and also when a known divergence starts matching, so its entry
-gets flipped to `"match"`:
+gets flipped to `"match"`.  A case that some tmux build draws differently
+also has `"expect_by_tmux"`, which maps that build's `tmux -V` line (such as
+`"tmux 3.6"`) to its own expectation:
 
 ```sh
 make test-vt-oracle
